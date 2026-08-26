@@ -20,6 +20,8 @@ Riscrittura minimale, in Python, dell'idea alla base di KlamAV 0.22
   disponibile, dato che l'operazione richiede privilegi di root.
 - GUI, solo per l'integrazione col menu contestuale di Dolphin:
   un ambiente KDE Plasma con `kbuildsycoca5`/`kbuildsycoca6`.
+- Sviluppo/test: `pytest` (vedi `requirements-dev.txt`), non richiesto
+  a runtime.
 
 ## Setup del venv (solo per la GUI)
 
@@ -139,8 +141,18 @@ stati semantici come "infetto"). È organizzata in sette sezioni:
   cartella osservata viene creato o modificato, la scansione parte
   dopo un debounce di 3 secondi (per non scansionare un file ancora in
   fase di scrittura) e i file infetti vengono **sempre** messi in
-  quarantena automaticamente, indipendentemente dall'impostazione di
-  quarantena automatica della pagina Scansione.
+  quarantena automaticamente, a differenza della pagina Scansione dove
+  di default è manuale.
+
+  **Scelta di design intenzionale**, non un'incoerenza: le cartelle
+  monitorate in Real-Time sono tipicamente destinazioni di file appena
+  scaricati/ricevuti da fuori (es. `~/Scaricati`), non file già
+  presenti da tempo sul sistema — il rischio di un falso positivo su
+  un file "nuovo" e ancora non toccato da nessuno è basso, quindi ha
+  senso agire subito. La pagina Scansione, invece, può essere puntata
+  su cartelle con file di sistema o dati importanti, dove un falso
+  positivo va verificato prima di spostare qualcosa: da qui la
+  quarantena manuale di default.
 
 - **Pianificazione** — scansione automatica ricorrente (ogni N ore o
   giorni) su una cartella a scelta, tramite un `QTimer` interno.
@@ -206,37 +218,57 @@ disabilitato, rimuove il file.
   della posta, oggi ha più senso lato server (milter) che lato client
   KMail/Evolution come faceva `klammail`.
 
-## Problemi noti (audit)
+## Problemi noti (audit) — stato
 
-Punti emersi rileggendo l'intero codice dopo le ultime modifiche, non
-ancora risolti:
+Punti emersi rileggendo l'intero codice dopo le ultime modifiche.
 
-- **Avvio potenzialmente bloccante.** `MainWindow.__init__` chiama
-  `ClamdClient.ping()` in modo sincrono sul thread della UI prima di
-  mostrare la finestra. Il timeout di default del client è 30s: se il
-  socket esiste ma clamd non risponde (demone appeso, non solo
-  assente), la finestra resta congelata fino al timeout invece di
-  apparire subito con un avviso. Andrebbe spostato in un `QThread`
-  come le altre operazioni di rete.
-- **Quoting nel file `.desktop` di Dolphin.** `Exec=sh -c '... --scan-target "%f"'`
-  fa passare il percorso attraverso una shell prima di raggiungere
-  Python: un nome di file con `"`, `` ` `` o `$` può rompere il
-  quoting. Da valutare la rimozione di `sh -c` a favore di
-  `Exec=<python> -m klamav_py.gui.app --scan-target %f` diretto, dato
-  che è proprio il tipo di problema (shell injection via percorso
-  file) che il progetto dichiara di aver eliminato rispetto a klamav
-  0.22.
-- **Quarantena automatica sempre attiva nel Real-Time**,
-  indipendentemente dalla casella "quarantena automatica" della pagina
-  Scansione — comportamento intenzionale probabile, ma oggi non
-  configurabile né segnalato in UI: da confermare esplicitamente.
-- **`_manage_autostart()` non gestisce eccezioni**: un errore di
-  permessi scrivendo in `~/.config/autostart/` propaga un traceback
-  invece di un messaggio d'errore in `SettingsPage`.
-- **Import inutilizzato** in `gui/scan_worker.py` (`ScanResult`, mai
-  referenziato nel modulo).
-- **Nessun test automatico** nel repository, né per il livello
-  protocollo (`clamd_client.py`, `quarantine.py`) né per la GUI.
+**Corretti:**
+
+- **Avvio non più bloccante.** Il ping a clamd all'apertura della
+  finestra ora gira in un `QThread` dedicato (`gui/ping_worker.py`,
+  `PingWorker`) invece che in modo sincrono nel thread della UI: la
+  finestra appare subito, l'eventuale avviso "clamd non raggiungibile"
+  arriva in modo asincrono quando il ping risponde (o va in timeout).
+- **Quoting nel file `.desktop` di Dolphin.** Rimosso il wrapper
+  `sh -c '... "%f"'`: ora `Exec=` invoca direttamente l'interprete
+  Python con `%f` come argomento, senza passare da una shell
+  intermedia. Elimina il rischio che un nome file con `"`, `` ` `` o
+  `$` rompa il quoting — esattamente il tipo di problema che il
+  progetto dichiara di aver eliminato rispetto a klamav 0.22.
+- **Gestione errori in `_manage_autostart()`.** Ora ritorna
+  `(successo, messaggio_errore)` invece di sollevare un'eccezione non
+  gestita: se la scrittura in `~/.config/autostart/` fallisce (es. per
+  permessi), `SettingsPage` mostra un avviso invece di un traceback.
+- **Import inutilizzato** in `gui/scan_worker.py` (`ScanResult`)
+  rimosso; verificato con `pyflakes` che non ce ne siano altri.
+- **Test automatici aggiunti** in `tests/` (pytest) per la parte di
+  logica pura, senza dipendenze da clamd o da Qt: parsing delle
+  risposte del protocollo clamd (`test_clamd_client.py`), gestione
+  della quarantena su filesystem temporaneo (`test_quarantine.py`) e
+  parsing/raggruppamento errori della CLI (`test_cli.py`). Si lanciano
+  dentro il venv (vedi "Setup del venv" più sopra):
+
+  ```bash
+  cd klamav-py
+  python3 -m venv venv        # se non l'hai già creato
+  source venv/bin/activate
+  pip install -r requirements-dev.txt
+  python3 -m pytest tests/
+  ```
+
+  Su distribuzioni con Python "externally managed" (Debian/Ubuntu
+  recenti, PEP 668), `pip install -r requirements-dev.txt` **fuori**
+  da un venv fallisce con `externally-managed-environment`: è il
+  comportamento atteso del sistema, non un problema di questo
+  progetto — usa il venv come sopra, non `--break-system-packages`.
+
+  La GUI (widget PySide6, worker `QThread`) non è ancora coperta da
+  test automatici: richiederebbe `pytest-qt` o un mocking più
+  strutturato di `ClamdClient`, valutabile come prossimo passo.
+
+**Non un problema — comportamento confermato intenzionale:** la
+quarantena sempre automatica nella sezione Real-Time (vedi la nota
+nella descrizione della sezione più sopra).
 
 Nessun problema di sicurezza rilevato in `clamd_client.py`, `cli.py` o
 `update_worker.py`: quest'ultimo passa a `pkexec sh -c` una stringa di
