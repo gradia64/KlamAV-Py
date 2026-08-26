@@ -44,10 +44,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..clamd_client import ClamdClient, ScanResult
+from ..clamd_client import ScanResult
 from ..quarantine import Quarantine
 from .scan_worker import ScanWorker
 from .update_worker import UpdateWorker
+from .ping_worker import PingWorker
 
 DEFAULT_SOCKET = "/run/clamav/clamd.ctl"
 DEFAULT_QUARANTINE_DIR = Path.home() / ".local/share/klamav-py/quarantine"
@@ -1044,7 +1045,7 @@ Path={project_root}
 [Desktop Action scanWithKlamAV]
 Name=Scansiona con KlamAV-Py
 Icon=edit-find
-Exec=sh -c '{python_exec} -m klamav_py.gui.app --scan-target "%f"'
+Exec={python_exec} -m klamav_py.gui.app --scan-target %f
 """
             for d in dirs:
                 d.mkdir(parents=True, exist_ok=True)
@@ -1255,20 +1256,34 @@ class MainWindow(QMainWindow):
         self._load_schedule()
 
         autostart_enabled = self.settings.value("autostart_system", False, type=bool)
-        self._manage_autostart(autostart_enabled)
+        autostart_ok, autostart_error = self._manage_autostart(autostart_enabled)
 
-        QMessageBox.information(self, "Impostazioni Aggiornate", "Le nuove impostazioni sono state applicate.")
+        if autostart_ok:
+            QMessageBox.information(self, "Impostazioni Aggiornate", "Le nuove impostazioni sono state applicate.")
+        else:
+            QMessageBox.warning(
+                self,
+                "Impostazioni Aggiornate (parzialmente)",
+                "Le impostazioni sono state salvate, ma non è stato possibile "
+                f"aggiornare l'avvio automatico:\n{autostart_error}",
+            )
 
-    def _manage_autostart(self, enabled: bool) -> None:
-        autostart_dir = Path.home() / ".config" / "autostart"
-        autostart_dir.mkdir(parents=True, exist_ok=True)
-        desktop_file = autostart_dir / "klamav-py.desktop"
+    def _manage_autostart(self, enabled: bool) -> tuple[bool, str | None]:
+        """
+        Ritorna (successo, messaggio_errore). Non solleva mai: un errore
+        di permessi scrivendo in ~/.config/autostart/ va segnalato
+        all'utente da _on_settings_saved, non propagato come traceback.
+        """
+        try:
+            autostart_dir = Path.home() / ".config" / "autostart"
+            autostart_dir.mkdir(parents=True, exist_ok=True)
+            desktop_file = autostart_dir / "klamav-py.desktop"
 
-        if enabled:
-            project_root = Path(__file__).parent.parent.parent
-            python_exec = sys.executable
+            if enabled:
+                project_root = Path(__file__).parent.parent.parent
+                python_exec = sys.executable
 
-            content = f"""[Desktop Entry]
+                content = f"""[Desktop Entry]
 Name=KlamAV
 Comment=Antivirus frontend for ClamAV
 Exec={python_exec} -m klamav_py.gui.app
@@ -1278,10 +1293,13 @@ Type=Application
 Terminal=false
 X-GNOME-Autostart-enabled=true
 """
-            desktop_file.write_text(content)
-        else:
-            if desktop_file.exists():
-                desktop_file.unlink()
+                desktop_file.write_text(content)
+            else:
+                if desktop_file.exists():
+                    desktop_file.unlink()
+            return True, None
+        except OSError as exc:
+            return False, str(exc)
 
     def _on_schedule_saved(self) -> None:
         self._load_schedule()
@@ -1428,11 +1446,20 @@ X-GNOME-Autostart-enabled=true
         self._process_realtime_queue()
 
     def _check_clamd(self, socket_path: str) -> None:
-        client = ClamdClient(unix_socket=socket_path)
-        try:
-            alive = client.ping()
-        except OSError:
-            alive = False
+        """
+        Verifica che clamd risponda, ma senza mai bloccare l'avvio della
+        finestra: il ping gira in un QThread separato (PingWorker) e
+        l'eventuale avviso arriva in modo asincrono. Un ping sincrono qui
+        potrebbe restare appeso fino a 30s se il socket esiste ma clamd
+        non risponde.
+        """
+        self._ping_worker = PingWorker(socket_path, self)
+        self._ping_worker.result_ready.connect(
+            lambda alive: self._on_ping_result(socket_path, alive)
+        )
+        self._ping_worker.start()
+
+    def _on_ping_result(self, socket_path: str, alive: bool) -> None:
         if not alive:
             QMessageBox.warning(
                 self,
@@ -1440,3 +1467,4 @@ X-GNOME-Autostart-enabled=true
                 f"Non riesco a contattare clamd su {socket_path}.\n"
                 "Verifica che il servizio clamav-daemon sia attivo.",
             )
+        self._ping_worker = None
