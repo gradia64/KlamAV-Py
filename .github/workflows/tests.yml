@@ -1,0 +1,34 @@
+name: Test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # I test coprono solo klamav_py.clamd_client, klamav_py.quarantine
+        # e klamav_py.cli (nessuna dipendenza da PySide6/GUI), quindi qui
+        # non installiamo requirements.txt: risparmia tempo di CI evitando
+        # di compilare/scaricare Qt per ogni run.
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout del repository
+        uses: actions/checkout@v4
+
+      - name: Imposta Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Installa pytest
+        run: pip install pytest
+
+      - name: Esegui la suite di test
+        run: python -m pytest tests/ -v
