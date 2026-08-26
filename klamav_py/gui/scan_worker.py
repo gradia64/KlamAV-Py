@@ -14,7 +14,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from ..clamd_client import ClamdClient, ClamdError, ScanResult
+from ..clamd_client import ClamdClient, ClamdError
 from ..quarantine import Quarantine
 
 
