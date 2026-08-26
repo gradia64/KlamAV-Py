@@ -1,0 +1,20 @@
+[Unit]
+Description=Scansione ClamAV via klamav-py
+After=clamav-daemon.service
+Requires=clamav-daemon.service
+
+[Service]
+Type=oneshot
+# Adatta percorso e directory di quarantena al tuo caso.
+ExecStart=/opt/klamav-py/venv/bin/klamav-py scan /home --quarantine /var/lib/klamav-py/quarantine --quiet
+# Il servizio non deve girare come root: basta che l'utente possa
+# leggere i percorsi da scansionare e scrivere nella directory di
+# quarantena. clamd fa il lavoro pesante come utente clamav.
+User=klamav-py
+Group=klamav-py
+
+# Indurimento di base
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/klamav-py/quarantine
+PrivateTmp=true
