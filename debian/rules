@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+
+export PYBUILD_NAME=klamav_py
+
+%:
+	dh $@ --buildsystem=pybuild --with python3
+
+override_dh_installsystemd:
+	# --no-start sul .service: e' un Type=oneshot innescato dal timer,
+	# non va avviato subito all'installazione/aggiornamento del pacchetto
+	# (altrimenti si scatena una scansione completa di /home a sorpresa).
+	# Il timer invece va abilitato e avviato normalmente.
+	dh_installsystemd --name=klamav-scan --no-start klamav-scan.service
+	dh_installsystemd --name=klamav-scan klamav-scan.timer

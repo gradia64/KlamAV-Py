@@ -1,0 +1,34 @@
+Source: klamav-py
+Section: python
+Priority: optional
+Maintainer: gradia <gradia@disroot.org>
+Build-Depends: debhelper-compat (= 13),
+               dh-python,
+               pybuild-plugin-pyproject,
+               python3-all,
+               python3-setuptools
+Standards-Version: 4.6.2
+Homepage: https://github.com/gradia64/KlamAV-Py
+Rules-Requires-Root: no
+X-Python3-Version: >= 3.10
+
+Package: klamav-py
+Architecture: all
+Depends: ${python3:Depends},
+         ${misc:Depends},
+         python3-pyside6.qtcore,
+         python3-pyside6.qtgui,
+         python3-pyside6.qtwidgets,
+         python3-pyside6.qtnetwork
+Recommends: clamav-daemon, policykit-1
+Description: frontend Python per ClamAV via clamd (CLI + GUI)
+ klamav-py e' un client minimale per il demone clamd di ClamAV,
+ pensato come sostituto moderno e sicuro di klamav 0.22: niente
+ Dazuko/DCOP/Qt3, niente shell injection via KShellProcess (parla col
+ demone via socket nativo, non invoca binari esterni tramite shell).
+ .
+ Il pacchetto include sia la CLI (klamav-py, adatta per l'uso da
+ systemd timer o script, senza dipendenze da Qt) sia la GUI PySide6
+ (klamav-py-gui), con scansione manuale, quarantena, cronologia,
+ aggiornamento database, monitoraggio real-time su cartelle e
+ pianificazione scansioni.

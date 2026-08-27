@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "klamav-py"
+version = "0.1.0"
+description = "Frontend Python minimale per ClamAV via clamd, erede spirituale di KlamAV 0.22"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [
+    { name = "gradia" },
+]
+classifiers = [
+    "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
+
+# La CLI non ha dipendenze esterne di proposito (vedi README): gira
+# anche con il solo Python di sistema, senza dover tirare dentro Qt
+# per un uso da systemd timer/script.
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.5"]
+
+[project.urls]
+Homepage = "https://github.com/gradia64/KlamAV-Py"
+
+# Script CLI: nessuna dipendenza da Qt, installato sempre.
+[project.scripts]
+klamav-py = "klamav_py.cli:main"
+
+# Script GUI: separato per far capire a chi pacchettizza (es. .deb)
+# che questo entry point richiede l'extra "gui" (PySide6). Usare
+# gui-scripts invece di scripts evita che si apra una console dietro
+# la finestra su alcuni sistemi (Windows; su Linux è ininfluente).
+[project.gui-scripts]
+klamav-py-gui = "klamav_py.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["klamav_py*"]
+
+[tool.setuptools.package-data]
+"klamav_py.gui" = ["resources/*.svg"]

@@ -1,0 +1,25 @@
+[Unit]
+Description=Scansione ClamAV via klamav-py
+After=clamav-daemon.service
+Requires=clamav-daemon.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/klamav-py scan /home --quarantine /var/lib/klamav-py/quarantine --quiet
+
+# DynamicUser: systemd crea ed elimina un utente/gruppo transitorio ad
+# ogni esecuzione, invece di richiedere un 'useradd klamav-py' manuale
+# in debian/postinst. StateDirectory=klamav-py fa sì che
+# /var/lib/klamav-py esista, sia di proprietà dell'utente dinamico e
+# sia scrivibile, senza bisogno di un ReadWritePaths= esplicito.
+DynamicUser=yes
+StateDirectory=klamav-py
+
+# Se il socket di clamd non è raggiungibile dall'utente dinamico (verifica
+# con `ls -l /run/clamav/clamd.ctl`: se non è leggibile/scrivibile da
+# "altri", serve il gruppo di sistema di clamd), decommenta:
+#SupplementaryGroups=clamav
+
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true

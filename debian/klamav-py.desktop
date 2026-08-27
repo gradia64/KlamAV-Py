@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=KlamAV
+GenericName=Antivirus
+Comment=Interfaccia grafica per la scansione ClamAV via clamd
+Exec=klamav-py-gui
+Icon=klamav-icon
+Terminal=false
+Categories=System;Security;
+StartupNotify=true
