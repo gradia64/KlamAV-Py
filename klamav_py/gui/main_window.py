@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 import os
+import shutil
 import sys
 import json
 
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -69,6 +72,24 @@ def _icon(*theme_names: str) -> QIcon:
 
 def _app_icon() -> QIcon:
     return _icon("emblem-virus", "security-high", "security-medium")
+
+
+def _gui_relaunch_command() -> str:
+    """
+    Comando da usare in un file .desktop (autostart, integrazione
+    Dolphin) per rilanciare la GUI.
+
+    Preferisce lo script installato dal pacchetto (`klamav-py-gui`,
+    disponibile nel PATH una volta installato via .deb/pip), perché
+    non fa nessuna assunzione sulla posizione del sorgente sul disco.
+    Ricade su "sys.executable -m klamav_py.gui.app" solo per lo
+    sviluppo locale da checkout git con venv attivo, dove lo script
+    entry-point non è nel PATH ma il modulo è comunque importabile.
+    """
+    installed = shutil.which("klamav-py-gui")
+    if installed:
+        return installed
+    return f"{sys.executable} -m klamav_py.gui.app"
 
 
 KDE_STYLESHEET = """
@@ -832,7 +853,31 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         self.settings = QSettings("KlamAV", "KlamAV")
 
-        layout = QVBoxLayout(self)
+        # FIX SOVRAPPOSIZIONE WIDGET: il contenuto della pagina (parecchi
+        # widget a dimensione fissa: QLineEdit/QPushButton alti 36px,
+        # QListWidget alto 120px, testi lunghi nelle checkbox) ha una
+        # dimensione minima naturale piuttosto grande. Qt normalmente non
+        # permette di ridimensionare una finestra sotto questo minimo, ma
+        # non tutti i window manager rispettano rigidamente questo vincolo
+        # durante un ridimensionamento interattivo (trascinando il bordo):
+        # se lo ignorano, la finestra può finire più piccola di quanto i
+        # widget a dimensione fissa richiedano, e senza uno scroll area il
+        # layout li comprime fino a farli sovrapporre invece di restringersi.
+        # Mettendo tutto dentro un QScrollArea, se lo spazio disponibile è
+        # insufficiente compare una scrollbar invece di una sovrapposizione:
+        # non è mai "rotto", nel peggiore dei casi si scorre.
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        outer_layout.addWidget(scroll_area)
+
+        content = QWidget()
+        scroll_area.setWidget(content)
+
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(15)
 
@@ -897,6 +942,7 @@ class SettingsPage(QWidget):
         rt_layout = QVBoxLayout(rt_group)
 
         rt_desc = QLabel("Cartelle monitorate per il controllo in tempo reale:")
+        rt_desc.setWordWrap(True)
         rt_layout.addWidget(rt_desc)
 
         self.rt_dirs_list = QListWidget()
@@ -926,6 +972,7 @@ class SettingsPage(QWidget):
         dolphin_group = QGroupBox("Integrazione File Manager (Dolphin)")
         dolphin_layout = QVBoxLayout(dolphin_group)
         dolphin_desc = QLabel("Aggiunge la voce \"Scansiona con KlamAV\" al menu del tasto destro su file e cartelle.")
+        dolphin_desc.setWordWrap(True)
         dolphin_layout.addWidget(dolphin_desc)
 
         dolphin_btns_row = QHBoxLayout()
@@ -1030,8 +1077,7 @@ class SettingsPage(QWidget):
                 Path.home() / ".local/share/kio/servicemenus"
             ]
             file_name = "klamav_scan.desktop"
-            python_exec = sys.executable
-            project_root = Path(__file__).parent.parent.parent
+            exec_cmd = _gui_relaunch_command()
 
             content = f"""[Desktop Entry]
 Type=Service
@@ -1040,12 +1086,11 @@ Encoding=UTF-8
 MimeType=all/all;inode/directory;
 X-KDE-ServiceTypes=KonqPopupMenuPlugin
 X-KDE-Priority=TopLevel
-Path={project_root}
 
 [Desktop Action scanWithKlamAV]
 Name=Scansiona con KlamAV-Py
 Icon=edit-find
-Exec={python_exec} -m klamav_py.gui.app --scan-target %f
+Exec={exec_cmd} --scan-target %f
 """
             for d in dirs:
                 d.mkdir(parents=True, exist_ok=True)
@@ -1280,14 +1325,12 @@ class MainWindow(QMainWindow):
             desktop_file = autostart_dir / "klamav-py.desktop"
 
             if enabled:
-                project_root = Path(__file__).parent.parent.parent
-                python_exec = sys.executable
+                exec_cmd = _gui_relaunch_command()
 
                 content = f"""[Desktop Entry]
 Name=KlamAV
 Comment=Antivirus frontend for ClamAV
-Exec={python_exec} -m klamav_py.gui.app
-Path={project_root}
+Exec={exec_cmd}
 Icon=emblem-virus
 Type=Application
 Terminal=false
