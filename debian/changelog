@@ -1,3 +1,21 @@
+klamav-py (0.1.1-1) UNRELEASED; urgency=medium
+
+  * Fix: nessun report/notifica esplicito al termine di una scansione
+    manuale; ora mostra un riepilogo (percorso, durata, contatori,
+    esito) e invia sempre la notifica tray, anche a finestra aperta.
+  * Fix: la pagina Quarantena non si aggiornava dopo una quarantena
+    manuale o automatica (pianificata/Real-Time) senza riavviare
+    l'app; ora si aggiorna subito tramite il nuovo segnale
+    ScanWorker.quarantined.
+  * Aggiunto pulsante "Copia log" nella pagina Scansione.
+  * Fix: sfarfallio/ridimensionamento della finestra durante scansioni
+    di grandi dimensioni, causato dall'emissione di un segnale Qt per
+    ogni singolo file scansionato; ora gli aggiornamenti di stato sono
+    limitati a un tick ogni 150ms e il percorso corrente viene troncato
+    a larghezza fissa invece di far crescere il layout ad ogni file.
+
+ -- gradia <gradia@disroot.org>  Thu, 27 Aug 2026 11:14:34 +0000
+
 klamav-py (0.1.0-1) UNRELEASED; urgency=medium
 
   * Initial release.

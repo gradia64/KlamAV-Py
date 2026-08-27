@@ -10,6 +10,7 @@ from datetime import datetime
 import os
 import shutil
 import sys
+import time
 import json
 
 from PySide6.QtCore import Qt, QSize, QSettings, Signal, QTimer, QFileSystemWatcher
@@ -240,6 +241,7 @@ class ScanPage(QWidget):
         self.history = history
         self.worker: ScanWorker | None = None
         self._scanned = self._infections = self._errors = 0
+        self._scan_start_time: float | None = None
 
         self.path_edit = QLineEdit(str(Path.home()))
         self.path_edit.setFixedHeight(36)
@@ -268,9 +270,21 @@ class ScanPage(QWidget):
         self.quarantine_selected_button.setIcon(QIcon.fromTheme("edit-delete"))
         self.quarantine_selected_button.clicked.connect(self._quarantine_selected)
 
+        self.copy_log_button = QPushButton("Copia log")
+        self.copy_log_button.setIcon(QIcon.fromTheme("edit-copy"))
+        self.copy_log_button.clicked.connect(self._copy_log)
+
         self.status_label = QLabel("Pronto.")
         self.status_label.setStyleSheet("font-size: 14px; color: palette(mid);")
         self.status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # FIX SFARFALLIO (BUG-004): il testo completo (con percorso file)
+        # viene salvato qui e mostrato troncato nel mezzo con "…". Senza
+        # elisione, un percorso molto lungo fa crescere il sizeHint della
+        # label e quindi il layout dell'intera pagina ad ogni singolo
+        # aggiornamento, che è una delle cause dello sfarfallio/
+        # ridimensionamento della finestra durante una scansione.
+        self._status_full_text = "Pronto."
+        self._status_max_width = 640
 
         self.counts_label = QLabel("")
         self.counts_label.setStyleSheet("font-size: 12px; color: palette(mid);")
@@ -306,6 +320,7 @@ class ScanPage(QWidget):
         results_buttons_row = QHBoxLayout()
         results_buttons_row.setSpacing(10)
         results_buttons_row.addWidget(self.quarantine_selected_button)
+        results_buttons_row.addWidget(self.copy_log_button)
         results_buttons_row.addStretch()
 
         layout = QVBoxLayout(self)
@@ -345,8 +360,9 @@ class ScanPage(QWidget):
 
         self.results_list.clear()
         self.progress.setVisible(True)
-        self.status_label.setText("Scansione in corso…")
+        self._set_status_text("Scansione in corso…")
         self._scanned = self._infections = self._errors = 0
+        self._scan_start_time = time.monotonic()
         self.counts_label.setText("")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -358,7 +374,9 @@ class ScanPage(QWidget):
             auto_quarantine=self.auto_quarantine_checkbox.isChecked(),
         )
         self.worker.scanning.connect(self._on_scanning)
+        self.worker.progress.connect(self._on_progress)
         self.worker.result_ready.connect(self._on_result)
+        self.worker.quarantined.connect(self._on_quarantined)
         self.worker.error.connect(self._on_error)
         self.worker.finished_scan.connect(self._on_finished)
         self.worker.start()
@@ -366,21 +384,41 @@ class ScanPage(QWidget):
     def _stop_scan(self) -> None:
         if self.worker is not None:
             self.worker.stop()
-            self.status_label.setText("Interruzione richiesta…")
+            self._set_status_text("Interruzione richiesta…")
+
+    def _set_status_text(self, text: str) -> None:
+        """
+        Imposta il testo di stato troncandolo (con elisione nel mezzo) a
+        una larghezza massima fissa, invece di lasciare che un percorso
+        lunghissimo faccia crescere senza limiti il sizeHint della label
+        (vedi commento nel costruttore, BUG-004).
+        """
+        self._status_full_text = text
+        metrics = self.status_label.fontMetrics()
+        elided = metrics.elidedText(text, Qt.ElideMiddle, self._status_max_width)
+        self.status_label.setText(elided)
+        if elided != text:
+            self.status_label.setToolTip(text)
+        else:
+            self.status_label.setToolTip("")
 
     def _on_scanning(self, path: str) -> None:
-        self.status_label.setText(f"Scansione in corso: {path}")
+        self._set_status_text(f"Scansione in corso: {path}")
 
-    def _on_result(self, result: ScanResult) -> None:
-        self._scanned += 1
-        if result.infected:
-            self._infections += 1
-        elif result.status == "ERROR":
-            self._errors += 1
+    def _on_progress(self, scanned: int, infections: int, errors: int) -> None:
+        # Aggiornamento dei contatori, già filtrato/rallentato lato worker
+        # (vedi scan_worker.PROGRESS_THROTTLE_SECONDS): qui ci si limita a
+        # mostrare i valori ricevuti, senza fare altri calcoli.
+        self._scanned = scanned
+        self._infections = infections
+        self._errors = errors
         self.counts_label.setText(
-            f"{self._scanned} scansionati — {self._infections} infetti — {self._errors} errori"
+            f"{scanned} scansionati — {infections} infetti — {errors} errori"
         )
 
+    def _on_result(self, result: ScanResult) -> None:
+        # Il worker filtra già i risultati "puliti": qui arrivano solo
+        # infetti ed errori, quindi ogni result produce sempre una riga.
         if result.infected:
             item = QListWidgetItem(f"INFETTO — {result.path} ({result.signature})")
             item.setIcon(QIcon.fromTheme("emblem-virus"))
@@ -394,10 +432,31 @@ class ScanPage(QWidget):
             self.results_list.addItem(item)
             self.results_list.scrollToBottom()
 
+    def _on_quarantined(self, original_path: str) -> None:
+        # BUG-002: la quarantena automatica durante una scansione (worker
+        # con auto_quarantine=True) avviene su un thread separato e senza
+        # questo segnale la pagina Quarantena non se ne accorgerebbe fino
+        # al riavvio dell'app.
+        main_window = self.window()
+        if hasattr(main_window, "quarantine_page"):
+            main_window.quarantine_page.refresh()
+
     def _on_error(self, message: str) -> None:
         item = QListWidgetItem(f"ERRORE SISTEMA — {message}")
         item.setIcon(QIcon.fromTheme("data-error"))
         self.results_list.addItem(item)
+
+    def _copy_log(self) -> None:
+        """BUG-003: copia negli appunti l'intero contenuto del log/risultati."""
+        lines = [self.results_list.item(i).text() for i in range(self.results_list.count())]
+        if not lines:
+            QMessageBox.information(self, "Log vuoto", "Non c'è ancora nessun risultato da copiare.")
+            return
+        QApplication.clipboard().setText("\n".join(lines))
+        self.status_label.setToolTip("")
+        old_text = self.status_label.text()
+        self.status_label.setText(f"Log copiato negli appunti ({len(lines)} righe).")
+        QTimer.singleShot(2500, lambda: self.status_label.setText(old_text))
 
     def _quarantine_selected(self) -> None:
         selected = self.results_list.selectedItems()
@@ -422,25 +481,80 @@ class ScanPage(QWidget):
             item.setForeground(QColor("gray"))
             item.setData(Qt.UserRole, None)
 
+        if moved:
+            # BUG-002: la quarantena manuale dalla pagina Scansione non
+            # passa dal worker (viene fatta qui, direttamente sul thread
+            # GUI), quindi va notificata a parte rispetto a _on_quarantined.
+            main_window = self.window()
+            if hasattr(main_window, "quarantine_page"):
+                main_window.quarantine_page.refresh()
+
         if skipped and not moved:
             QMessageBox.information(self, "Nessun file infetto selezionato", "La selezione non contiene file infetti da mettere in quarantena.")
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        seconds = int(seconds)
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes, secs = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes}m {secs}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m {secs}s"
 
     def _on_finished(self, scanned: int, infections: int, errors: int) -> None:
         self.progress.setVisible(False)
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
 
+        duration = (
+            self._format_duration(time.monotonic() - self._scan_start_time)
+            if self._scan_start_time is not None
+            else "n/d"
+        )
+
         status_text = f"Completato: {scanned} file scansionati, {infections} infetti, {errors} errori."
-        self.status_label.setText(status_text)
+        self._set_status_text(status_text)
+
+        if infections > 0:
+            esito = "Infezioni rilevate"
+        elif errors > 0:
+            esito = "Completata con errori"
+        else:
+            esito = "Completata senza problemi"
+
+        # BUG-001: report esplicito di fine scansione, non solo un
+        # aggiornamento silenzioso della status_label.
+        report_text = (
+            f"Percorso: {self.path_edit.text()}\n"
+            f"Durata: {duration}\n"
+            f"File scansionati: {scanned}\n"
+            f"File infetti: {infections}\n"
+            f"Errori: {errors}\n"
+            f"Esito: {esito}"
+        )
 
         self.history.add_entry("Manuale", self.path_edit.text(), scanned, infections, errors)
         main_window = self.window()
         if hasattr(main_window, 'history_page'):
             main_window.history_page.refresh()
 
-        if hasattr(main_window, 'tray_icon') and main_window.tray_icon.isVisible():
+        if hasattr(main_window, 'tray_icon'):
             icon_type = "emblem-checked" if infections == 0 else "emblem-virus"
-            main_window.tray_icon.showMessage("KlamAV", status_text, _icon(icon_type), 5000)
+            main_window.tray_icon.showMessage("KlamAV — Scansione completata", status_text, _icon(icon_type), 6000)
+
+        # Il popup esplicito compare solo se la finestra è visibile in
+        # quel momento: se l'app è minimizzata in tray, forzare la
+        # comparsa di un dialogo riporterebbe in primo piano una finestra
+        # che l'utente aveva volutamente nascosto — in quel caso basta e
+        # avanza la notifica tray sopra.
+        if self.isVisible() and self.window().isVisible():
+            report_box = QMessageBox(self)
+            report_box.setIcon(QMessageBox.Warning if infections > 0 else QMessageBox.Information)
+            report_box.setWindowTitle("Scansione completata")
+            report_box.setText(report_text)
+            report_box.exec()
 
         self.worker = None
 
@@ -1379,6 +1493,7 @@ X-GNOME-Autostart-enabled=true
             auto_quarantine=self.settings.value("auto_quarantine", False, type=bool)
         )
         self.bg_worker.finished_scan.connect(self._on_bg_finished)
+        self.bg_worker.quarantined.connect(self._on_quarantine_changed)
         self.bg_worker.start()
 
     def _on_bg_finished(self, scanned: int, infections: int, errors: int) -> None:
@@ -1390,6 +1505,15 @@ X-GNOME-Autostart-enabled=true
         self.history_page.refresh()
 
         self.bg_worker = None
+
+    def _on_quarantine_changed(self, original_path: str) -> None:
+        """
+        BUG-002: la quarantena automatica (pianificata o Real-Time) avviene
+        su un QThread separato; senza questo refresh la pagina Quarantena
+        non se ne accorgerebbe finché l'app non viene riavviata.
+        """
+        if hasattr(self, "quarantine_page"):
+            self.quarantine_page.refresh()
 
     def _load_realtime(self) -> None:
         paths = self.settings.value("realtime_paths", [])
@@ -1469,6 +1593,7 @@ X-GNOME-Autostart-enabled=true
         )
         self.realtime_worker.result_ready.connect(self._on_realtime_result)
         self.realtime_worker.finished_scan.connect(self._on_realtime_finished)
+        self.realtime_worker.quarantined.connect(self._on_quarantine_changed)
         self.realtime_worker.start()
 
     def _on_realtime_result(self, result: ScanResult) -> None:

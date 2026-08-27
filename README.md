@@ -374,6 +374,60 @@ differiscono.
   `pbuilder` che lo ricostruisce da zero in un chroot pulito ad ogni
   push, invece di fare l'unica verifica manuale fatta qui.
 
+## Bug report pre-release 0.1.0 — 4 problemi risolti
+
+Un test reale su Debian Sid / KDE Plasma 6 (scansione della Home,
+oltre 334.000 file, EICAR via scansione manuale e Real-Time) ha
+prodotto un bug report con 4 problemi, tutti corretti:
+
+- **Nessuna notifica/report di fine scansione.** La scansione manuale
+  ora produce, al termine: un riepilogo esplicito con percorso, durata,
+  file scansionati, infetti, errori ed esito, mostrato in un dialogo
+  se la finestra è visibile in quel momento (se l'app è minimizzata in
+  tray non viene forzata in primo piano: basta la notifica tray, già
+  presente ma ora sempre inviata — prima un controllo `isVisible()`
+  sull'icona tray poteva sopprimerla). La durata viene misurata da
+  `time.monotonic()` all'avvio della scansione.
+- **Sezione Quarantena non aggiornata in tempo reale.** Mettere un
+  file in quarantena — manualmente dalla pagina Scansione, o
+  automaticamente da una scansione pianificata/Real-Time — ora
+  aggiorna subito la pagina Quarantena, senza dover riavviare l'app.
+  `ScanWorker` ha un nuovo segnale `quarantined`, emesso subito dopo
+  ogni spostamento riuscito in quarantena e collegato, in tutti e tre
+  i punti che creano un `ScanWorker` (scansione manuale, pianificata,
+  Real-Time), a un refresh della pagina Quarantena.
+- **Impossibile copiare il log della scansione.** Nuovo pulsante
+  "Copia log" nella pagina Scansione, accanto a "Metti in quarantena i
+  selezionati": copia negli appunti di sistema tutte le righe della
+  lista risultati (infetti ed errori).
+- **Sfarfallio/ridimensionamento della finestra durante la scansione.**
+  Causa reale, confermata col codice sorgente: `ScanWorker` emetteva
+  un segnale Qt per **ogni singolo file** scansionato (anche i puliti),
+  aggiornando due `QLabel` a testo dinamico ad ogni file. Su una
+  scansione di 334.000+ file questo significa altrettanti
+  ricalcoli di layout in rapida sequenza — è la causa dello sfarfallio,
+  non un problema di `sizePolicy`/`minimumSize` come inizialmente
+  ipotizzabile. Corretto rallentando lato worker la frequenza di
+  aggiornamento a un tick ogni 150ms (il conteggio interno resta
+  preciso al 100%, cambia solo quanto spesso viene *mostrato*) e
+  troncando con elisione (`…` nel mezzo) il testo "Scansione in corso:
+  ⟨percorso⟩" a una larghezza massima fissa, così un percorso molto
+  lungo non fa più crescere il `sizeHint` della label ad ogni update.
+  I risultati "puliti" non producono più nemmeno un segnale (prima
+  ne veniva emesso uno per ognuno, usato solo per il conteggio):
+  ora `result_ready` viene emesso solo per infetti/errori.
+
+Verificati con test funzionali mirati (istanziando le pagine in
+modalità offscreen e simulando segnali/azioni), non solo a occhio: il
+refresh incrociato Scansione→Quarantena, l'elisione del testo di
+stato, il contenuto copiato negli appunti e la formattazione della
+durata sono tutti confermati con asserzioni automatiche. Non è stato
+possibile riprodurre un carico realistico di 334.000 file in questo
+ambiente di sviluppo (nessun clamd reale disponibile): il fix allo
+sfarfallio è stato validato leggendo la causa nel codice (frequenza di
+emissione dei segnali) piuttosto che riproducendo il sintomo a piena
+scala.
+
 ## Estensioni naturali
 
 - Notifiche desktop (`notify-send` o D-Bus diretto) quando il timer
