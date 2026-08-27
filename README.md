@@ -241,6 +241,29 @@ Punti emersi rileggendo l'intero codice dopo le ultime modifiche.
   permessi), `SettingsPage` mostra un avviso invece di un traceback.
 - **Import inutilizzato** in `gui/scan_worker.py` (`ScanResult`)
   rimosso; verificato con `pyflakes` che non ce ne siano altri.
+- **Sovrapposizione dei widget in Impostazioni al ridimensionamento
+  della finestra.** `SettingsPage` chiedeva una dimensione minima
+  rigida di 593×781px (parecchi widget a dimensione fissa: caselle di
+  testo e pulsanti alti 36px, la lista cartelle monitorate alta
+  120px, testi lunghi nelle checkbox). Qt normalmente impedisce di
+  scendere sotto questo minimo, ma non tutti i window manager lo
+  rispettano rigidamente durante un ridimensionamento interattivo: se
+  lo ignorano, il layout comprime i widget a dimensione fissa fino a
+  farli sovrapporre invece di restringersi. Il contenuto della pagina
+  ora vive dentro un `QScrollArea` (minimo sceso a 68×68px, verificato
+  con un confronto screenshot prima/dopo): se lo spazio non basta più
+  compare una scrollbar, non una sovrapposizione. Le due descrizioni
+  più lunghe (Real-Time, Dolphin) hanno anche `setWordWrap(True)` per
+  ridurre la larghezza minima naturale richiesta.
+
+  Le altre pagine (`ScanPage` 382×415, `QuarantinePage` 397×218,
+  `SchedulerPage` 358×338, ecc.) hanno minimi più contenuti e non sono
+  state toccate in questo giro perché non segnalate — usano lo stesso
+  pattern di widget a dimensione fissa, quindi in teoria sono
+  esposte allo stesso rischio su un window manager che ignora i
+  vincoli di Qt, solo con soglie meno facili da raggiungere. Se in
+  futuro si presenta lo stesso sintomo altrove, la correzione è
+  identica (avvolgere il contenuto in un `QScrollArea`).
 - **Test automatici aggiunti** in `tests/` (pytest) per la parte di
   logica pura, senza dipendenze da clamd o da Qt: parsing delle
   risposte del protocollo clamd (`test_clamd_client.py`), gestione
@@ -274,6 +297,82 @@ Nessun problema di sicurezza rilevato in `clamd_client.py`, `cli.py` o
 `update_worker.py`: quest'ultimo passa a `pkexec sh -c` una stringa di
 comando statica, senza interpolazione di input proveniente dall'utente
 o dal filesystem, quindi non è iniettabile.
+
+## Pacchettizzazione .deb
+
+Lo scheletro Debian è in `debian/` ed è già stato testato con una
+build reale (`dpkg-buildpackage`) e un'installazione/rimozione
+completa (`dpkg -i` / `apt-get remove --purge`) in un container di
+prova.
+
+**Per compilare il pacchetto**, sulla tua macchina Debian:
+
+```bash
+sudo apt install devscripts debhelper dh-python pybuild-plugin-pyproject \
+    python3-all python3-setuptools
+
+cd klamav-py
+dpkg-buildpackage -us -uc -b
+```
+
+Il `.deb` viene creato nella directory superiore
+(`../klamav-py_0.1.0-1_all.deb`).
+
+**Verifica prima di installare**: questo scheletro è stato validato
+in un ambiente Ubuntu 24.04, dove però `python3-pyside6.qtcore` e
+affini **non esistono affatto nei repository** (Ubuntu pacchettizza
+solo PySide2). Su Debian dovrebbero esistere, ma non ho potuto
+verificarlo direttamente in questo ambiente: prima di installare il
+`.deb` controlla con
+
+```bash
+apt-cache search pyside6
+```
+
+che i pacchetti elencati in `debian/control` (`python3-pyside6.qtcore`,
+`.qtgui`, `.qtwidgets`, `.qtnetwork`) esistano davvero nella tua
+versione di Debian, e correggi i nomi in `debian/control` se
+differiscono.
+
+### Cosa fa lo scheletro Debian
+
+- **Un unico pacchetto binario** `klamav-py` contenente sia la CLI che
+  la GUI (niente split in due pacchetti separati, per ora: più
+  semplice da mantenere finché il progetto è giovane).
+- **`pyproject.toml`** (prima assente, aggiunto insieme a questo
+  scheletro) definisce due entry point installati in `/usr/bin/`:
+  `klamav-py` (CLI) e `klamav-py-gui` (GUI). La GUI stessa li usa per
+  auto-rilevare il comando giusto da scrivere nei file `.desktop` di
+  autostart e integrazione Dolphin (`_gui_relaunch_command()` in
+  `main_window.py`), invece di assumere una checkout locale con venv.
+- **Le unit systemd** (`debian/klamav-py.klamav-scan.service/.timer`)
+  sono una variante di quelle in `systemd/` adattata al pacchetto:
+  `ExecStart=/usr/bin/klamav-py` invece del path del venv, e
+  `DynamicUser=yes` invece di richiedere un utente di sistema creato a
+  mano in `postinst`.
+- **Il timer si abilita e si avvia da solo all'installazione**, ma il
+  `.service` (essendo `Type=oneshot`) **non** viene lanciato subito:
+  farlo partire in automatico al primo `apt install` avrebbe innescato
+  una scansione completa di `/home` a sorpresa. Se serve, verificalo
+  con `journalctl -u klamav-scan.timer` dopo l'installazione.
+- Se il socket di clamd non fosse raggiungibile dall'utente dinamico
+  del servizio (dipende da come `clamav-daemon` imposta i permessi sul
+  socket), c'è una riga commentata `#SupplementaryGroups=clamav` nel
+  file del servizio da riattivare.
+
+### Da rivedere prima di una release stabile
+
+- **Maintainer email placeholder** in `debian/control` e
+  `debian/changelog` (`gradia@disroot.org`): correggilo se non è
+  l'indirizzo che vuoi rendere pubblico nel pacchetto.
+- **Versione hardcoded `0.1.0`** sia in `pyproject.toml` che in
+  `debian/changelog`: da tenere sincronizzata manualmente ad ogni
+  release finché non si automatizza.
+- Nessun test automatico verifica ancora l'installazione del `.deb` di
+  per sé (solo verificato manualmente in questa sessione): se il
+  progetto cresce, vale la pena aggiungere un job CI con `sbuild` o
+  `pbuilder` che lo ricostruisce da zero in un chroot pulito ad ogni
+  push, invece di fare l'unica verifica manuale fatta qui.
 
 ## Estensioni naturali
 
