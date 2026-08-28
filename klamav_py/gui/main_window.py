@@ -96,7 +96,7 @@ def _icon(*theme_names: str) -> QIcon:
 
 
 def _app_icon() -> QIcon:
-    return _icon("emblem-virus", "security-high", "security-medium")
+    return _icon("klamav-icon", "emblem-virus", "security-high", "security-medium")
 
 
 def _default_tray_tooltip() -> str:
