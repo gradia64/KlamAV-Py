@@ -1,2 +1,3 @@
 debian/klamav-py.desktop usr/share/applications
 klamav_py/gui/resources/klamav-icon.svg usr/share/icons/hicolor/scalable/apps
+klamav_py/gui/resources/klamav-icon.svg usr/share/icons/hicolor/scalable/apps/klamav-py.svg

@@ -1,4 +1,8 @@
-klamav-py
+KlamAV-Py
+
+CILicense
+
+Frontend minimale per ClamAV via clamd — CLI e GUI per Linux.
 
 Riscrittura minimale, in Python, dell'idea alla base di KlamAV 0.22(frontend a ClamAV), senza le parti diventate tecnologia morta(Dazuko, DCOP, Qt3) e senza i problemi di sicurezza dell'originale(shell injection via KShellProcess): nessun eseguibile esterno vieneinvocato per la scansione, i path non transitano mai da una shell.
 Caratteristiche
@@ -15,7 +19,7 @@ Caratteristiche
 Requisiti
 
     clamav-daemon installato e attivo (clamd), non i soli binariclamscan/freshclam: questo progetto parla col demone via socket,non invoca eseguibili esterni per la scansione.
-    Python 3.10+ come baseline dichiarata. Il minimo tecnico reale è 3.9(Path.is_relative_to); il walrus operator usato in clamd_client.pyesiste dal 3.8. Testato su 3.12/3.13/3.14 (Debian Sid, venv).
+    Python 3.10+ come baseline dichiarata. Il minimo tecnico reale è 3.9(Path.is_relative_to); il walrus operator usato in clamd_client.pyesiste dal 3.8. Testato localmente su 3.14 (Debian Sid) e in CI su3.10/3.11/3.12.
     CLI: nessuna dipendenza esterna a runtime — gira anche con il Pythondi sistema, senza venv.
     GUI: PySide6, va installato in un venv dedicato (vedi sotto), nonnel Python di sistema.
     GUI, solo per l'aggiornamento del database virus dal pulsante"Aggiorna Database": freshclam nel PATH e pkexec (PolicyKit)disponibili, dato che l'operazione richiede privilegi di root.
@@ -23,15 +27,33 @@ Requisiti
     Sviluppo/test: pytest (vedi requirements-dev.txt), non richiestoa runtime.
 
 Installazione
-Da pacchetto .deb (consigliata per l'uso quotidiano)
+Da release precompilata (consigliata per l'uso quotidiano)
 
-sudo apt install devscripts debhelper dh-python pybuild-plugin-pyproject \    python3-all python3-setuptoolscd klamav-pydpkg-buildpackage -us -uc -bsudo dpkg -i ../klamav-py_<versione>-1_all.deb
+Scarica il pacchetto .deb dalla paginaReleases e installa:
+
+sudo dpkg -i klamav-py_*.debsudo apt-get install -f    # sistema le dipendenze mancanti, se servono
 
 Installa klamav-py (CLI) e klamav-py-gui in /usr/bin/, abilita
 automaticamente il timer systemd utente per la scansione programmata e
 registra l'applicazione nei menu. Dettagli e avvertenze nella sezione
 "Pacchettizzazione .deb" più sotto.
-Da sorgenti (sviluppo)
+Da sorgenti (sviluppo o build del pacchetto)
+
+Build del .deb:
+bash
+ 
+  
+ 
+ 
+sudo apt install devscripts debhelper dh-python pybuild-plugin-pyproject \
+    python3-all python3-setuptools
+cd klamav-py
+dpkg-buildpackage -us -uc -b
+sudo dpkg -i ../klamav-py_<versione>_all.deb
+ 
+ 
+
+Ambiente di sviluppo (GUI da checkout):
 bash
  
   
@@ -67,27 +89,6 @@ istanza esistente, qualunque essa sia.
 Uso rapido
 bash
  
- # CLI: verifica che clamd risponda (funziona anche senza venv)
-python3 -m klamav_py.cli ping
-
-# CLI: scansione con quarantena automatica
-python3 -m klamav_py.cli scan /home/utente/Scaricati \
-    --quarantine ~/.local/share/klamav-py/quarantine
-
-# CLI: scansione della home con esclusioni e log errori su file
-python3 -m klamav_py.cli scan ~ \
-    --exclude ~/.local/share/klamav-py \
-    --exclude ~/.cache \
-    --log-errors /tmp/klamav-errors.log
-
-# GUI (richiede il venv attivo o l'interprete del venv, vedi sopra)
-python3 -m klamav_py.gui.app
-# oppure, con socket/quarantena non standard:
-python3 -m klamav_py.gui.app --socket /run/clamav/clamd.ctl \
-    --quarantine-dir ~/.local/share/klamav-py/quarantine
-# oppure per avviare direttamente la scansione di un percorso (usato
-# anche dall'integrazione Dolphin, vedi sotto):
-python3 -m klamav_py.gui.app --scan-target /percorso/da/scansionare
   
  
  
@@ -192,6 +193,8 @@ Sette sezioni:
     in pausa. Dopo una pausa più lunga di ~25s (vicino all'IdleTimeout
     di clamd, 30s di default) la sessione viene ricreata proattivamente
     alla ripresa, per non produrre un errore finto sul primo file.
+    Con la finestra minimizzata in tray, il tooltip dell'icona mostra i
+    contatori della scansione in corso e lo stato di pausa.
 
     Quarantena manuale di default. La casella "Metti in quarantena
     automaticamente i file infetti" è disattivata di default: i file
@@ -251,9 +254,14 @@ Sette sezioni:
     attivo su N/M cartelle"), autostart al login, avvio minimizzato in
     tray, aggiornamento DB all'avvio, integrazione Dolphin.
 
+La versione del programma è visibile nel titolo della finestra, nel
+tooltip di riposo della system tray e nel pannello Impostazioni.
+
 Tutte le impostazioni sono salvate con QSettings (organizzazione
-"KlamAV", applicazione "KlamAV" — su Linux tipicamente
-~/.config/KlamAV/KlamAV.conf).
+"KlamAV-Py", applicazione "KlamAV-Py" — su Linux tipicamente
+~/.config/KlamAV-Py/KlamAV-Py.conf). Le impostazioni di versioni
+precedenti alla 0.1.3-2 (file ~/.config/KlamAV/KlamAV.conf) vengono
+migrate automaticamente al primo avvio; il vecchio file resta su disco.
 Scelte di design intenzionali
 
 Quarantena manuale in Scansione, automatica in Real-Time. Non è
@@ -319,9 +327,9 @@ Scansioni pianificate: i tre meccanismi
     integrazione completa con la UI.
     Unit systemd utente (installata dal .deb): parte al login di
     ciascun utente senza configurazione, funziona a GUI chiusa. Per far
-      la girare anche a utente scollegato: loginctl enable-linger $USER.
-    Usa lo stesso percorso di quarantena di default della GUI
-    (~/.local/share/klamav-py/quarantine).
+    girare il timer anche a utente scollegato:
+    loginctl enable-linger $USER. Usa lo stesso percorso di quarantena
+    di default della GUI (~/.local/share/klamav-py/quarantine).
     Unit systemd di sistema (systemd/ nel repo, solo per
     installazioni manuali multi-utente/server): da configurare ed
     abilitare a mano; la ExecStart assume un venv sotto
@@ -376,14 +384,8 @@ Cosa manca rispetto a KlamAV originale (di proposito)
     KMail/Evolution come faceva klammail.
 
 Sviluppo e test
-
 bash
-
-cd klamav-py
-python3 -m venv venv        # se non l'hai già creato
-source venv/bin/activate
-pip install -r requirements-dev.txt
-python3 -m pytest tests/
+ 
   
  
  
@@ -516,3 +518,4 @@ Estensioni naturali
     frontend web/TUI (es. per controllare la quarantena dal NAS).
      Configurabile da UI se il Real-Time debba mettere in quarantena
     automaticamente o solo segnalare.
+
