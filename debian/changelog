@@ -1,152 +1,26 @@
-klamav-py (0.1.3-1) UNRELEASED; urgency=medium
+klamav-py (0.1.3-2) UNRELEASED; urgency=medium
 
-  * Nuovo: pulsante Sospendi/Riprendi nella pagina Scansione. La pausa
-    ha granularità di file intero (il file in streaming viene
-    completato, poi il worker si ferma) e la UI segue i segnali
-    effettivi del worker, non i click; "Interrompi" resta attivo
-    durante la pausa. Dopo una pausa più lunga di ~25s (sotto
-    l'IdleTimeout di clamd, 30s di default) la sessione IDSESSION
-    viene ricreata proattivamente alla ripresa, per non produrre un
-    errore finto sul primo file.
-  * Nuovo: guard "una scansione alla volta" tra scansione manuale e
-    programmata — la programmata salta (con voce esplicita in
-    Cronologia e notifica) se una manuale è in corso, e viceversa.
-    Motivo: due traversal home-wide in parallelo raddoppiano I/O e
-    memoria di clamd. Il Real-Time è deliberatamente esente dal guard
-    (protezione primaria, su file singoli).
-  * Fix dati: la directory di quarantena è ora esclusa
-    dall'attraversamento ricorsivo (pruning: non viene nemmeno letta)
-    e quarantine_file() rifiuta esplicitamente di ri-quarantenare un
-    file già dentro la directory di quarantena. Prima, una scansione
-    home-wide ri-rilevava i file già gestiti a ogni ciclo (osservato:
-    5 EICAR in quarantena ri-segnalati a ogni scansione della home).
-  * Fix affidabilità: pre-check dimensionale prima dell'invio a clamd —
-    i file oltre StreamMaxLength (25MB di default) non vengono più
-    inviati e vengono segnalati "non verificati" (TOO_LARGE) senza
-    consumare la sessione. Diagnosticato su scansione reale: ~200
-    errori "Pipe interrotta" corrispondevano a 136 file > 25MB nella
-    home; un rifiuto di clamd chiude la connessione a metà invio e
-    l'errore appare come pipe interrotta su un file che sta bene.
-  * Fix affidabilità: la sessione IDSESSION viene marcata "dead" quando
-    clamd chiude la connessione (rifiuto per size limit, riavvio del
-    demone) e ricreata PRIMA del file successivo, eliminando le
-    "vittime collaterali" a cascata su connessione già chiusa.
-    reset_session() è esposto sull'istanza del client (usato dal
-    worker dopo pause lunghe) e la sessione viene chiusa con un
-    finally se il consumatore abbandona il generatore (Interrompi).
-  * Fix concorrenza: fcntl.flock sulle sequenze read-modify-write di
-    index.json — GUI, CLI e worker concorrenti non si sovrascrivono
-    più a vicenda le entry della quarantena (la scrittura atomica
-    proteggeva i lettori, non gli scrittori).
-  * Nuovo: log persistente delle scansioni programmate
-    (~/.local/share/klamav-py/logs/scheduled-<timestamp>.log,
-    rotazione ultime 10) e progresso live nella pagina Pianificazione
-    e nel tooltip della system tray. Prima: una scansione programmata
-    era invisibile per tutta la durata e il dettaglio infetti/errori
-    era irrecuperabile.
-  * Cronologia: nuovo campo/colonna "non verificati" (too_large, con
-    default 0 per le voci delle versioni precedenti) e tooltip con il
-    percorso del log dettagliato quando esiste.
-  * Fix Real-Time: un file oltre StreamMaxLength viene ora etichettato
-    "Non verificato" nel log della pagina Real-Time, non più
-    "Analizzato (Sicuro)" — prima veniva mostrato come sicuro senza
-    essere stato verificato.
-  * CLI: nuove opzioni --exclude (ripetibile, esclusioni con pruning)
-    e --max-stream-size; i path di scansione ed esclusioni vengono
-    canonicalizzati con resolve() per un matching affidabile; la
-    directory di --quarantine è esclusa automaticamente.
-  * Prestazioni: la traversata ricorsiva passa da rglob (che
-    costruiva in memoria la lista completa dei path: centinaia di
-    migliaia di oggetti su una home grande) a os.walk con pruning,
-    memoria costante.
-  * Aggiunti 17 nuovi test automatici (45 totali): pausa/ripresa/stop
-    durante la pausa con client finto deterministico, pruning delle
-    esclusioni (inclusi symlink a directory), pre-check e fallback
-    TOO_LARGE, serializzazione flock dell'indice, rifiuto di
-    ri-quarantenare file già in quarantena.
+  * Fix branding: il nome visualizzato ovunque è ora "KlamAV-Py"
+    (titolo finestra, menu applicazioni, tooltip e notifiche della
+    tray, file .desktop di autostart): "KlamAV" era il nome del
+    progetto storico scomparso, non di questo.
+  * Fix Wayland: setDesktopFileName puntava a "org.kde.klamav", che
+    non corrisponde al file .desktop installato (klamav-py.desktop):
+    con un app_id sbagliato KDE/Wayland non riesce ad abbinare
+    finestra, icona e raggruppamento in taskbar. Ora è "klamav-py".
+  * Deduplicati setOrganizationName/setApplicationName (erano chiamati
+    sia in app.py sia in main_window.py con lo stesso valore): ora
+    solo in app.py, una volta sola.
+  * Migrazione impostazioni: il file QSettings passa da
+    ~/.config/KlamAV/KlamAV.conf a ~/.config/KlamAV-Py/KlamAV-Py.conf;
+    al primo avvio le chiavi esistenti vengono copiate una volta sola
+    dal vecchio file (che resta su disco, nessun dato perso).
+  * Nuovo: la versione del programma è visibile nel titolo della
+    finestra, nel tooltip di riposo della tray e in Impostazioni
+    (fonte unica: __version__ in klamav_py/__init__.py).
+  * Nuovo: tooltip della system tray aggiornato anche durante le
+    scansioni manuali (prima solo per quelle programmate): mostra i
+    contatori in corso e lo stato "In pausa"; ripristinato a fine
+    scansione.
 
- -- gradia <gradia@disroot.org>  Sat, 29 Aug 2026 14:30:00 +0000
-
-klamav-py (0.1.2-1) UNRELEASED; urgency=medium
-
-  * ATTENZIONE MIGRAZIONE: la scansione pianificata non usa più una unit
-    systemd di SISTEMA con DynamicUser (klamav-scan.service/.timer sotto
-    /usr/lib/systemd/system/), ma una unit UTENTE (systemd --user, sotto
-    /usr/lib/systemd/user/). Motivo: un utente dinamico di sistema non
-    può leggere una home con permessi 0700/0750 (la scansione di /home
-    falliva silenziosamente con centinaia di "Permission denied"), e la
-    quarantena finiva in una directory che la GUI, girando come utente
-    normale, non poteva poi leggere. La nuova unit utente gira come te,
-    legge la tua home, e condivide la stessa directory di quarantena
-    della GUI (~/.local/share/klamav-py/quarantine). Si abilita da sola
-    su apt install/upgrade (deb-systemd-helper --user enable) e parte al
-    prossimo login, senza comandi manuali.
-  * Fix sicurezza/dati: i file spostati in quarantena non erano più
-    eseguibili grazie a shutil.move+chmod, ma la mode originale non
-    veniva salvata da nessuna parte: un file ripristinato restava a
-    permessi 0600 per sempre (es. binari legittimi diventati illeggibili
-    dalle app). Ora la mode originale è salvata nell'indice e ripristinata
-    correttamente al restore.
-  * Fix sicurezza: i file in quarantena avevano il nome file originale
-    ancora leggibile su disco (solo con un prefisso timestamp); ora il
-    nome su disco è un identificatore non prevedibile (timestamp+UUID),
-    il nome originale resta solo nell'indice.
-  * Fix: restore su un percorso originale nel frattempo rioccupato da un
-    altro file lo sovrascriveva silenziosamente (comportamento di
-    shutil.move/os.rename su POSIX); ora viene rifiutato esplicitamente.
-  * Fix affidabilità: la scrittura di index.json (quarantena) non era
-    atomica — un crash a metà scrittura poteva corrompere l'indice,
-    perdendo la lista dei file in quarantena. Ora scrive su un file
-    temporaneo e usa os.replace() per lo swap atomico.
-  * Nuovo: i file che superano StreamMaxLength (clamd.conf, tipicamente
-    25MB) vengono classificati come "non verificati" invece che come
-    errori generici, sia in CLI (riga di riepilogo separata) che in GUI
-    (icona/colore neutro).
-  * Fix affidabilità Real-Time: un fallimento di QFileSystemWatcher.
-    addPaths() (es. limite fs.inotify.max_user_watches esaurito) non
-    veniva mai segnalato — il monitoraggio smetteva di coprire quella
-    cartella senza che l'utente se ne accorgesse. Ora compare un avviso
-    esplicito in Impostazioni ("Real-Time attivo su N/M cartelle") e una
-    riconciliazione periodica (ogni 60s) prova a ripristinare i watch
-    mancanti, per coprire anche il caso di una cartella monitorata
-    eliminata e ricreata.
-  * Rafforzato con un commento esplicito il punto in cui update_worker.py
-    costruisce il comando eseguito via pkexec, per scoraggiare future
-    modifiche che interpolino input esterno nella stringa di shell.
-  * Aggiunti test automatici per i fix sopra: permessi/atomicità della
-    quarantena, classificazione TOO_LARGE, riconciliazione dei watch
-    Real-Time.
-  * Fix migrazione: durante l'upgrade da una versione con la vecchia
-    unit di sistema, dpkg rimuoveva il file della unit ma non fermava/
-    disabilitava un'istanza già attiva né il relativo symlink in
-    /etc/systemd/system/timers.target.wants/ (stato dinamico creato da
-    deb-systemd-helper, non tracciato da dpkg) — il vecchio timer di
-    sistema restava attivo per sempre in parallelo al nuovo timer
-    utente. Aggiunto uno script postinst dedicato che ferma/disabilita
-    esplicitamente la vecchia unit di sistema prima di procedere.
-
- -- gradia <gradia@disroot.org>  Fri, 28 Aug 2026 05:52:23 +0000
-
-klamav-py (0.1.1-1) UNRELEASED; urgency=medium
-
-  * Fix: nessun report/notifica esplicito al termine di una scansione
-    manuale; ora mostra un riepilogo (percorso, durata, contatori,
-    esito) e invia sempre la notifica tray, anche a finestra aperta.
-  * Fix: la pagina Quarantena non si aggiornava dopo una quarantena
-    manuale o automatica (pianificata/Real-Time) senza riavviare
-    l'app; ora si aggiorna subito tramite il nuovo segnale
-    ScanWorker.quarantined.
-  * Aggiunto pulsante "Copia log" nella pagina Scansione.
-  * Fix: sfarfallio/ridimensionamento della finestra durante scansioni
-    di grandi dimensioni, causato dall'emissione di un segnale Qt per
-    ogni singolo file scansionato; ora gli aggiornamenti di stato sono
-    limitati a un tick ogni 150ms e il percorso corrente viene troncato
-    a larghezza fissa invece di far crescere il layout ad ogni file.
-
- -- gradia <gradia@disroot.org>  Thu, 27 Aug 2026 11:14:34 +0000
-
-klamav-py (0.1.0-1) UNRELEASED; urgency=medium
-
-  * Initial release.
-
- -- gradia <gradia@disroot.org>  Wed, 26 Aug 2026 22:36:49 +0000
+ -- gradia <gradia@disroot.org>  Sat, 29 Aug 2026 18:20:00 +0000

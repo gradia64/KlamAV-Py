@@ -1,6 +1,11 @@
 """
 Finestra principale PySide6 (UI Moderna Stile KDE Plasma).
 Aggiunto supporto Single Instance (IPC) e fix ridimensionamento finestra.
+
+Branding: il nome visualizzato ovunque è APP_NAME ("KlamAV-Py").
+"KlamAV" da solo è il nome del progetto storico scomparso, non di
+questo: non usato come nome visualizzato. Sussiste SOLO come namespace
+legacy di QSettings nella migrazione one-shot (_migrate_legacy_settings).
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..clamd_client import ScanResult
 from ..quarantine import Quarantine
 from .scan_worker import ScanWorker
@@ -64,6 +70,18 @@ DEFAULT_LOGS_DIR = Path.home() / ".local/share/klamav-py/logs"
 # senza rotazione il directory cresce indefinitamente.
 MAX_BG_LOG_FILES = 10
 
+# Nome dell'applicazione, usato OVUNQUE come nome visualizzato (titolo
+# finestra, tooltip e notifiche tray, menu, file .desktop generati):
+# un'unica costante invece di stringhe letterali sparse, così il
+# branding non può più divergere tra i punti (era la causa del bug
+# "KlamAV" vs "KlamAV-Py").
+APP_NAME = "KlamAV-Py"
+
+# Namespace QSettings PRIMA del rebranding: serve solo alla migrazione
+# one-shot per leggere il vecchio ~/.config/KlamAV/KlamAV.conf.
+_LEGACY_SETTINGS_ORG = "KlamAV"
+_LEGACY_SETTINGS_APP = "KlamAV"
+
 _BUNDLED_ICON_PATH = Path(__file__).parent / "resources" / "klamav-icon.svg"
 
 
@@ -79,6 +97,38 @@ def _icon(*theme_names: str) -> QIcon:
 
 def _app_icon() -> QIcon:
     return _icon("emblem-virus", "security-high", "security-medium")
+
+
+def _default_tray_tooltip() -> str:
+    """Tooltip di riposo della tray, con versione: è il valore a cui
+    ogni flusso che modifica il tooltip (scansione manuale, programmata,
+    pausa) deve tornare a fine attività."""
+    return f"{APP_NAME} {__version__} — Protezione attiva"
+
+
+def _migrate_legacy_settings() -> None:
+    """
+    Migrazione one-shot del file delle impostazioni dopo il rebranding.
+
+    Fino alla 0.1.3-1 org/app QSettings erano "KlamAV"/"KlamAV", quindi
+    le impostazioni vivevano in ~/.config/KlamAV/KlamAV.conf. Rinominare
+    org/app in "KlamAV-Py" sposta il file: senza migrazione, al primo
+    avvio tutte le impostazioni (socket, quarantena, Real-Time,
+    pianificazione, autostart) risulterebbero silenziosamente al
+    default. Qui, se il nuovo file è vuoto, copiamo tutte le chiavi del
+    vecchio; il vecchio file resta su disco, nessun dato distrutto.
+    Chiamata all'inizio di MainWindow.__init__, PRIMA della creazione
+    delle pagine (che costruiscono i loro QSettings espliciti).
+    """
+    new = QSettings(APP_NAME, APP_NAME)
+    if new.allKeys():
+        return  # già migrato, o già configurato: non toccare nulla
+    old = QSettings(_LEGACY_SETTINGS_ORG, _LEGACY_SETTINGS_APP)
+    if not old.allKeys():
+        return  # nessuna installazione precedente: niente da migrare
+    for key in old.allKeys():
+        new.setValue(key, old.value(key))
+    new.sync()
 
 
 def _gui_relaunch_command() -> str:
@@ -465,11 +515,18 @@ class ScanPage(QWidget):
         self.pause_button.setText("Riprendi")
         self.pause_button.setIcon(QIcon.fromTheme("media-playback-start"))
         self._set_status_text("In pausa — riprende dal file successivo (Interrompi resta attivo)")
+        # Visibilità da tray: anche in pausa, passando il mouse
+        # sull'icona si deve capire lo stato (come per l'avanzamento).
+        main_window = self.window()
+        if hasattr(main_window, "tray_icon"):
+            main_window.tray_icon.setToolTip(f"{APP_NAME} — Scansione in pausa")
 
     def _on_worker_resumed(self) -> None:
         self.pause_button.setText("Sospendi")
         self.pause_button.setIcon(QIcon.fromTheme("media-playback-pause"))
         self._set_status_text("Scansione in corso…")
+        # Il tooltip torna "in corso"; il prossimo tick di _on_progress
+        # (entro 150ms) lo aggiorna comunque coi contatori.
 
     def _stop_scan(self) -> None:
         if self.worker is not None:
@@ -507,6 +564,20 @@ class ScanPage(QWidget):
         if too_large:
             text += f" — {too_large} non verificati (troppo grandi)"
         self.counts_label.setText(text)
+
+        # Visibilità da tray per la scansione MANUALE: prima aggiornava
+        # solo la label della pagina, e a finestra minimizzata in tray il
+        # tooltip restava fermo su "Protezione attiva" anche con una
+        # scansione home-wide in corso — indistinguibile da "non sta
+        # facendo nulla". Stesso comportamento di _on_bg_progress per la
+        # programmata (già throttled lato worker a 150ms, quindi il
+        # tooltip non sfarfalla).
+        main_window = self.window()
+        if hasattr(main_window, "tray_icon"):
+            main_window.tray_icon.setToolTip(
+                f"{APP_NAME} — Scansione in corso: {scanned} file"
+                + (f", {infections} infetti" if infections else "")
+            )
 
     def _on_result(self, result: ScanResult) -> None:
         # Il worker filtra già i risultati "puliti": qui arrivano solo
@@ -617,6 +688,12 @@ class ScanPage(QWidget):
         self.pause_button.setText("Sospendi")
         self.pause_button.setIcon(QIcon.fromTheme("media-playback-pause"))
 
+        # Il tooltip della tray torna al riposo qualunque sia stato il
+        # finale (completata, interrotta, in pausa al momento dello stop).
+        main_window = self.window()
+        if hasattr(main_window, "_reset_tray_tooltip"):
+            main_window._reset_tray_tooltip()
+
         duration = (
             self._format_duration(time.monotonic() - self._scan_start_time)
             if self._scan_start_time is not None
@@ -650,13 +727,14 @@ class ScanPage(QWidget):
         self.history.add_entry(
             "Manuale", self.path_edit.text(), scanned, infections, errors, too_large=too_large
         )
-        main_window = self.window()
         if hasattr(main_window, 'history_page'):
             main_window.history_page.refresh()
 
         if hasattr(main_window, 'tray_icon'):
             icon_type = "emblem-checked" if infections == 0 else "emblem-virus"
-            main_window.tray_icon.showMessage("KlamAV — Scansione completata", status_text, _icon(icon_type), 6000)
+            main_window.tray_icon.showMessage(
+                f"{APP_NAME} — Scansione completata", status_text, _icon(icon_type), 6000
+            )
 
         # Il popup esplicito compare solo se la finestra è visibile in
         # quel momento: se l'app è minimizzata in tray, forzare la
@@ -836,7 +914,9 @@ class UpdatePage(QWidget):
         main_window = self.window()
         if hasattr(main_window, 'tray_icon') and main_window.tray_icon.isVisible():
             icon_type = "emblem-checked" if success else "data-error"
-            main_window.tray_icon.showMessage("KlamAV - Aggiornamento", message, _icon(icon_type), 5000)
+            main_window.tray_icon.showMessage(
+                f"{APP_NAME} - Aggiornamento", message, _icon(icon_type), 5000
+            )
 
         self.worker = None
 
@@ -996,7 +1076,10 @@ class SchedulerPage(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.settings = QSettings("KlamAV", "KlamAV")
+        # QSettings sempre con org/app ESPLICITI (mai QSettings() di
+        # default): il valore non deve dipendere da come è stato creato
+        # QApplication, e deve coincidere con quello della migrazione.
+        self.settings = QSettings(APP_NAME, APP_NAME)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
@@ -1106,7 +1189,9 @@ class SchedulerPage(QWidget):
 
         main_window = self.window()
         if hasattr(main_window, 'tray_icon') and main_window.tray_icon.isVisible():
-            main_window.tray_icon.showMessage("KlamAV", "Pianificazione salvata con successo.", _icon("emblem-checked"), 3000)
+            main_window.tray_icon.showMessage(
+                APP_NAME, "Pianificazione salvata con successo.", _icon("emblem-checked"), 3000
+            )
 
 
 class SettingsPage(QWidget):
@@ -1114,7 +1199,8 @@ class SettingsPage(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.settings = QSettings("KlamAV", "KlamAV")
+        # QSettings sempre con org/app ESPLICITI (vedi SchedulerPage).
+        self.settings = QSettings(APP_NAME, APP_NAME)
 
         # FIX SOVRAPPOSIZIONE WIDGET: il contenuto della pagina (parecchi
         # widget a dimensione fissa: QLineEdit/QPushButton alti 36px,
@@ -1244,7 +1330,7 @@ class SettingsPage(QWidget):
 
         dolphin_group = QGroupBox("Integrazione File Manager (Dolphin)")
         dolphin_layout = QVBoxLayout(dolphin_group)
-        dolphin_desc = QLabel("Aggiunge la voce \"Scansiona con KlamAV\" al menu del tasto destro su file e cartelle.")
+        dolphin_desc = QLabel("Aggiunge la voce \"Scansiona con KlamAV-Py\" al menu del tasto destro su file e cartelle.")
         dolphin_desc.setWordWrap(True)
         dolphin_layout.addWidget(dolphin_desc)
 
@@ -1265,6 +1351,13 @@ class SettingsPage(QWidget):
         dolphin_layout.addLayout(dolphin_btns_row)
 
         layout.addWidget(dolphin_group)
+
+        about_group = QGroupBox("Informazioni")
+        about_layout = QVBoxLayout(about_group)
+        version_label = QLabel(f"Versione: {__version__}")
+        version_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+        about_layout.addWidget(version_label)
+        layout.addWidget(about_group)
 
         buttons_row = QHBoxLayout()
         buttons_row.addStretch()
@@ -1341,7 +1434,9 @@ class SettingsPage(QWidget):
 
         main_window = self.window()
         if hasattr(main_window, 'tray_icon') and main_window.tray_icon.isVisible():
-            main_window.tray_icon.showMessage("KlamAV", "Impostazioni salvate con successo.", _icon("emblem-checked"), 3000)
+            main_window.tray_icon.showMessage(
+                APP_NAME, "Impostazioni salvate con successo.", _icon("emblem-checked"), 3000
+            )
 
     def _install_dolphin(self):
         try:
@@ -1409,20 +1504,33 @@ Exec={exec_cmd} --scan-target %f
 class MainWindow(QMainWindow):
     def __init__(self, socket_path: str = DEFAULT_SOCKET, quarantine_dir: Path = DEFAULT_QUARANTINE_DIR, scan_target: Path = None) -> None:
         super().__init__()
-        self.setWindowTitle("KlamAV")
+
+        # Migrazione one-shot delle impostazioni (vedi docstring della
+        # funzione): DEVE precedere la creazione delle pagine, che
+        # costruiscono i loro QSettings espliciti e leggerebbero
+        # altrimenti il file nuovo ancora vuoto.
+        _migrate_legacy_settings()
+
+        # Titolo con versione: è il punto principale in cui la versione
+        # è visibile (l'altra occorrenza è il tooltip di riposo della
+        # tray e la label in Impostazioni).
+        self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(900, 600)
         self.setMinimumSize(700, 400) # Impedisce di restringere troppo la finestra
         self.setWindowIcon(_app_icon())
 
         self.setStyleSheet(KDE_STYLESHEET)
 
-        QApplication.instance().setOrganizationName("KlamAV")
-        QApplication.instance().setApplicationName("KlamAV")
-        self.settings = QSettings()
+        # NOTA: setOrganizationName/setApplicationName NON sono qui —
+        # sono responsabilità di app.py (chiamati una volta sola alla
+        # creazione di QApplication; prima erano duplicati in due file).
+        # Tutti i QSettings di questo modulo sono espliciti, quindi non
+        # dipendono da questi valori.
+        self.settings = QSettings(APP_NAME, APP_NAME)
 
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(_app_icon())
-        self.tray_icon.setToolTip("KlamAV - Protezione Attiva")
+        self.tray_icon.setToolTip(_default_tray_tooltip())
 
         tray_menu = QMenu(self)
         show_action = QAction("Mostra finestra", self)
@@ -1537,6 +1645,12 @@ class MainWindow(QMainWindow):
         if scan_target:
             self.scan_page.start_external_scan(scan_target)
 
+    def _reset_tray_tooltip(self) -> None:
+        """Riporta il tooltip della tray al riposo: chiamato a fine di
+        ogni attività che lo ha modificato (scansione manuale,
+        programmata, pausa)."""
+        self.tray_icon.setToolTip(_default_tray_tooltip())
+
     def setup_ipc(self, server: QLocalServer):
         """Configura il server IPC per ricevere file da scansionare da altre istanze."""
         self.ipc_server = server
@@ -1579,7 +1693,9 @@ class MainWindow(QMainWindow):
         event.ignore()
         self.hide()
         if self.tray_icon.isVisible():
-            self.tray_icon.showMessage("KlamAV", "L'applicazione continua a girare nella system tray.", _app_icon(), 3000)
+            self.tray_icon.showMessage(
+                APP_NAME, "L'applicazione continua a girare nella system tray.", _app_icon(), 3000
+            )
 
     def _on_settings_saved(self) -> None:
         new_socket = self.settings.value("socket_path", DEFAULT_SOCKET)
@@ -1615,7 +1731,7 @@ class MainWindow(QMainWindow):
                 exec_cmd = _gui_relaunch_command()
 
                 content = f"""[Desktop Entry]
-Name=KlamAV
+Name={APP_NAME}
 Comment=Antivirus frontend for ClamAV
 Exec={exec_cmd}
 Icon=emblem-virus
@@ -1667,7 +1783,7 @@ X-GNOME-Autostart-enabled=true
             if hasattr(self, "history_page"):
                 self.history_page.refresh()
             self.tray_icon.showMessage(
-                "KlamAV",
+                APP_NAME,
                 "Scansione programmata saltata: un'altra scansione è già in corso.",
                 _icon("dialog-information"),
                 4000,
@@ -1678,7 +1794,9 @@ X-GNOME-Autostart-enabled=true
         target = Path(target_str)
         if not target.exists(): return
 
-        self.tray_icon.showMessage("KlamAV", "Avvio scansione automatica in background...", _app_icon(), 3000)
+        self.tray_icon.showMessage(
+            APP_NAME, "Avvio scansione automatica in background...", _app_icon(), 3000
+        )
         self.scheduler_page.update_progress(f"In corso dal {datetime.now():%H:%M} — avvio…")
         self._bg_result_lines = []
         self.bg_worker = ScanWorker(
@@ -1717,15 +1835,17 @@ X-GNOME-Autostart-enabled=true
             + (f", {too_large} non verificati" if too_large else "")
         )
         self.tray_icon.setToolTip(
-            f"KlamAV — Scansione automatica in corso: {scanned} file…"
+            f"{APP_NAME} — Scansione automatica in corso: {scanned} file…"
         )
 
     def _on_bg_finished(self, scanned: int, infections: int, errors: int, too_large: int = 0) -> None:
         status = f"Scansione automatica completata: {infections} infetti trovati, {errors} errori."
         if too_large:
             status += f" {too_large} file non verificati (troppo grandi)."
-        self.tray_icon.showMessage("KlamAV", status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000)
-        self.tray_icon.setToolTip("KlamAV - Protezione Attiva")
+        self.tray_icon.showMessage(
+            APP_NAME, status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000
+        )
+        self._reset_tray_tooltip()
 
         # Log persistente: il dettaglio di infetti/errori/non-verificati
         # di una scansione background non vive in nessuna lista UI, quindi
@@ -1935,7 +2055,7 @@ X-GNOME-Autostart-enabled=true
         if result.infected:
             self.realtime_page.add_log_entry(Path(result.path).name, True, result.signature)
             self.tray_icon.showMessage(
-                "KlamAV - MINACCIA RILEVATA!",
+                f"{APP_NAME} - MINACCIA RILEVATA!",
                 f"{Path(result.path).name} è infetto ed è stato messo in quarantena.",
                 _icon("emblem-virus"),
                 5000

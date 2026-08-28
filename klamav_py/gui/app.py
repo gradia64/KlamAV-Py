@@ -13,7 +13,14 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 from PySide6.QtNetwork import QLocalSocket, QLocalServer
 
-from .main_window import DEFAULT_QUARANTINE_DIR, DEFAULT_SOCKET, MainWindow
+from .main_window import (
+    APP_NAME,
+    DEFAULT_QUARANTINE_DIR,
+    DEFAULT_SOCKET,
+    MainWindow,
+    _migrate_legacy_settings,
+)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="klamav-py-gui")
@@ -24,12 +31,28 @@ def main() -> int:
 
     app = QApplication(sys.argv)
 
-    app.setApplicationName("KlamAV")
-    app.setOrganizationName("KlamAV")
-    app.setDesktopFileName("org.kde.klamav")
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(APP_NAME)
+    # Deve coincidere ESATTAMENTE con il nome del file .desktop installato
+    # (/usr/share/applications/klamav-py.desktop), senza estensione e
+    # tutto minuscolo: è l'app_id che Wayland/KDE usa per abbinare
+    # finestra, icona e raggruppamento in taskbar. Un maiuscolo di troppo
+    # ("klamav-Py") rompe l'abbinamento quanto lo rompeva il vecchio
+    # "org.kde.klamav".
+    app.setDesktopFileName("klamav-py")
     app.setQuitOnLastWindowClosed(False)
 
-    # --- SISTMA SINGLE INSTANCE E IPC ---
+    # Migrazione one-shot delle impostazioni legacy ("KlamAV" ->
+    # "KlamAV-Py"): va fatta nella PRIMA istanza PRIMA di qualunque
+    # lettura QSettings di questo file (qui sotto: start_in_tray) e
+    # prima di MainWindow (che ha la sua chiamata difensiva — idempotente
+    # per costruzione: se il file nuovo è già popolato, non tocca nulla).
+    # Chiamarla qui rende l'ordine delle operazioni successive
+    # irrilevante invece di dipendere dal caso che MainWindow venga
+    # costruita prima della lettura.
+    _migrate_legacy_settings()
+
+    # --- SISTEMA SINGLE INSTANCE E IPC ---
     ipc_socket = QLocalSocket()
     ipc_socket.connectToServer("klamav_py_ipc")
 
@@ -55,12 +78,19 @@ def main() -> int:
     # Passa il server IPC alla finestra
     window.setup_ipc(ipc_server)
 
-    settings = QSettings()
+    # QSettings SEMPRE espliciti (org/app), mai il default da
+    # QApplication: la lettura non deve dipendere dall'ordine con cui
+    # setOrganizationName/setApplicationName vengono chiamati rispetto
+    # alla lettura stessa, né dalla migrazione (che comunque è già
+    # avvenuta, vedi sopra).
+    settings = QSettings(APP_NAME, APP_NAME)
     start_in_tray = settings.value("start_in_tray", False, type=bool)
 
     if start_in_tray and not args.scan_target:
         if window.tray_icon.isVisible():
-            window.tray_icon.showMessage("KlamAV", "L'applicazione è in esecuzione in background.", window.windowIcon(), 3000)
+            window.tray_icon.showMessage(
+                APP_NAME, "L'applicazione è in esecuzione in background.", window.windowIcon(), 3000
+            )
     else:
         window.show()
 
