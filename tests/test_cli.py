@@ -37,3 +37,35 @@ def test_parser_ping():
     parser = build_parser()
     args = parser.parse_args(["ping"])
     assert args.command == "ping"
+
+
+def test_cmd_scan_conta_too_large_separatamente(tmp_path, monkeypatch, capsys):
+    # I file oltre StreamMaxLength non devono finire nel conteggio
+    # "errori": sono un caso a parte (non verificati), non un
+    # malfunzionamento. Qui si finge una scan_stream() che restituisce
+    # un mix dei tre casi, senza toccare clamd davvero.
+    # **kwargs nella firma del fake: la CLI ora passa anche
+    # exclude_dirs/max_stream_size a scan_stream (e potrà passare
+    # altri parametri in futuro) senza rompere questo test.
+    from klamav_py.cli import cmd_scan
+    from klamav_py.clamd_client import ClamdClient, ScanResult
+
+    def fake_scan_stream(self, path, **kwargs):
+        yield ScanResult(path="/tmp/pulito.txt", status="OK")
+        yield ScanResult(
+            path="/tmp/enorme.bin",
+            status="TOO_LARGE",
+            signature="INSTREAM size limit exceeded. ERROR",
+        )
+        yield ScanResult(path="/tmp/rotto.txt", status="ERROR", signature="Permission denied")
+
+    monkeypatch.setattr(ClamdClient, "scan_stream", fake_scan_stream)
+
+    parser = build_parser()
+    args = parser.parse_args(["scan", str(tmp_path), "--quiet"])
+    exit_code = cmd_scan(args)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "3 file scansionati, 0 infetti, 1 errori." in captured.out
+    assert "1 file oltre StreamMaxLength, non verificati" in captured.out

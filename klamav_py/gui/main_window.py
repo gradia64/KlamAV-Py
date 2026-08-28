@@ -57,6 +57,12 @@ from .ping_worker import PingWorker
 DEFAULT_SOCKET = "/run/clamav/clamd.ctl"
 DEFAULT_QUARANTINE_DIR = Path.home() / ".local/share/klamav-py/quarantine"
 DEFAULT_HISTORY_FILE = Path.home() / ".local/share/klamav-py/history.json"
+DEFAULT_LOGS_DIR = Path.home() / ".local/share/klamav-py/logs"
+
+# Quanti log di scansioni programmate tenere su disco prima di iniziare
+# a cancellare i più vecchi: una scansione oraria produce 24 file/giorno,
+# senza rotazione il directory cresce indefinitamente.
+MAX_BG_LOG_FILES = 10
 
 _BUNDLED_ICON_PATH = Path(__file__).parent / "resources" / "klamav-icon.svg"
 
@@ -192,12 +198,31 @@ KDE_STYLESHEET = """
     }
 """
 
+
 class HistoryManager:
     def __init__(self, file_path: Path = DEFAULT_HISTORY_FILE):
         self.file_path = file_path
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def add_entry(self, scan_type: str, target: str, scanned: int, infections: int, errors: int):
+    def add_entry(
+        self,
+        scan_type: str,
+        target: str,
+        scanned: int,
+        infections: int,
+        errors: int,
+        too_large: int = 0,
+        log_file: str | None = None,
+    ):
+        # too_large ha default 0 per compatibilità con le voci scritte
+        # dalle versioni precedenti (che non avevano il campo): la
+        # matematica scanned = clean + infections + errors + too_large
+        # resta leggibile anche per lo storico, dove il campo mancante
+        # significa "non controllato, scan precedente alla feature".
+        # log_file, se presente, punta al log dettagliato su disco
+        # (scansioni background: il dettaglio infetti/errori non vive
+        # in nessuna lista UI, quindi senza questo riferimento sarebbe
+        # irrecuperabile).
         entries = self.get_entries()
         entry = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -205,13 +230,16 @@ class HistoryManager:
             "target": target,
             "scanned": scanned,
             "infections": infections,
-            "errors": errors
+            "errors": errors,
+            "too_large": too_large,
         }
+        if log_file is not None:
+            entry["log_file"] = log_file
         entries.append(entry)
         if len(entries) > 1000:
             entries = entries[-1000:]
         try:
-            with open(self.file_path, 'w', encoding='utf-8') as f:
+            with open(self.file_path, "w", encoding="utf-8") as f:
                 json.dump(entries, f, indent=4)
         except Exception:
             pass
@@ -220,14 +248,14 @@ class HistoryManager:
         if not self.file_path.exists():
             return []
         try:
-            with open(self.file_path, 'r', encoding='utf-8') as f:
+            with open(self.file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, Exception):
             return []
 
     def clear(self):
         try:
-            with open(self.file_path, 'w', encoding='utf-8') as f:
+            with open(self.file_path, "w", encoding="utf-8") as f:
                 json.dump([], f)
         except Exception:
             pass
@@ -240,7 +268,7 @@ class ScanPage(QWidget):
         self.quarantine = quarantine
         self.history = history
         self.worker: ScanWorker | None = None
-        self._scanned = self._infections = self._errors = 0
+        self._scanned = self._infections = self._errors = self._too_large = 0
         self._scan_start_time: float | None = None
 
         self.path_edit = QLineEdit(str(Path.home()))
@@ -256,6 +284,12 @@ class ScanPage(QWidget):
         self.start_button.setFixedHeight(36)
         self.start_button.setIcon(QIcon.fromTheme("media-playback-start"))
         self.start_button.clicked.connect(self._start_scan)
+
+        self.pause_button = QPushButton("Sospendi")
+        self.pause_button.setFixedHeight(36)
+        self.pause_button.setIcon(QIcon.fromTheme("media-playback-pause"))
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self._toggle_pause)
 
         self.stop_button = QPushButton("Interrompi")
         self.stop_button.setFixedHeight(36)
@@ -314,6 +348,7 @@ class ScanPage(QWidget):
         buttons_row = QHBoxLayout()
         buttons_row.setSpacing(10)
         buttons_row.addWidget(self.start_button)
+        buttons_row.addWidget(self.pause_button)
         buttons_row.addWidget(self.stop_button)
         buttons_row.addStretch()
 
@@ -358,14 +393,39 @@ class ScanPage(QWidget):
             QMessageBox.warning(self, "Percorso non valido", f"{target} non esiste.")
             return
 
+        # Guard "una scansione alla volta": una scansione manuale non
+        # parte se una programmata è già in corso (e viceversa la
+        # programmata salta se c'è una manuale, vedi
+        # MainWindow._run_scheduled_scan). Motivi: contesa su clamd
+        # (due traversal home-wide in parallelo raddoppiano I/O e
+        # memoria del demone) e doppio carico sulla UI. Il Real-Time
+        # NON è coperto da questo guard deliberatamente: è la
+        # protezione primaria, agisce su file singoli (secondi), e
+        # clamd gestisce connessioni concorrenti per design —
+        # sospenderlo mentre gira una manuale sarebbe peggio.
+        main_window = self.window()
+        if getattr(main_window, "bg_worker", None) is not None:
+            QMessageBox.information(
+                self,
+                "Scansione già in corso",
+                "Una scansione programmata è in corso in background.\n"
+                "Attendi che termini prima di avviarne una manuale.",
+            )
+            return
+
         self.results_list.clear()
         self.progress.setVisible(True)
         self._set_status_text("Scansione in corso…")
-        self._scanned = self._infections = self._errors = 0
+        self._scanned = self._infections = self._errors = self._too_large = 0
         self._scan_start_time = time.monotonic()
         self.counts_label.setText("")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self.pause_button.setEnabled(True)
+        # Stato di partenza del pulsante pausa: la scansione inizia
+        # sempre da "in corso", mai da "in pausa".
+        self.pause_button.setText("Sospendi")
+        self.pause_button.setIcon(QIcon.fromTheme("media-playback-pause"))
 
         self.worker = ScanWorker(
             socket_path=self.socket_path,
@@ -379,7 +439,37 @@ class ScanPage(QWidget):
         self.worker.quarantined.connect(self._on_quarantined)
         self.worker.error.connect(self._on_error)
         self.worker.finished_scan.connect(self._on_finished)
+        # I segnali paused/resumed (non le richieste pause()/resume())
+        # comandano lo stato del pulsante: il worker li emette quando
+        # entra/esce EFFETTIVAMENTE dalla pausa, cioè al confine tra
+        # file — un click su "Sospendi" mentre un file grosso è ancora
+        # in streaming non deve far cambiare stato alla UI subito.
+        self.worker.paused.connect(self._on_worker_paused)
+        self.worker.resumed.connect(self._on_worker_resumed)
         self.worker.start()
+
+    def _toggle_pause(self) -> None:
+        if self.worker is None:
+            return
+        if self.worker.is_pause_requested:
+            self.worker.resume()
+            # Il testo definitivo ("Sospendi" + status aggiornato) arriva
+            # dal segnale resumed del worker, non da qui: qui la resume è
+            # solo una richiesta non ancora servita.
+            self._set_status_text("Ripresa in corso…")
+        else:
+            self.worker.pause()
+            self._set_status_text("Pausa richiesta… (ha effetto al termine del file corrente)")
+
+    def _on_worker_paused(self) -> None:
+        self.pause_button.setText("Riprendi")
+        self.pause_button.setIcon(QIcon.fromTheme("media-playback-start"))
+        self._set_status_text("In pausa — riprende dal file successivo (Interrompi resta attivo)")
+
+    def _on_worker_resumed(self) -> None:
+        self.pause_button.setText("Sospendi")
+        self.pause_button.setIcon(QIcon.fromTheme("media-playback-pause"))
+        self._set_status_text("Scansione in corso…")
 
     def _stop_scan(self) -> None:
         if self.worker is not None:
@@ -405,25 +495,38 @@ class ScanPage(QWidget):
     def _on_scanning(self, path: str) -> None:
         self._set_status_text(f"Scansione in corso: {path}")
 
-    def _on_progress(self, scanned: int, infections: int, errors: int) -> None:
+    def _on_progress(self, scanned: int, infections: int, errors: int, too_large: int) -> None:
         # Aggiornamento dei contatori, già filtrato/rallentato lato worker
         # (vedi scan_worker.PROGRESS_THROTTLE_SECONDS): qui ci si limita a
         # mostrare i valori ricevuti, senza fare altri calcoli.
         self._scanned = scanned
         self._infections = infections
         self._errors = errors
-        self.counts_label.setText(
-            f"{scanned} scansionati — {infections} infetti — {errors} errori"
-        )
+        self._too_large = too_large
+        text = f"{scanned} scansionati — {infections} infetti — {errors} errori"
+        if too_large:
+            text += f" — {too_large} non verificati (troppo grandi)"
+        self.counts_label.setText(text)
 
     def _on_result(self, result: ScanResult) -> None:
         # Il worker filtra già i risultati "puliti": qui arrivano solo
-        # infetti ed errori, quindi ogni result produce sempre una riga.
+        # infetti, errori e file troppo grandi, quindi ogni result
+        # produce sempre una riga.
         if result.infected:
             item = QListWidgetItem(f"INFETTO — {result.path} ({result.signature})")
             item.setIcon(QIcon.fromTheme("emblem-virus"))
             item.setForeground(QColor("#e4311b"))
             item.setData(Qt.UserRole, {"path": result.path, "signature": result.signature})
+            self.results_list.addItem(item)
+            self.results_list.scrollToBottom()
+        elif result.too_large:
+            # Non è un errore: il file supera StreamMaxLength (clamd.conf)
+            # e semplicemente non è stato verificato. Colore neutro
+            # (non rosso) e icona diversa per non farlo sembrare un
+            # malfunzionamento.
+            item = QListWidgetItem(f"NON VERIFICATO (troppo grande) — {result.path}")
+            item.setIcon(QIcon.fromTheme("dialog-information"))
+            item.setForeground(QColor("palette(mid)"))
             self.results_list.addItem(item)
             self.results_list.scrollToBottom()
         elif result.status == "ERROR":
@@ -503,10 +606,16 @@ class ScanPage(QWidget):
         hours, minutes = divmod(minutes, 60)
         return f"{hours}h {minutes}m {secs}s"
 
-    def _on_finished(self, scanned: int, infections: int, errors: int) -> None:
+    def _on_finished(self, scanned: int, infections: int, errors: int, too_large: int = 0) -> None:
         self.progress.setVisible(False)
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        # Reset del pulsante pausa: nessuna scansione attiva = disabilitato,
+        # e il testo torna a "Sospendi" per il prossimo avvio (anche nel
+        # caso la scansione sia stata interrotta mentre era in pausa).
+        self.pause_button.setEnabled(False)
+        self.pause_button.setText("Sospendi")
+        self.pause_button.setIcon(QIcon.fromTheme("media-playback-pause"))
 
         duration = (
             self._format_duration(time.monotonic() - self._scan_start_time)
@@ -515,6 +624,8 @@ class ScanPage(QWidget):
         )
 
         status_text = f"Completato: {scanned} file scansionati, {infections} infetti, {errors} errori."
+        if too_large:
+            status_text += f" {too_large} non verificati (troppo grandi)."
         self._set_status_text(status_text)
 
         if infections > 0:
@@ -532,10 +643,13 @@ class ScanPage(QWidget):
             f"File scansionati: {scanned}\n"
             f"File infetti: {infections}\n"
             f"Errori: {errors}\n"
+            f"Non verificati (troppo grandi): {too_large}\n"
             f"Esito: {esito}"
         )
 
-        self.history.add_entry("Manuale", self.path_edit.text(), scanned, infections, errors)
+        self.history.add_entry(
+            "Manuale", self.path_edit.text(), scanned, infections, errors, too_large=too_large
+        )
         main_window = self.window()
         if hasattr(main_window, 'history_page'):
             main_window.history_page.refresh()
@@ -764,7 +878,7 @@ class RealTimePage(QWidget):
         btn_row.addWidget(clear_btn)
         layout.addLayout(btn_row)
 
-    def add_log_entry(self, file_name: str, infected: bool, signature: str = "") -> None:
+    def add_log_entry(self, file_name: str, infected: bool, signature: str = "", status: str = "Analizzato") -> None:
         time_str = datetime.now().strftime("%H:%M:%S")
         if infected:
             text = f"[{time_str}] MINACCIA RILEVATA: {file_name} ({signature}) -> In Quarantena"
@@ -772,10 +886,19 @@ class RealTimePage(QWidget):
             item.setIcon(QIcon.fromTheme("emblem-virus"))
             item.setForeground(QColor("#e4311b"))
         else:
-            text = f"[{time_str}] Analizzato: {file_name} (Sicuro)"
+            # status distingue "Analizzato (Sicuro)" da "Non verificato
+            # (troppo grande)": senza questo, un file > StreamMaxLength
+            # arrivava qui con l'etichetta "Sicuro" quando in realtà NON
+            # è stato verificato — un falso rassicurante, il peggior
+            # tipo di messaggio per un antivirus.
+            text = f"[{time_str}] {status}: {file_name}"
             item = QListWidgetItem(text)
-            item.setIcon(QIcon.fromTheme("emblem-checked"))
-            item.setForeground(QColor("gray"))
+            if status.startswith("Non verificato"):
+                item.setIcon(QIcon.fromTheme("dialog-information"))
+                item.setForeground(QColor("gray"))
+            else:
+                item.setIcon(QIcon.fromTheme("emblem-checked"))
+                item.setForeground(QColor("gray"))
 
         self.log_list.insertItem(0, item)
         if self.log_list.count() > 500:
@@ -801,8 +924,10 @@ class HistoryPage(QWidget):
         layout.addWidget(desc)
         layout.addSpacing(10)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Data e Ora", "Tipo", "Percorso", "Scansionati", "Infetti", "Errori"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["Data e Ora", "Tipo", "Percorso", "Scansionati", "Infetti", "Errori", "Non verificati"]
+        )
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -847,6 +972,17 @@ class HistoryPage(QWidget):
             self.table.setItem(row, 4, inf_item)
 
             self.table.setItem(row, 5, QTableWidgetItem(str(entry.get("errors", 0))))
+
+            # get() con default 0: le voci scritte prima dell'introduzione
+            # del campo too_large non avevano questa chiave.
+            self.table.setItem(row, 6, QTableWidgetItem(str(entry.get("too_large", 0))))
+
+            # Il log dettagliato (se esiste) è raggiungibile dal tooltip
+            # sulla riga: senza questo, il riferimento nel JSON sarebbe
+            # conoscibile solo a mano.
+            log_file = entry.get("log_file")
+            if log_file:
+                self.table.item(row, 0).setToolTip(f"Log dettagliato: {log_file}")
 
     def _clear_history(self) -> None:
         confirm = QMessageBox.question(self, "Conferma", "Cancellare tutta la cronologia delle scansioni?")
@@ -929,7 +1065,20 @@ class SchedulerPage(QWidget):
         layout.addStretch()
         layout.addLayout(buttons_row)
 
+        # Stato dell'ultima esecuzione della scansione programmata: senza
+        # questa label, "sta scansionando" e "il timer non è mai partito"
+        # erano indistinguibili (una scansione background non ha nessuna
+        # UI visibile finché non finisce — problema emerso nei test del
+        # 28/08 con la scansione da 330k file invisibile per un'ora).
+        self.execution_status_label = QLabel("")
+        self.execution_status_label.setWordWrap(True)
+        self.execution_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+        layout.addWidget(self.execution_status_label)
+
         self._load_settings()
+
+    def update_progress(self, text: str) -> None:
+        self.execution_status_label.setText(text)
 
     def _browse_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Seleziona cartella da scansionare", self.target_edit.text())
@@ -1080,6 +1229,16 @@ class SettingsPage(QWidget):
         rt_btns_row.addWidget(rt_rm_btn)
         rt_btns_row.addStretch()
         rt_layout.addLayout(rt_btns_row)
+
+        # Punto 4 dell'analisi: addPath()/addPaths() possono fallire in
+        # silenzio (es. limite fs.inotify.max_user_watches esaurito) e,
+        # senza questa label, il Real-Time smetterebbe di coprire una
+        # cartella senza che l'utente se ne accorga mai. Aggiornata da
+        # MainWindow._update_realtime_status_label().
+        self.rt_status_label = QLabel("")
+        self.rt_status_label.setWordWrap(True)
+        self.rt_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+        rt_layout.addWidget(self.rt_status_label)
 
         layout.addWidget(rt_group)
 
@@ -1344,6 +1503,7 @@ class MainWindow(QMainWindow):
         self.schedule_timer = QTimer(self)
         self.schedule_timer.timeout.connect(self._run_scheduled_scan)
         self.bg_worker = None
+        self._bg_result_lines: list[str] = []
         self._load_schedule()
 
         self.fs_watcher = QFileSystemWatcher()
@@ -1351,9 +1511,22 @@ class MainWindow(QMainWindow):
         self._pending_realtime_scans = {}
         self._dir_snapshots = {}
         self._realtime_queue = []
+        self._realtime_configured_paths: list[str] = []
+        self._realtime_watch_failures: list[str] = []
         self.realtime_worker = None
         self._current_realtime_target = ""
         self._load_realtime()
+
+        # Riconciliazione periodica (punto 4 dell'analisi): se una
+        # cartella monitorata viene eliminata e ricreata (es. pulizia
+        # cache di un browser), il watch inotify sottostante muore e
+        # QFileSystemWatcher non lo segnala né lo ripristina da solo —
+        # resterebbe "cieco" su quella cartella finché non si riavvia
+        # l'app. Ogni 60s confrontiamo le cartelle effettivamente
+        # osservate con quelle configurate e ri-aggiungiamo le mancanti.
+        self.realtime_reconcile_timer = QTimer(self)
+        self.realtime_reconcile_timer.timeout.connect(self._reconcile_realtime_watches)
+        self.realtime_reconcile_timer.start(60_000)
 
         self._check_clamd(saved_socket)
 
@@ -1480,29 +1653,125 @@ X-GNOME-Autostart-enabled=true
         self.schedule_timer.start()
 
     def _run_scheduled_scan(self) -> None:
-        if self.bg_worker is not None: return
+        # Guard "una scansione alla volta": la programmata SALTA (non si
+        # accoda) se una manuale è in corso. Accodare significherebbe
+        # colli di coda imprevedibili (due traversal home-wide di fila
+        # per ore); il salto con registrazione in cronologia è esplicito
+        # e verificabile. Il Real-Time non entra nel guard (vedi il
+        # commento in ScanPage._start_scan).
+        if self.bg_worker is not None:
+            return
+        if self.scan_page.worker is not None:
+            target_str = self.settings.value("schedule_target", str(Path.home()))
+            self.history_manager.add_entry("Programmata (saltata)", target_str, 0, 0, 0)
+            if hasattr(self, "history_page"):
+                self.history_page.refresh()
+            self.tray_icon.showMessage(
+                "KlamAV",
+                "Scansione programmata saltata: un'altra scansione è già in corso.",
+                _icon("dialog-information"),
+                4000,
+            )
+            return
+
         target_str = self.settings.value("schedule_target", str(Path.home()))
         target = Path(target_str)
         if not target.exists(): return
 
         self.tray_icon.showMessage("KlamAV", "Avvio scansione automatica in background...", _app_icon(), 3000)
+        self.scheduler_page.update_progress(f"In corso dal {datetime.now():%H:%M} — avvio…")
+        self._bg_result_lines = []
         self.bg_worker = ScanWorker(
             socket_path=self.settings.value("socket_path", DEFAULT_SOCKET),
             target=target,
             quarantine_dir=Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))),
             auto_quarantine=self.settings.value("auto_quarantine", False, type=bool)
         )
+        # A differenza della manuale, i risultati della programmata NON
+        # sono visibili in nessuna lista UI: senza accumularli qui e
+        # scriverli su disco a fine scansione, il dettaglio infetti/
+        # errori andrebbe perso per sempre (emerso nei test: tre
+        # scansioni programmate con risultati mai ispezionabili).
+        self.bg_worker.result_ready.connect(self._on_bg_result)
+        self.bg_worker.progress.connect(self._on_bg_progress)
         self.bg_worker.finished_scan.connect(self._on_bg_finished)
         self.bg_worker.quarantined.connect(self._on_quarantine_changed)
         self.bg_worker.start()
 
-    def _on_bg_finished(self, scanned: int, infections: int, errors: int) -> None:
-        status = f"Scansione automatica completata: {infections} infetti trovati."
+    def _on_bg_result(self, result: ScanResult) -> None:
+        # Stessi formati di riga del log della pagina Scansione, così
+        # "Copia log" dalla GUI e i file di log persistente sono leggibili
+        # allo stesso modo.
+        if result.infected:
+            self._bg_result_lines.append(f"INFETTO — {result.path} ({result.signature})")
+        elif result.too_large:
+            self._bg_result_lines.append(f"NON VERIFICATO (troppo grande) — {result.path}")
+        elif result.status == "ERROR":
+            self._bg_result_lines.append(f"ERRORE — {result.path}: {result.signature}")
+
+    def _on_bg_progress(self, scanned: int, infections: int, errors: int, too_large: int) -> None:
+        # Visibilità della scansione background: label in Pianificazione +
+        # tooltip della tray (già throttled lato worker a 150ms).
+        self.scheduler_page.update_progress(
+            f"In corso — {scanned} file scansionati, {infections} infetti, {errors} errori"
+            + (f", {too_large} non verificati" if too_large else "")
+        )
+        self.tray_icon.setToolTip(
+            f"KlamAV — Scansione automatica in corso: {scanned} file…"
+        )
+
+    def _on_bg_finished(self, scanned: int, infections: int, errors: int, too_large: int = 0) -> None:
+        status = f"Scansione automatica completata: {infections} infetti trovati, {errors} errori."
+        if too_large:
+            status += f" {too_large} file non verificati (troppo grandi)."
         self.tray_icon.showMessage("KlamAV", status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000)
+        self.tray_icon.setToolTip("KlamAV - Protezione Attiva")
+
+        # Log persistente: il dettaglio di infetti/errori/non-verificati
+        # di una scansione background non vive in nessuna lista UI, quindi
+        # va su disco — indicizzato dalla voce di cronologia (campo
+        # log_file, visibile come tooltip in Cronologia).
+        log_path = None
+        if self._bg_result_lines:
+            try:
+                logs_dir = DEFAULT_LOGS_DIR
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                log_path = logs_dir / f"scheduled-{datetime.now():%Y%m%d-%H%M%S}.log"
+                log_path.write_text("\n".join(self._bg_result_lines) + "\n", encoding="utf-8")
+            except OSError:
+                log_path = None  # meglio niente log che far fallire il flusso
+            self._bg_result_lines = []
+
+        # Rotazione: tieni solo i MAX_BG_LOG_FILES più recenti (i nomi
+        # sono ordinabili lessicograficamente per via del formato %Y%m%d).
+        try:
+            old_logs = sorted(DEFAULT_LOGS_DIR.glob("scheduled-*.log"))
+            for old in old_logs[:-MAX_BG_LOG_FILES]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            pass
 
         target_str = self.settings.value("schedule_target", str(Path.home()))
-        self.history_manager.add_entry("Programmata", target_str, scanned, infections, errors)
+        self.history_manager.add_entry(
+            "Programmata",
+            target_str,
+            scanned,
+            infections,
+            errors,
+            too_large=too_large,
+            log_file=str(log_path) if log_path else None,
+        )
         self.history_page.refresh()
+
+        finished_at = datetime.now().strftime("%H:%M")
+        summary = (
+            f"Ultima esecuzione: {finished_at} — {scanned} file, "
+            f"{infections} infetti, {errors} errori"
+            + (f", {too_large} non verificati" if too_large else "")
+        )
+        if log_path:
+            summary += f"\nLog: {log_path}"
+        self.scheduler_page.update_progress(summary)
 
         self.bg_worker = None
 
@@ -1519,14 +1788,80 @@ X-GNOME-Autostart-enabled=true
         paths = self.settings.value("realtime_paths", [])
         if isinstance(paths, str): paths = [paths]
 
+        self._realtime_configured_paths = list(paths)
+
         old_paths = self.fs_watcher.directories()
         if old_paths:
             self.fs_watcher.removePaths(old_paths)
 
+        self._realtime_watch_failures = []
         if paths:
-            self.fs_watcher.addPaths(paths)
+            # addPaths() ritorna l'elenco dei path che NON è riuscita ad
+            # aggiungere (es. fs.inotify.max_user_watches/max_user_instances
+            # esaurito): senza controllare questo valore di ritorno il
+            # fallimento è completamente silenzioso — il Real-Time smette
+            # di coprire quella cartella e nessuno se ne accorge mai.
+            failed = self.fs_watcher.addPaths(paths)
+            self._realtime_watch_failures = list(failed)
             for p in paths:
+                if p not in failed:
+                    self._update_snapshot(p)
+
+        self._update_realtime_status_label()
+
+    def _reconcile_realtime_watches(self) -> None:
+        """
+        Confronta le cartelle effettivamente osservate da fs_watcher con
+        quelle configurate, e ri-aggiunge le mancanti. Copre il caso in
+        cui una cartella monitorata viene eliminata e ricreata (es. un
+        browser che pulisce e ricrea ~/Scaricati): il watch inotify
+        sottostante muore silenziosamente e senza questa riconciliazione
+        periodica il Real-Time resterebbe cieco su quella cartella fino
+        al riavvio dell'app.
+        """
+        if not self._realtime_configured_paths:
+            return
+
+        watched = set(self.fs_watcher.directories())
+        missing = [p for p in self._realtime_configured_paths if p not in watched]
+        if not missing:
+            if self._realtime_watch_failures:
+                self._realtime_watch_failures = []
+                self._update_realtime_status_label()
+            return
+
+        failed = self.fs_watcher.addPaths(missing)
+        self._realtime_watch_failures = list(failed)
+        for p in missing:
+            if p not in failed:
+                # Cartella appena ripristinata: lo snapshot va ricostruito
+                # da zero, altrimenti al primo giro _on_dir_changed
+                # confronterebbe con uno snapshot vuoto o obsoleto.
                 self._update_snapshot(p)
+
+        self._update_realtime_status_label()
+
+    def _update_realtime_status_label(self) -> None:
+        if not hasattr(self, "settings_page"):
+            return
+
+        total = len(self._realtime_configured_paths)
+        if total == 0:
+            self.settings_page.rt_status_label.setText("")
+            return
+
+        active = total - len(self._realtime_watch_failures)
+        if not self._realtime_watch_failures:
+            self.settings_page.rt_status_label.setText(f"Real-Time attivo su {active}/{total} cartelle.")
+            self.settings_page.rt_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+        else:
+            failed_names = ", ".join(self._realtime_watch_failures)
+            self.settings_page.rt_status_label.setText(
+                f"⚠ Real-Time attivo solo su {active}/{total} cartelle. "
+                f"Non monitorate: {failed_names} — probabile limite di sistema "
+                f"(fs.inotify.max_user_watches/max_user_instances)."
+            )
+            self.settings_page.rt_status_label.setStyleSheet("font-size: 12px; color: #e4311b;")
 
     def _update_snapshot(self, dir_path: str) -> None:
         snap = {}
@@ -1605,9 +1940,20 @@ X-GNOME-Autostart-enabled=true
                 _icon("emblem-virus"),
                 5000
             )
+        elif result.too_large:
+            # Il file è stato accodato dalla pagina Real-Time (prima riga
+            # "Analizzato" al momento dell'osservazione) ma non è stato
+            # verificato: correggiamo l'etichetta, che altrimenti resterebbe
+            # "Analizzato (Sicuro)" per un file di cui clamd non ha
+            # esaminato neanche un byte.
+            self.realtime_page.add_log_entry(
+                Path(result.path).name, False, status="Non verificato (troppo grande)"
+            )
 
-    def _on_realtime_finished(self, scanned: int, infections: int, errors: int) -> None:
-        self.history_manager.add_entry("Real-Time", self._current_realtime_target, scanned, infections, errors)
+    def _on_realtime_finished(self, scanned: int, infections: int, errors: int, too_large: int = 0) -> None:
+        self.history_manager.add_entry(
+            "Real-Time", self._current_realtime_target, scanned, infections, errors, too_large=too_large
+        )
         self.history_page.refresh()
 
         self.realtime_worker = None

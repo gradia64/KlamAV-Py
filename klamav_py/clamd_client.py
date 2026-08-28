@@ -11,13 +11,22 @@ Riferimento protocollo: clamd(8), sezione "COMMANDS".
 
 from __future__ import annotations
 
+import os
 import socket
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 CHUNK_SIZE = 8192
+
+# Soglia del pre-check dimensionale, allineata al default di
+# StreamMaxLength in clamd.conf (25MB). Chi chiama può passare un valore
+# diverso (se ha alzato StreamMaxLength nella propria configurazione) o
+# None per disattivare il pre-check: in quel caso TOO_LARGE viene
+# riconosciuto solo quando clamd risponde letteralmente
+# "INSTREAM size limit exceeded".
+DEFAULT_MAX_STREAM_SIZE = 25 * 1024 * 1024
 
 
 class ClamdError(RuntimeError):
@@ -27,12 +36,16 @@ class ClamdError(RuntimeError):
 @dataclass
 class ScanResult:
     path: str
-    status: str  # "OK", "FOUND", "ERROR"
+    status: str  # "OK", "FOUND", "ERROR", "TOO_LARGE"
     signature: Optional[str] = None
 
     @property
     def infected(self) -> bool:
         return self.status == "FOUND"
+
+    @property
+    def too_large(self) -> bool:
+        return self.status == "TOO_LARGE"
 
 
 class ClamdClient:
@@ -45,6 +58,14 @@ class ClamdClient:
         for result in client.scan_stream(Path("/home/utente/scaricati")):
             if result.infected:
                 print(result.path, result.signature)
+
+    Nota sullo stato: la sessione IDSESSION persistente vive
+    sull'istanza (self._session), non nel generatore — è ciò che
+    rende reset_session() raggiungibile dall'esterno (il worker GUI
+    la usa dopo le pause lunghe). Conseguenza: UNA scan_stream per
+    client alla volta. Per scansioni concorrenti (es. GUI + CLI,
+    worker manuale + worker Real-Time) istanziare client separati —
+    è ciò che il progetto già fa.
     """
 
     def __init__(
@@ -60,6 +81,12 @@ class ClamdClient:
         self.tcp_host = tcp_host
         self.tcp_port = tcp_port
         self.timeout = timeout
+        # Stato della sessione persistente: attributo dell'istanza (non
+        # variabile locale del generatore) perché reset_session() debba
+        # potere essere chiamato dall'esterno (ScanWorker, dopo pause
+        # più lunghe dell'IdleTimeout di clamd).
+        self._session: Optional[_ClamdSession] = None
+        self._scanned_in_session = 0
 
     def _connect(self) -> socket.socket:
         if self.unix_socket:
@@ -108,12 +135,64 @@ class ClamdClient:
             raw = self._read_all(sock)
         return self._parse_result_line(raw, fallback_path=str(path))
 
+    @staticmethod
+    def _iter_files(path: Path, exclude_dirs: Optional[Iterable[Path]]) -> Iterator[Path]:
+        """
+        Traversata ricorsiva con PRUNING: le directory escluse non vengono
+        nemmeno attraversate — a differenza di un filtro post-hoc su
+        rglob, che le leggerebbe comunque (e con esse i file di quarantena,
+        ri-rilevandoli a ogni scansione home-wide). Il vecchio
+        `sorted(path.rglob("*"))` costruiva inoltre in memoria la lista
+        COMPLETA dei path (su una home con 300k+ file: centinaia di
+        migliaia di oggetti Path prima ancora di scansionare nulla):
+        qui l'attraversamento è in streaming, memoria costante. L'ordine
+        di attraversamento cambia (per-directory invece che globale
+        lessicografico): nessun consumatore dipende dall'ordine.
+
+        I percorsi in exclude_dirs devono essere assoluti ed espansi
+        (niente '~' non espanso). I symlink-directory non vengono seguiti
+        (followlinks=False), quindi un'esclusione non è aggirabile
+        attraverso un symlink dentro l'albero scansionato.
+        """
+        exclude = [Path(e) for e in (exclude_dirs or [])]
+
+        if path.is_file():
+            yield path
+            return
+
+        # Il top stesso non deve stare dentro un'esclusione (es. per
+        # errore si chiede la scansione della directory di quarantena:
+        # non produrre risultati piuttosto che ri-rilevare i file già
+        # gestiti).
+        if any(path == e or path.is_relative_to(e) for e in exclude):
+            return
+
+        for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+            dirnames.sort()
+            base = Path(dirpath)
+            # Pruning: rimuovere una dir da dirnames (modifica in-place,
+            # convenzione documentata di os.walk) impedisce a os.walk di
+            # scendervi — la directory esclusa non viene nemmeno letta.
+            if exclude:
+                dirnames[:] = [
+                    d
+                    for d in dirnames
+                    if not any(
+                        (base / d) == e or (base / d).is_relative_to(e)
+                        for e in exclude
+                    )
+                ]
+            for name in sorted(filenames):
+                yield base / name
+
     def scan_stream(
         self,
         path: Path,
         persistent: bool = True,
         session_batch_size: int = 500,
         on_file_start: Optional[Callable[[Path], None]] = None,
+        exclude_dirs: Optional[Iterable[Path]] = None,
+        max_stream_size: Optional[int] = DEFAULT_MAX_STREAM_SIZE,
     ) -> Iterator[ScanResult]:
         """
         Invia il contenuto di un file (o ricorsivamente di una directory)
@@ -126,6 +205,19 @@ class ClamdClient:
         che vuole mostrare "sto scansionando X" invece di scoprirlo solo
         a risultato ottenuto (specie su file grossi che richiedono un
         po' per essere letti e inviati).
+
+        exclude_dirs: directory da escludere dall'attraversamento ricorsivo
+        (non vengono né attraversate né lette). È il filtro giusto per la
+        directory di quarantena e i dati dell'applicazione: i file lì
+        dentro sono già stati gestiti e ri-rilevarli a ogni scansione
+        gonfia per sempre infetti/errori con "fantasmi".
+
+        max_stream_size: pre-check dimensionale PRIMA dell'invio (default
+        DEFAULT_MAX_STREAM_SIZE, allineato al default di StreamMaxLength
+        in clamd.conf). Un file oltre soglia esce subito come TOO_LARGE
+        ("non verificato") invece di venire interrotto a metà invio con
+        una pipe interrotta e costare la ricreazione della sessione.
+        None disattiva il pre-check.
 
         persistent=True (default): riusa una singola connessione tramite
         il protocollo IDSESSION di clamd invece di aprirne una nuova per
@@ -143,58 +235,156 @@ class ClamdClient:
         come ScanResult(status="ERROR") e si continua con il prossimo.
         """
         path = Path(path)
-        targets = [path] if path.is_file() else sorted(p for p in path.rglob("*") if p.is_file())
+        try:
+            if not persistent:
+                for target in self._iter_files(path, exclude_dirs):
+                    if on_file_start:
+                        on_file_start(target)
+                    skip = self._size_limit_result(target, max_stream_size)
+                    if skip is not None:
+                        yield skip
+                        continue
+                    try:
+                        yield self._instream_one(target, max_stream_size)
+                    except OSError as exc:
+                        yield self._stream_failure_result(target, exc, max_stream_size)
+                return
 
-        if not persistent:
-            for target in targets:
+            for target in self._iter_files(path, exclude_dirs):
                 if on_file_start:
                     on_file_start(target)
-                try:
-                    yield self._instream_one(target)
-                except OSError as exc:
-                    yield ScanResult(path=str(target), status="ERROR", signature=str(exc))
-            return
 
-        session: Optional[_ClamdSession] = None
-        scanned_in_session = 0
-        for target in targets:
-            if on_file_start:
-                on_file_start(target)
-
-            if session is None:
-                try:
-                    session = _ClamdSession(self)
-                except OSError as exc:
-                    yield ScanResult(
-                        path=str(target),
-                        status="ERROR",
-                        signature=f"impossibile aprire sessione con clamd: {exc}",
-                    )
+                skip = self._size_limit_result(target, max_stream_size)
+                if skip is not None:
+                    yield skip
                     continue
-                scanned_in_session = 0
 
-            try:
-                result = session.scan_one(target)
-            except (ClamdError, OSError) as exc:
-                session.close()
-                session = None
-                yield ScanResult(
-                    path=str(target),
-                    status="ERROR",
-                    signature=f"sessione clamd interrotta: {exc}",
-                )
-                continue
+                if self._session is None:
+                    try:
+                        self._session = _ClamdSession(self)
+                    except OSError as exc:
+                        yield ScanResult(
+                            path=str(target),
+                            status="ERROR",
+                            signature=f"impossibile aprire sessione con clamd: {exc}",
+                        )
+                        continue
+                    self._scanned_in_session = 0
 
-            yield result
-            scanned_in_session += 1
-            if scanned_in_session >= session_batch_size:
-                session.close()
-                session = None
+                try:
+                    result = self._session.scan_one(target)
+                except (ClamdError, OSError) as exc:
+                    # La sessione è da buttare in ogni caso: clamd può
+                    # aver chiuso la connessione (rifiuto per size limit,
+                    # timeout, riavvio del demone). Viene ricreata da
+                    # zero al prossimo file; la classificazione del
+                    # risultato distingue il caso "file oltre soglia"
+                    # (TOO_LARGE, non è un malfunzionamento) dagli errori
+                    # veri.
+                    self.reset_session()
+                    yield self._stream_failure_result(target, exc, max_stream_size)
+                    continue
 
+                yield result
+                self._scanned_in_session += 1
+                if self._session is not None and (
+                    self._session.dead
+                    or self._scanned_in_session >= session_batch_size
+                ):
+                    # dead=True: clamd ha chiuso la connessione al termine
+                    # di QUESTO stream (rifiuto per size limit: dopo la
+                    # risposta chiude la connessione). Ricreare la sessione
+                    # PRIMA del file successivo evita che quel file muoia
+                    # di EPIPE su una connessione già chiusa — il pattern
+                    # delle "vittime collaterali" a cascata osservato sui
+                    # file grandi.
+                    self.reset_session()
+        finally:
+            # Eseguito anche se il consumatore abbandona il generatore
+            # prima della fine (es. "Interrompi" nella GUI): senza questo,
+            # la sessione IDSESSION resterebbe aperta fino al garbage
+            # collection del generatore.
+            self.reset_session()
+
+    def reset_session(self) -> None:
+        """
+        Chiude l'eventuale sessione IDSESSION aperta e la segna per la
+        ricreazione al prossimo file.
+
+        Usato dal worker GUI dopo una pausa più lunga dell'IdleTimeout
+        di clamd (~30s di default: il demone chiude le sessioni inattive,
+        quindi alla ripresa il primo file su una sessione vecchia
+        produrrebbe un errore finto). La sessione è stato dell'istanza
+        proprio per rendere possibile questa chiamata dall'esterno.
+        """
+        session = self._session
+        self._session = None
+        self._scanned_in_session = 0
         if session is not None:
             session.close()
 
-    def _instream_one(self, target: Path) -> ScanResult:
+    @staticmethod
+    def _size_limit_result(
+        target: Path, max_stream_size: Optional[int]
+    ) -> Optional[ScanResult]:
+        """
+        Pre-check dimensionale: None se il file va inviato (o se il
+        pre-check è disattivato o non valutabile), ScanResult(TOO_LARGE)
+        se è oltre soglia. Race nota e accettata: un file che cresce
+        oltre soglia tra il pre-check e lo stream viene comunque gestito
+        dal fallback _stream_failure_result.
+        """
+        if max_stream_size is None:
+            return None
+        try:
+            size = target.stat().st_size
+        except OSError:
+            # File sparito/illegibile: nessun pre-check, il flusso
+            # normale produrrà l'errore opportuno.
+            return None
+        if size <= max_stream_size:
+            return None
+        return ScanResult(
+            path=str(target),
+            status="TOO_LARGE",
+            signature=(
+                f"dimensione {size} byte supera StreamMaxLength "
+                f"({max_stream_size} byte): file non inviato a clamd"
+            ),
+        )
+
+    @staticmethod
+    def _stream_failure_result(
+        target: Path, exc: Exception, max_stream_size: Optional[int]
+    ) -> ScanResult:
+        """
+        Classificazione di un fallimento di stream. Se il file è sopra la
+        soglia, un'interruzione (pipe interrotta, connessione chiusa) è
+        quasi certamente clamd che rifiuta per StreamMaxLength: TOO_LARGE
+        ("non verificato"), non ERROR — è il fallback che copre la race
+        del pre-check e i casi in cui la risposta di clamd non riesce a
+        essere letta prima della chiusura della connessione.
+        """
+        if max_stream_size is not None:
+            try:
+                if target.stat().st_size >= max_stream_size:
+                    return ScanResult(
+                        path=str(target),
+                        status="TOO_LARGE",
+                        signature=(
+                            f"clamd ha interrotto lo stream su un file "
+                            f"oltre la soglia: {exc}"
+                        ),
+                    )
+            except OSError:
+                pass
+        return ScanResult(
+            path=str(target),
+            status="ERROR",
+            signature=f"sessione clamd interrotta: {exc}",
+        )
+
+    def _instream_one(self, target: Path, max_stream_size: Optional[int] = None) -> ScanResult:
         try:
             with self._connect() as sock:
                 sock.sendall(b"zINSTREAM\0")
@@ -212,13 +402,22 @@ class ClamdClient:
                     pass
                 raw = self._read_all(sock)
         except (BrokenPipeError, ConnectionResetError) as exc:
-            return ScanResult(
-                path=str(target),
-                status="ERROR",
-                signature=f"connessione con clamd interrotta: {exc}",
-            )
+            return self._stream_failure_result(target, exc, max_stream_size)
 
         if not raw:
+            if max_stream_size is not None:
+                try:
+                    if target.stat().st_size >= max_stream_size:
+                        return ScanResult(
+                            path=str(target),
+                            status="TOO_LARGE",
+                            signature=(
+                                "nessuna risposta da clamd: rifiuto "
+                                "probabile per StreamMaxLength superato"
+                            ),
+                        )
+                except OSError:
+                    pass
             return ScanResult(
                 path=str(target),
                 status="ERROR",
@@ -248,6 +447,16 @@ class ClamdClient:
                 signature=signature.strip(),
             )
         if raw.endswith("ERROR"):
+            # clamd usa lo stesso suffisso "ERROR" sia per errori generici
+            # (permessi, I/O) sia per il rifiuto esplicito di uno stream
+            # troppo grande (StreamMaxLength in clamd.conf, tipicamente
+            # 25MB di default). Sono concettualmente cose diverse per chi
+            # legge il risultato — "errore" suggerisce un malfunzionamento,
+            # un file "troppo grande" semplicemente non è stato verificato
+            # — quindi li distinguiamo con uno status dedicato invece di
+            # infilarli tutti nel bucket generico "errori".
+            if "size limit exceeded" in raw.lower():
+                return ScanResult(path=fallback_path, status="TOO_LARGE", signature=raw)
             return ScanResult(path=fallback_path, status="ERROR", signature=raw)
         raise ClamdError(f"Risposta clamd non riconosciuta: {raw!r}")
 
@@ -271,12 +480,18 @@ class _ClamdSession:
     connessione. Non pipeline (aspetta ogni risposta prima di mandare il
     comando successivo), quindi l'ID di risposta coincide sempre con
     quello atteso — niente bisogno di gestire riordinamenti.
+
+    Il flag `dead` segnala che clamd ha chiuso la connessione (tipico
+    dopo un rifiuto per StreamMaxLength): scan_stream la vede e ricrea
+    la sessione PRIMA del file successivo, invece di mandarlo in una
+    connessione già chiusa (EPIPE a cascata).
     """
 
     def __init__(self, client: "ClamdClient") -> None:
         self._client = client
         self._sock = client._connect()
         self._buffer = b""
+        self.dead = False
         try:
             self._sock.sendall(b"zIDSESSION\0")
         except OSError:
@@ -296,19 +511,36 @@ class _ClamdSession:
             )
 
         with fh:
-            self._sock.sendall(b"zINSTREAM\0")
-            while chunk := fh.read(CHUNK_SIZE):
-                self._sock.sendall(struct.pack("!L", len(chunk)) + chunk)
-            self._sock.sendall(struct.pack("!L", 0))  # chunk di lunghezza zero = fine stream
+            try:
+                self._sock.sendall(b"zINSTREAM\0")
+                while chunk := fh.read(CHUNK_SIZE):
+                    self._sock.sendall(struct.pack("!L", len(chunk)) + chunk)
+                self._sock.sendall(struct.pack("!L", 0))  # chunk di lunghezza zero = fine stream
+            except (BrokenPipeError, ConnectionResetError):
+                # clamd ha chiuso la connessione mentre inviavamo —
+                # tipicamente rifiuto per StreamMaxLength. La risposta
+                # ("INSTREAM size limit exceeded. ERROR") può essere già
+                # nel buffer: proviamo a leggerla PRIMA di dichiarare
+                # morta la sessione. Se anche la lettura fallisce, la
+                # sessione è davvero morta: l'eccezione sale a
+                # scan_stream, che la ricrea e classifica il risultato
+                # con la dimensione del file.
+                pass
 
         raw = self._read_reply()
         rest = self._client._strip_session_id(raw)
-        return self._client._parse_result_line(rest, fallback_path=str(target))
+        result = self._client._parse_result_line(rest, fallback_path=str(target))
+        if "size limit exceeded" in rest.lower():
+            # Dopo un rifiuto per size limit clamd chiude la connessione:
+            # la sessione non è più riutilizzabile.
+            self.dead = True
+        return result
 
     def _read_reply(self) -> str:
         while b"\0" not in self._buffer:
             data = self._sock.recv(CHUNK_SIZE)
             if not data:
+                self.dead = True
                 raise ClamdError("clamd ha chiuso la connessione durante la sessione IDSESSION")
             self._buffer += data
         reply, _, self._buffer = self._buffer.partition(b"\0")

@@ -52,6 +52,30 @@ def test_parse_error():
     )
     assert result.status == "ERROR"
     assert not result.infected
+    assert not result.too_large
+
+
+def test_parse_stream_size_limit_exceeded_classificato_come_too_large():
+    # Messaggio reale che clamd manda quando un file supera
+    # StreamMaxLength (clamd.conf): NON deve finire nel bucket generico
+    # "ERROR", perché non è un malfunzionamento — è un file non verificato.
+    result = ClamdClient._parse_result_line(
+        "INSTREAM size limit exceeded. ERROR", fallback_path="/tmp/file_enorme.bin"
+    )
+    assert result.status == "TOO_LARGE"
+    assert result.too_large
+    assert not result.infected
+    assert result.path == "/tmp/file_enorme.bin"
+
+
+def test_parse_error_generico_non_diventa_too_large():
+    # Un errore che casualmente contenesse la parola "size" ma non il
+    # messaggio esatto non deve essere riclassificato per sbaglio.
+    result = ClamdClient._parse_result_line(
+        "/tmp/x: Some other error message ERROR", fallback_path="/tmp/x"
+    )
+    assert result.status == "ERROR"
+    assert not result.too_large
 
 
 def test_parse_risposta_non_riconosciuta():

@@ -1,442 +1,518 @@
-# klamav-py
+klamav-py
 
-Riscrittura minimale, in Python, dell'idea alla base di KlamAV 0.22
-(frontend a ClamAV), senza le parti diventate tecnologia morta
-(Dazuko, DCOP, Qt3) e senza i problemi di sicurezza dell'originale
-(shell injection via `KShellProcess`).
+Riscrittura minimale, in Python, dell'idea alla base di KlamAV 0.22(frontend a ClamAV), senza le parti diventate tecnologia morta(Dazuko, DCOP, Qt3) e senza i problemi di sicurezza dell'originale(shell injection via KShellProcess): nessun eseguibile esterno vieneinvocato per la scansione, i path non transitano mai da una shell.
+Caratteristiche
 
-## Requisiti
+    Scansione via protocollo nativo di clamd (INSTREAM/IDSESSION susocket Unix), CLI e GUI.
+    CLI senza dipendenze esterne (solo libreria standard), GUI in PySide6.
+    Quarantena con permessi neutralizzati (0400), nome su disco nonprevedibile, ripristino dei permessi originali, indice condiviso eprotetto da lock tra CLI/GUI/worker.
+    Scansioni pianificate: timer interno alla GUI e/o unit systemd utente(via pacchetto .deb), con log persistente dei risultati.
+    Monitoraggio Real-Time delle cartelle configurate (QFileSystemWatcher,con riconciliazione periodica dei watch persi).
+    Pausa/Ripresa delle scansioni, guard "una scansione alla volta".
+    Pre-check dimensionale: i file oltre StreamMaxLength sono segnalati"non verificati" senza sprecare la sessione clamd.
+    Integrazione menu contestuale Dolphin, autostart, system tray,single-instance con IPC.
 
-- `clamav-daemon` installato e attivo (`clamd`), non i soli binari
-  `clamscan`/`freshclam`: questo progetto parla col demone via socket,
-  non invoca eseguibili esterni per la scansione.
-- Python 3.10+ (usa il walrus operator in `clamd_client.py`).
-- CLI: nessuna dipendenza esterna a runtime, solo libreria standard —
-  gira anche con il Python di sistema, senza venv.
-- GUI: `PySide6`, va installato in un venv dedicato (vedi sotto), non
-  nel Python di sistema.
-- GUI, solo per l'aggiornamento del database virus dal pulsante
-  "Aggiorna Database": `freshclam` nel `PATH` e `pkexec` (PolicyKit)
-  disponibile, dato che l'operazione richiede privilegi di root.
-- GUI, solo per l'integrazione col menu contestuale di Dolphin:
-  un ambiente KDE Plasma con `kbuildsycoca5`/`kbuildsycoca6`.
-- Sviluppo/test: `pytest` (vedi `requirements-dev.txt`), non richiesto
-  a runtime.
+Requisiti
 
-## Setup del venv (solo per la GUI)
+    clamav-daemon installato e attivo (clamd), non i soli binariclamscan/freshclam: questo progetto parla col demone via socket,non invoca eseguibili esterni per la scansione.
+    Python 3.10+ come baseline dichiarata. Il minimo tecnico reale è 3.9(Path.is_relative_to); il walrus operator usato in clamd_client.pyesiste dal 3.8. Testato su 3.12/3.13/3.14 (Debian Sid, venv).
+    CLI: nessuna dipendenza esterna a runtime — gira anche con il Pythondi sistema, senza venv.
+    GUI: PySide6, va installato in un venv dedicato (vedi sotto), nonnel Python di sistema.
+    GUI, solo per l'aggiornamento del database virus dal pulsante"Aggiorna Database": freshclam nel PATH e pkexec (PolicyKit)disponibili, dato che l'operazione richiede privilegi di root.
+    GUI, solo per l'integrazione col menu contestuale di Dolphin:un ambiente KDE Plasma con kbuildsycoca5/kbuildsycoca6.
+    Sviluppo/test: pytest (vedi requirements-dev.txt), non richiestoa runtime.
 
-```bash
+Installazione
+Da pacchetto .deb (consigliata per l'uso quotidiano)
+
+sudo apt install devscripts debhelper dh-python pybuild-plugin-pyproject \    python3-all python3-setuptoolscd klamav-pydpkg-buildpackage -us -uc -bsudo dpkg -i ../klamav-py_<versione>-1_all.deb
+
+Installa klamav-py (CLI) e klamav-py-gui in /usr/bin/, abilita
+automaticamente il timer systemd utente per la scansione programmata e
+registra l'applicazione nei menu. Dettagli e avvertenze nella sezione
+"Pacchettizzazione .deb" più sotto.
+Da sorgenti (sviluppo)
+bash
+ 
+  
+ 
+ 
 cd klamav-py
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-```
+ 
+ 
 
-Da lì in poi, con il venv attivo:
-
-```bash
+Con il venv attivo (o chiamando direttamente venv/bin/python):
+bash
+ 
+  
+ 
+ 
 python3 -m klamav_py.gui.app
-```
+ 
+ 
 
-Se preferisci non attivare il venv ogni volta, puoi chiamare direttamente
-l'interprete del venv:
+La CLI invece non ha bisogno del venv e gira con il Python di sistema.
 
-```bash
-klamav-py/venv/bin/python -m klamav_py.gui.app
-```
-
-Questo è anche il motivo per cui la `ExecStart=` in
-`systemd/klamav-scan.service` punta a `/opt/klamav-py/venv/bin/klamav-py`
-e non a un comando globale: la CLI non ha bisogno del venv (nessuna
-dipendenza esterna), ma se installi tutto insieme in un unico venv sotto
-`/opt/klamav-py/venv` funziona comunque, sia per CLI che per GUI.
-
-## Uso rapido
-
-```bash
-# CLI: verifica che clamd risponda (funziona anche senza venv)
+Nota per lo sviluppo: se nel venv esiste anche una copia installata
+del pacchetto (pip install . non-editable), l'import di klamav_py
+può risolvere lì invece che nella checkout a seconda della directory
+corrente. Per evitare la trappola usa pip install -e .; e su una
+macchina con checkout e .deb installati insieme, verifica sempre quale
+istanza GUI è effettivamente viva (ps aux | grep klamav): la
+single-instance fa sì che il secondo lancio venga assorbito dalla prima
+istanza esistente, qualunque essa sia.
+Uso rapido
+bash
+ 
+ # CLI: verifica che clamd risponda (funziona anche senza venv)
 python3 -m klamav_py.cli ping
 
 # CLI: scansione con quarantena automatica
-python3 -m klamav_py.cli scan /home/utente/Scaricati --quarantine /var/lib/klamav-py/quarantine
+python3 -m klamav_py.cli scan /home/utente/Scaricati \
+    --quarantine ~/.local/share/klamav-py/quarantine
 
-# CLI: scansione con log dettagliato degli errori su file
-python3 -m klamav_py.cli scan /home --log-errors /tmp/klamav-errors.log
+# CLI: scansione della home con esclusioni e log errori su file
+python3 -m klamav_py.cli scan ~ \
+    --exclude ~/.local/share/klamav-py \
+    --exclude ~/.cache \
+    --log-errors /tmp/klamav-errors.log
 
 # GUI (richiede il venv attivo o l'interprete del venv, vedi sopra)
 python3 -m klamav_py.gui.app
 # oppure, con socket/quarantena non standard:
-python3 -m klamav_py.gui.app --socket /run/clamav/clamd.ctl --quarantine-dir ~/.local/share/klamav-py/quarantine
+python3 -m klamav_py.gui.app --socket /run/clamav/clamd.ctl \
+    --quarantine-dir ~/.local/share/klamav-py/quarantine
 # oppure per avviare direttamente la scansione di un percorso (usato
 # anche dall'integrazione Dolphin, vedi sotto):
 python3 -m klamav_py.gui.app --scan-target /percorso/da/scansionare
-```
+  
+ 
+ 
+# CLI: verifica che clamd risponda (funziona anche senza venv)
+python3 -m klamav_py.cli ping
 
-## Connessione persistente a clamd
+# CLI: scansione con quarantena automatica
+python3 -m klamav_py.cli scan /home/utente/Scaricati \
+    --quarantine ~/.local/share/klamav-py/quarantine
 
-Di default `scan_stream` riusa una singola connessione (sessione
-`IDSESSION` di clamd) per più file di fila invece di aprirne una nuova
-per ognuno — su alberi con decine di migliaia di file evita l'overhead
-di connect ripetuto che si vedeva nel primo test (90698 file
-scansionati con una connessione per file). La sessione viene comunque
-richiusa e riaperta ogni 500 file (`--session-batch-size` per la CLI)
-per limitare l'impatto di eventuali limiti non documentati su sessioni
-molto lunghe, e viene ricreata da zero ogni volta che qualcosa va
-storto: un file problematico non compromette il resto della scansione,
-esattamente come nella versione precedente non persistente.
+# CLI: scansione della home con esclusioni e log errori su file
+python3 -m klamav_py.cli scan ~ \
+    --exclude ~/.local/share/klamav-py \
+    --exclude ~/.cache \
+    --log-errors /tmp/klamav-errors.log
 
-Se sospetti che un problema sia legato specificamente alla sessione
-persistente, `--no-persistent` torna al comportamento "una connessione
-per file" per isolare il caso.
+# GUI (richiede il venv attivo o l'interprete del venv, vedi sopra)
+python3 -m klamav_py.gui.app
+# oppure, con socket/quarantena non standard:
+python3 -m klamav_py.gui.app --socket /run/clamav/clamd.ctl \
+    --quarantine-dir ~/.local/share/klamav-py/quarantine
+# oppure per avviare direttamente la scansione di un percorso (usato
+# anche dall'integrazione Dolphin, vedi sotto):
+python3 -m klamav_py.gui.app --scan-target /percorso/da/scansionare
+ 
+ 
 
-A fine scansione la CLI stampa anche un riepilogo degli errori
-raggruppati per tipo (es. "2 Permission denied", "1 Broken pipe"),
-invece di dover fare `grep`/`sort`/`uniq -c` manualmente sull'output.
+La directory passata a --quarantine è sempre esclusa
+automaticamente dall'attraversamento, sia in CLI che in GUI: i file
+già gestiti non devono essere ri-rilevati (e ri-quarantenati) a ogni
+scansione che copre la loro posizione.
+CLI: opzioni di scansione
 
-## GUI: panoramica dell'interfaccia
+     --quarantine DIR — sposta i file infetti in DIR (creata con
+    permessi 0700).
+     --exclude DIR — directory da escludere dall'attraversamento
+    ricorsivo (ripetibile). Le directory escluse non vengono nemmeno
+    lette (pruning): utile per cache, Trash, mount di rete sincronizzati.
+     --max-stream-size BYTES — soglia del pre-check dimensionale
+    (default 25MB, allineato a StreamMaxLength di clamd.conf;
+    0 disattiva il pre-check).
+     --log-errors FILE — dettaglio di ogni errore (path e motivo) su file.
+     --no-persistent / --session-batch-size N — controllo della
+    sessione persistente (vedi sezione dedicata).
 
-La GUI (`klamav_py/gui/`) è un'applicazione PySide6 a finestra unica
-con una barra laterale e uno stile ispirato a KDE Plasma (usa sempre i
-colori della palette di sistema, mai colori hardcoded, tranne per gli
-stati semantici come "infetto"). È organizzata in sette sezioni:
+Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore
+di esecuzione (clamd irraggiungibile, path inesistente) — utile per
+OnFailure= in systemd o per script di monitoraggio.
+Sessione persistente, pre-check dimensionale, ricostruzione
 
-- **Scansione** — avvia una scansione manuale su un percorso a scelta.
-  Esegue in un `QThread` separato (`ScanWorker`), quindi la finestra
-  resta reattiva anche su directory grandi, e mostra i risultati man
-  mano che arrivano invece di bloccare fino alla fine come faceva
-  l'originale con `KProcess` gestito male. Durante la scansione, la
-  barra di stato mostra il file che si sta processando in quel momento
-  (non solo il risultato a cose fatte).
+Di default scan_stream riusa una singola connessione (sessione
+IDSESSION) per più file di fila invece di aprirne una nuova per
+ognuno — su alberi con decine di migliaia di file evita l'overhead di
+connect ripetuto. La sessione viene comunque richiusa e riaperta ogni
+500 file (--session-batch-size) per limitare l'impatto di limiti non
+documentati su sessioni molto lunghe, e ricreata da zero ogni volta che
+qualcosa va storto: un file problematico non compromette il resto della
+scansione. Quando clamd chiude la connessione (tipico caso: rifiuto per
+StreamMaxLength), la sessione è marcata come morta e ricreata
+prima del file successivo, così i file seguenti non muoiono a
+cascata su una connessione già chiusa.
 
-  **Quarantena manuale di default.** La casella "Metti in quarantena
-  automaticamente i file infetti" è disattivata di default: i file
-  segnalati come infetti restano dove sono, e li sposti tu manualmente
-  selezionandoli nella lista e premendo "Metti in quarantena i
-  selezionati" — comodo per controllare un eventuale falso positivo
-  prima di spostare qualcosa. Se preferisci il comportamento
-  automatico ("vecchio stile"), spunta la casella prima di avviare la
-  scansione.
+Pre-check dimensionale: i file oltre la soglia (default 25MB, come
+StreamMaxLength) non vengono inviati affatto a clamd — escono subito
+con status TOO_LARGE ("non verificato"), distinto dagli errori veri
+sia in CLI che in GUI. Senza pre-check, clamd rifiuta lo stream a metà
+invio chiudendo la connessione: l'errore che l'utente vedrebbe sarebbe
+una "pipe interrotta" su un file che in realtà sta bene (vedi
+"Diagnosi degli errori comuni"). Il pre-check ha una race nota e
+accettata — un file che cresce oltre soglia tra il controllo e l'invio
+viene comunque gestito dal fallback che classifica gli errori di stream
+su file sopra soglia come TOO_LARGE.
 
-- **Cronologia** — registro persistente (`~/.local/share/klamav-py/history.json`,
-  ultime 1000 voci) di tutte le scansioni eseguite, manuali,
-  programmate o real-time, con data/ora, percorso, numero di file
-  scansionati, infetti ed errori.
+Se sospetti che un problema sia legato alla sessione persistente,
+--no-persistent torna al comportamento "una connessione per file"
+per isolare il caso.
 
-- **Quarantena** — legge lo stesso indice JSON usato dalla CLI
-  (`index.json` nella directory di quarantena), quindi i due strumenti
-  sono intercambiabili sugli stessi dati. Permette di ripristinare un
-  file nella posizione originale o eliminarlo definitivamente.
+A fine scansione la CLI stampa un riepilogo degli errori raggruppati
+per tipo (es. "2 Permission denied", "1 Broken pipe"), invece di dover
+fare grep/sort/uniq -c manuali.
+GUI: panoramica dell'interfaccia
 
-- **Aggiornamenti** — scarica le definizioni virus lanciando
-  `freshclam --stdout` tramite `pkexec` (autenticazione PolicyKit),
-  fermando e riavviando automaticamente il demone `clamav-freshclam`/
-  `freshclam` di sistema per evitare conflitti di lock sul file di
-  log. L'output del comando è mostrato in tempo reale in una console.
-  Di default parte automaticamente 1.5s dopo l'avvio dell'app
-  (disattivabile in Impostazioni).
+Applicazione PySide6 a finestra unica con barra laterale e stile
+ispirato a KDE Plasma (usa sempre i colori della palette di sistema,
+mai colori hardcoded, tranne per gli stati semantici come "infetto").
+Sette sezioni:
 
-- **Real-Time** — mostra il log delle scansioni automatiche eseguite
-  sulle cartelle monitorate (impostabili in Impostazioni). Il
-  monitoraggio usa `QFileSystemWatcher`: quando un file in una
-  cartella osservata viene creato o modificato, la scansione parte
-  dopo un debounce di 3 secondi (per non scansionare un file ancora in
-  fase di scrittura) e i file infetti vengono **sempre** messi in
-  quarantena automaticamente, a differenza della pagina Scansione dove
-  di default è manuale.
+     
 
-  **Scelta di design intenzionale**, non un'incoerenza: le cartelle
-  monitorate in Real-Time sono tipicamente destinazioni di file appena
-  scaricati/ricevuti da fuori (es. `~/Scaricati`), non file già
-  presenti da tempo sul sistema — il rischio di un falso positivo su
-  un file "nuovo" e ancora non toccato da nessuno è basso, quindi ha
-  senso agire subito. La pagina Scansione, invece, può essere puntata
-  su cartelle con file di sistema o dati importanti, dove un falso
-  positivo va verificato prima di spostare qualcosa: da qui la
-  quarantena manuale di default.
+    Scansione — scansione manuale su un percorso a scelta, in un
+    QThread separato (ScanWorker): la finestra resta reattiva anche
+    su directory grandi, e la barra di stato mostra il file in
+    elaborazione in tempo reale (con elisione del testo per non far
+    crescere il layout su percorsi lunghi). I contatori distinguono
+    scansionati / infetti / errori / non verificati (troppo grandi),
+    e solo infetti/errori/non-verificati producono righe in lista.
 
-- **Pianificazione** — scansione automatica ricorrente (ogni N ore o
-  giorni) su una cartella a scelta, tramite un `QTimer` interno.
-  Richiede che l'applicazione resti in esecuzione (anche minimizzata
-  nella system tray): non è un timer di sistema come
-  `systemd/klamav-scan.timer`, che invece funziona anche a GUI chiusa
-  ma va configurato ed eseguito separatamente (vedi sezione dedicata
-  più sotto).
+    Sospendi / Riprendi. La pausa ha granularità di file intero: il
+    file in streaming viene completato, poi il worker si ferma (il
+    pulsante segue i segnali del worker, non il click, quindi lo stato
+    mostrato è sempre quello effettivo). "Interrompi" resta attivo anche
+    in pausa. Dopo una pausa più lunga di ~25s (vicino all'IdleTimeout
+    di clamd, 30s di default) la sessione viene ricreata proattivamente
+    alla ripresa, per non produrre un errore finto sul primo file.
 
-- **Impostazioni** — socket di clamd, directory di quarantena,
-  cartelle monitorate per il Real-Time, autostart al login,
-  avvio minimizzato nella system tray, aggiornamento automatico del
-  database all'avvio, e installazione/rimozione dell'integrazione col
-  menu contestuale di Dolphin.
+    Quarantena manuale di default. La casella "Metti in quarantena
+    automaticamente i file infetti" è disattivata di default: i file
+    segnalati restano dove sono e li sposti tu con "Metti in quarantena
+    i selezionati" — comodo per valutare un falso positivo prima di
+    spostare qualcosa. "Copia log" copia negli appunti tutte le righe
+    della lista (infetti, errori, non verificati).
+     
 
-Tutte le impostazioni sono salvate con `QSettings` (organizzazione
+    Cronologia — registro persistente
+    (~/.local/share/klamav-py/history.json, ultime 1000 voci) con
+    data/ora, tipo, percorso, scansionati, infetti, errori e non
+    verificati. Le scansioni programmate indicizzano anche il log
+    dettagliato su disco (tooltip sulla riga): il dettaglio
+    infetti/errori di una scansione background, che non passa da nessuna
+    lista UI, resta così sempre ispezionabile.
+     
+
+    Quarantena — legge lo stesso indice JSON usato dalla CLI
+    (index.json nella directory di quarantena): i due strumenti sono
+    intercambiabili sugli stessi dati. Ripristino nella posizione
+    originale (con ripristino dei permessi originali, rifiuto esplicito
+    se il percorso è stato nel frattempo rioccupato) o eliminazione
+    definitiva.
+     
+
+    Aggiornamenti — scarica le definizioni virus lanciando
+    freshclam --stdout tramite pkexec (autenticazione PolicyKit),
+    fermando e riavviando automaticamente il demone clamav-freshclam/
+    freshclam di sistema per evitare conflitti di lock sul file di
+    log. Output mostrato in tempo reale. Di default parte automaticamente
+    1.5s dopo l'avvio dell'app (disattivabile in Impostazioni).
+     
+
+    Real-Time — log delle scansioni automatiche sulle cartelle
+    monitorate (configurabili in Impostazioni). Usa QFileSystemWatcher:
+    creazione/modifica di un file → scansione dopo un debounce di 3s (per
+    non scansionare file ancora in scrittura), e i file infetti vengono
+    sempre messi in quarantena automaticamente. I file troppo grandi
+    sono etichettati "Non verificato", non "Sicuro" (vedi scelte di
+    design).
+     
+
+    Pianificazione — scansione ricorrente (ogni N ore o giorni) su
+    una cartella a scelta, tramite QTimer interno: richiede l'app in
+    esecuzione (anche minimizzata in tray). Durante l'esecuzione la
+    pagina mostra lo stato e i contatori live; il tooltip della tray
+    riflette l'avanzamento; a fine scansione il log dettagliato viene
+    scritto in ~/.local/share/klamav-py/logs/scheduled-<timestamp>.log
+    (rotazione: ultime 10 esecuzioni) e referenziato in Cronologia. Non
+    è un timer di sistema come quello del pacchetto .deb, che funziona
+    anche a GUI chiusa (vedi "Scansioni pianificate: i tre meccanismi").
+     
+
+    Impostazioni — socket di clamd, directory di quarantena,
+    cartelle monitorate per il Real-Time (con indicatore "Real-Time
+    attivo su N/M cartelle"), autostart al login, avvio minimizzato in
+    tray, aggiornamento DB all'avvio, integrazione Dolphin.
+
+Tutte le impostazioni sono salvate con QSettings (organizzazione
 "KlamAV", applicazione "KlamAV" — su Linux tipicamente
-`~/.config/KlamAV/KlamAV.conf`).
+~/.config/KlamAV/KlamAV.conf).
+Scelte di design intenzionali
 
-### System tray e single-instance
+Quarantena manuale in Scansione, automatica in Real-Time. Non è
+un'incoerenza: le cartelle monitorate in Real-Time sono tipicamente
+destinazioni di file appena scaricati/ricevuti da fuori (es.
+~/Scaricati) — il rischio di falso positivo su un file nuovo e mai
+toccato è basso, quindi ha senso agire subito. La pagina Scansione può
+essere puntata su cartelle con dati importanti, dove un falso positivo
+va verificato prima di spostare qualcosa.
+
+Guard "una scansione alla volta" tra manuale e programmata. Una
+scansione manuale non parte se una programmata è in corso (e viceversa
+la programmata salta, con voce esplicita in Cronologia e notifica, se
+una manuale è attiva). Motivi: contesa su clamd (due traversal
+home-wide in parallelo raddoppiano I/O e memoria del demone) e doppio
+carico sul filesystem. Il Real-Time è deliberatamente esente dal
+guard: è la protezione primaria, agisce su file singoli (secondi), e
+clamd gestisce connessioni concorrenti per design — sospenderlo mentre
+gira una manuale sarebbe peggio. Una scansione in pausa resta "in
+corso" ai fini del guard: blocca la programmata finché non riprende o
+viene interrotta.
+
+Esclusione della directory di quarantena. I file in quarantena sono
+i dati gestiti dall'applicazione: vengono esclusi dall'attraversamento
+(pruning, non vengono nemmeno letti) e, come difesa in profondità,
+quarantine_file() rifiuta esplicitamente di ri-quarantenare un file
+che si trova già dentro la directory di quarantena. Senza questi guard,
+una scansione home-wide rileverebbe i vecchi EICAR in quarantena a ogni
+ciclo, gonfiando per sempre infetti ed errori con "fantasmi" già
+gestiti.
+System tray e single-instance
 
 L'app resta attiva nella system tray anche chiudendo la finestra (la
-`X` la nasconde, non la termina: si esce dal menu della tray o da
-"Esci"). È pensata per restare in esecuzione in background per la
-pianificazione e il monitoraggio real-time.
+X la nasconde, non la termina: si esce dal menu della tray o da
+"Esci"). È pensata per restare in background per pianificazione e
+Real-Time.
 
-È inoltre single-instance: se lanci `klamav_py.gui.app` mentre un'altra
-istanza è già attiva, la seconda istanza invia il proprio
-`--scan-target` (se presente) alla prima via `QLocalServer`/
-`QLocalSocket` locale e termina subito, invece di aprire una seconda
-finestra. Questo è il meccanismo che rende sensata l'integrazione con
-Dolphin: cliccando "Scansiona con KlamAV-Py" su più file/cartelle in
-sessioni diverse, tutte le richieste finiscono nella stessa finestra
-già aperta.
+È inoltre single-instance: se lanci la GUI mentre un'altra istanza è
+già attiva, la seconda invia il proprio --scan-target (se presente)
+alla prima via QLocalServer/QLocalSocket e termina subito, invece
+di aprire una seconda finestra. È il meccanismo che rende sensata
+l'integrazione Dolphin: cliccando "Scansiona con KlamAV-Py" su più
+file/cartelle, tutte le richieste finiscono nella stessa finestra già
+aperta.
+Integrazione Dolphin
 
-### Integrazione Dolphin
-
-Dal pannello Impostazioni si può installare una voce "Scansiona con
+Dal pannello Impostazioni si può installare la voce "Scansiona con
 KlamAV-Py" nel menu contestuale di Dolphin, scrivendo un file
-`.desktop` in `~/.local/share/kservices5/ServiceMenus/` e
-`~/.local/share/kio/servicemenus/` e rigenerando la cache dei servizi
-KDE (`kbuildsycoca5`/`6`). Vedi la sezione "Problemi noti" più sotto
-per una precisazione sul quoting del percorso passato dalla shell.
+.desktop in ~/.local/share/kservices5/ServiceMenus/ e
+~/.local/share/kio/servicemenus/ e rigenerando la cache dei servizi
+KDE (kbuildsycoca5/6). L'Exec= invoca direttamente il comando
+senza shell intermedia: un nome file con ", ` o $ non può
+rompere il quoting.
+Autostart
 
-### Autostart
-
-Se abilitato, scrive un file `.desktop` in `~/.config/autostart/` che
+Se abilitato, scrive un file .desktop in ~/.config/autostart/ che
 lancia la GUI con l'interprete Python correntemente in uso; se
 disabilitato, rimuove il file.
+Scansioni pianificate: i tre meccanismi
 
-## Cosa manca rispetto a KlamAV originale (di proposito)
+    Timer della GUI (pagina Pianificazione): gira solo con l'app
+    attiva (anche in tray), ma offre progresso live, log persistente e
+    integrazione completa con la UI.
+    Unit systemd utente (installata dal .deb): parte al login di
+    ciascun utente senza configurazione, funziona a GUI chiusa. Per far
+      la girare anche a utente scollegato: loginctl enable-linger $USER.
+    Usa lo stesso percorso di quarantena di default della GUI
+    (~/.local/share/klamav-py/quarantine).
+    Unit systemd di sistema (systemd/ nel repo, solo per
+    installazioni manuali multi-utente/server): da configurare ed
+    abilitare a mano; la ExecStart assume un venv sotto
+    /opt/klamav-py/venv, ma la CLI gira anche senza venv. Scenario
+    distinto dalla unit utente del .deb, non la stessa unit installata
+    in due modi.
 
-- **Nessun on-access scanning kernel-level.** Il monitoraggio
-  Real-Time di questa GUI è basato su `QFileSystemWatcher` (polling
-  lato Qt su modifiche a directory osservate esplicitamente, non
-  ricorsivo, con qualche secondo di latenza) — non è un sostituto di
-  un vero on-access scanner. Per quello ClamAV fornisce già
-  `clamonacc` (fanotify-based): non ha senso reimplementare un
-  equivalente di Dazuko. Se ti serve on-access reale, configuralo via
-  `clamd.conf`/`clamav-clamonacc.service`, non è compito di questo
-  progetto.
-- **Nessuna integrazione mail client-side.** Se ti serve scansione
-  della posta, oggi ha più senso lato server (milter) che lato client
-  KMail/Evolution come faceva `klammail`.
+Diagnosi degli errori comuni
 
-## Problemi noti (audit) — stato
+Su una scansione home-wide di una macchina di sviluppo reale (330k+
+file) gli errori residui sono fisiologici e riconoscibili:
 
-Punti emersi rileggendo l'intero codice dopo le ultime modifiche.
+     "Pipe interrotta" su file grandi — clamd ha rifiutato lo stream
+    per StreamMaxLength (25MB di default in clamd.conf) chiudendo la
+    connessione a metà invio. Con il pre-check dimensionale attivo è
+    quasi scomparso: i file oltre soglia escono come "non verificati"
+    senza toccare la sessione. Per alzare il limite:
+    StreamMaxLength 100M in clamd.conf e riavvio di clamd — con il
+    tradeoff che un limite più alto rende più facile intasare clamd con
+    stream enormi.
+    Nota di onestà: anche i file entro il limite di stream restano
+    soggetti a MaxScanSize/MaxFileSize/MaxRecursion di clamd
+    (default approssimativi 100M/25M/16): un archivio corposo può
+    risultare "OK" con scansione parziale — limite di clamd stesso, non
+    rilevabile da questo progetto.
+     Errno 13 "Permesso negato" — permessi reali del filesystem (es.
+    file posseduti da container Docker dentro la home). Non è un
+    problema del progetto.
+     Errno 2 "File o directory non esistente" — file spariti durante
+    la traversata (Trash svuotato, sync cloud che desincronizza, browser
+    che riscrive la cache). Rumore atteso.
+     "timed out" — tipicamente file grandi letti via mount di rete
+    (Nextcloud, NFS): latenza, non malfunzionamento.
+     Errori a raffica di un solo tipo (migliaia) — quasi certamente
+    clamd morto o riavviato a metà scansione:
+    journalctl -u clamav-daemon.service nell'intervallo della
+    scansione, e dmesg | grep -i oom per il caso OOM. Il riepilogo
+    per tipo della CLI (o il log persistente della programmata) rende
+    questo caso immediatamente distinguibile dal rumore fisiologico.
 
-**Corretti:**
+Cosa manca rispetto a KlamAV originale (di proposito)
 
-- **Avvio non più bloccante.** Il ping a clamd all'apertura della
-  finestra ora gira in un `QThread` dedicato (`gui/ping_worker.py`,
-  `PingWorker`) invece che in modo sincrono nel thread della UI: la
-  finestra appare subito, l'eventuale avviso "clamd non raggiungibile"
-  arriva in modo asincrono quando il ping risponde (o va in timeout).
-- **Quoting nel file `.desktop` di Dolphin.** Rimosso il wrapper
-  `sh -c '... "%f"'`: ora `Exec=` invoca direttamente l'interprete
-  Python con `%f` come argomento, senza passare da una shell
-  intermedia. Elimina il rischio che un nome file con `"`, `` ` `` o
-  `$` rompa il quoting — esattamente il tipo di problema che il
-  progetto dichiara di aver eliminato rispetto a klamav 0.22.
-- **Gestione errori in `_manage_autostart()`.** Ora ritorna
-  `(successo, messaggio_errore)` invece di sollevare un'eccezione non
-  gestita: se la scrittura in `~/.config/autostart/` fallisce (es. per
-  permessi), `SettingsPage` mostra un avviso invece di un traceback.
-- **Import inutilizzato** in `gui/scan_worker.py` (`ScanResult`)
-  rimosso; verificato con `pyflakes` che non ce ne siano altri.
-- **Sovrapposizione dei widget in Impostazioni al ridimensionamento
-  della finestra.** `SettingsPage` chiedeva una dimensione minima
-  rigida di 593×781px (parecchi widget a dimensione fissa: caselle di
-  testo e pulsanti alti 36px, la lista cartelle monitorate alta
-  120px, testi lunghi nelle checkbox). Qt normalmente impedisce di
-  scendere sotto questo minimo, ma non tutti i window manager lo
-  rispettano rigidamente durante un ridimensionamento interattivo: se
-  lo ignorano, il layout comprime i widget a dimensione fissa fino a
-  farli sovrapporre invece di restringersi. Il contenuto della pagina
-  ora vive dentro un `QScrollArea` (minimo sceso a 68×68px, verificato
-  con un confronto screenshot prima/dopo): se lo spazio non basta più
-  compare una scrollbar, non una sovrapposizione. Le due descrizioni
-  più lunghe (Real-Time, Dolphin) hanno anche `setWordWrap(True)` per
-  ridurre la larghezza minima naturale richiesta.
+     Nessun on-access scanning kernel-level. Il monitoraggio Real-Time
+    è basato su QFileSystemWatcher (modifiche a directory osservate
+    esplicitamente, non ricorsivo, con qualche secondo di latenza) —
+    non è un sostituto di un vero on-access scanner. Per quello ClamAV
+    fornisce già clamonacc (fanotify-based): non ha senso
+    reimplementare un equivalente di Dazuko. Se serve on-access reale,
+    si configura via clamd.conf/clamav-clamonacc.service.
+     Nessuna integrazione mail client-side. Se serve scansione della
+    posta, oggi ha più senso lato server (milter) che lato client
+    KMail/Evolution come faceva klammail.
 
-  Le altre pagine (`ScanPage` 382×415, `QuarantinePage` 397×218,
-  `SchedulerPage` 358×338, ecc.) hanno minimi più contenuti e non sono
-  state toccate in questo giro perché non segnalate — usano lo stesso
-  pattern di widget a dimensione fissa, quindi in teoria sono
-  esposte allo stesso rischio su un window manager che ignora i
-  vincoli di Qt, solo con soglie meno facili da raggiungere. Se in
-  futuro si presenta lo stesso sintomo altrove, la correzione è
-  identica (avvolgere il contenuto in un `QScrollArea`).
-- **Test automatici aggiunti** in `tests/` (pytest) per la parte di
-  logica pura, senza dipendenze da clamd o da Qt: parsing delle
-  risposte del protocollo clamd (`test_clamd_client.py`), gestione
-  della quarantena su filesystem temporaneo (`test_quarantine.py`) e
-  parsing/raggruppamento errori della CLI (`test_cli.py`). Si lanciano
-  dentro il venv (vedi "Setup del venv" più sopra):
+Sviluppo e test
 
-  ```bash
-  cd klamav-py
-  python3 -m venv venv        # se non l'hai già creato
-  source venv/bin/activate
-  pip install -r requirements-dev.txt
-  python3 -m pytest tests/
-  ```
-
-  Su distribuzioni con Python "externally managed" (Debian/Ubuntu
-  recenti, PEP 668), `pip install -r requirements-dev.txt` **fuori**
-  da un venv fallisce con `externally-managed-environment`: è il
-  comportamento atteso del sistema, non un problema di questo
-  progetto — usa il venv come sopra, non `--break-system-packages`.
-
-  La GUI (widget PySide6, worker `QThread`) non è ancora coperta da
-  test automatici: richiederebbe `pytest-qt` o un mocking più
-  strutturato di `ClamdClient`, valutabile come prossimo passo.
-
-**Non un problema — comportamento confermato intenzionale:** la
-quarantena sempre automatica nella sezione Real-Time (vedi la nota
-nella descrizione della sezione più sopra).
-
-Nessun problema di sicurezza rilevato in `clamd_client.py`, `cli.py` o
-`update_worker.py`: quest'ultimo passa a `pkexec sh -c` una stringa di
-comando statica, senza interpolazione di input proveniente dall'utente
-o dal filesystem, quindi non è iniettabile.
-
-## Pacchettizzazione .deb
-
-Lo scheletro Debian è in `debian/` ed è già stato testato con una
-build reale (`dpkg-buildpackage`) e un'installazione/rimozione
-completa (`dpkg -i` / `apt-get remove --purge`) in un container di
-prova.
-
-**Per compilare il pacchetto**, sulla tua macchina Debian:
-
-```bash
-sudo apt install devscripts debhelper dh-python pybuild-plugin-pyproject \
-    python3-all python3-setuptools
+bash
 
 cd klamav-py
-dpkg-buildpackage -us -uc -b
-```
+python3 -m venv venv        # se non l'hai già creato
+source venv/bin/activate
+pip install -r requirements-dev.txt
+python3 -m pytest tests/
+  
+ 
+ 
+cd klamav-py
+python3 -m venv venv        # se non l'hai già creato
+source venv/bin/activate
+pip install -r requirements-dev.txt
+python3 -m pytest tests/
+ 
+ 
 
-Il `.deb` viene creato nella directory superiore
-(`../klamav-py_0.1.0-1_all.deb`).
+I test coprono la logica pura senza clamd reale (parsing del protocollo
+clamd, gestione quarantena su filesystem temporaneo, CLI) e la GUI con
+istanziazione offscreen delle pagine e simulazione di segnali/azioni
+(ripresa Scansione↔Quarantena, elisione stato, appunti, pausa/ripresa
+con client finto iniettato via client_factory).
 
-**Verifica prima di installare**: questo scheletro è stato validato
-in un ambiente Ubuntu 24.04, dove però `python3-pyside6.qtcore` e
-affini **non esistono affatto nei repository** (Ubuntu pacchettizza
-solo PySide2). Su Debian dovrebbero esistere, ma non ho potuto
-verificarlo direttamente in questo ambiente: prima di installare il
-`.deb` controlla con
+Su distribuzioni con Python "externally managed" (Debian/Ubuntu
+recenti, PEP 668), pip install -r requirements-dev.txt fuori da un
+venv fallisce con externally-managed-environment: comportamento
+atteso del sistema, usa il venv.
+Licenza
 
-```bash
-apt-cache search pyside6
-```
+KlamAV-Py è rilasciato sotto licenza GPL-3.0-or-later (vedi il file
+LICENSE). Codice scritto da zero: non contiene codice proveniente da
+KlamAV 0.22, di cui è solo un erede spirituale dell'idea.
+Pacchettizzazione .deb
 
-che i pacchetti elencati in `debian/control` (`python3-pyside6.qtcore`,
-`.qtgui`, `.qtwidgets`, `.qtnetwork`) esistano davvero nella tua
-versione di Debian, e correggi i nomi in `debian/control` se
+Lo scheletro Debian è in debian/, testato con build reale
+(dpkg-buildpackage) e installazione/rimozione complete
+(dpkg -i / apt-get remove --purge).
+
+Verifica prima di installare: lo scheletro è stato validato in un
+ambiente Ubuntu 24.04, dove python3-pyside6.qtcore e affini non
+esistono nei repository (Ubuntu pacchettizza solo PySide2). Su Debian
+dovrebbero esistere, ma prima di installare il .deb controlla con
+apt-cache search pyside6 che i pacchetti elencati in
+debian/control (python3-pyside6.qtcore, .qtgui, .qtwidgets,
+.qtnetwork) esistano nella tua versione, e correggi i nomi se
 differiscono.
+Cosa fa lo scheletro Debian
 
-### Cosa fa lo scheletro Debian
+     
 
-- **Un unico pacchetto binario** `klamav-py` contenente sia la CLI che
-  la GUI (niente split in due pacchetti separati, per ora: più
-  semplice da mantenere finché il progetto è giovane).
-- **`pyproject.toml`** (prima assente, aggiunto insieme a questo
-  scheletro) definisce due entry point installati in `/usr/bin/`:
-  `klamav-py` (CLI) e `klamav-py-gui` (GUI). La GUI stessa li usa per
-  auto-rilevare il comando giusto da scrivere nei file `.desktop` di
-  autostart e integrazione Dolphin (`_gui_relaunch_command()` in
-  `main_window.py`), invece di assumere una checkout locale con venv.
-- **Le unit systemd** (`debian/klamav-py.klamav-scan.service/.timer`)
-  sono una variante di quelle in `systemd/` adattata al pacchetto:
-  `ExecStart=/usr/bin/klamav-py` invece del path del venv, e
-  `DynamicUser=yes` invece di richiedere un utente di sistema creato a
-  mano in `postinst`.
-- **Il timer si abilita e si avvia da solo all'installazione**, ma il
-  `.service` (essendo `Type=oneshot`) **non** viene lanciato subito:
-  farlo partire in automatico al primo `apt install` avrebbe innescato
-  una scansione completa di `/home` a sorpresa. Se serve, verificalo
-  con `journalctl -u klamav-scan.timer` dopo l'installazione.
-- Se il socket di clamd non fosse raggiungibile dall'utente dinamico
-  del servizio (dipende da come `clamav-daemon` imposta i permessi sul
-  socket), c'è una riga commentata `#SupplementaryGroups=clamav` nel
-  file del servizio da riattivare.
+    Un unico pacchetto binario klamav-py con CLI e GUI (niente
+    split, finché il progetto è giovane).
+     
 
-### Da rivedere prima di una release stabile
+    pyproject.toml definisce due entry point in /usr/bin/:
+    klamav-py (CLI) e klamav-py-gui (GUI). La GUI li usa per
+    auto-rilevare il comando da scrivere nei .desktop di autostart e
+    Dolphin (_gui_relaunch_command()), invece di assumere una checkout
+    locale con venv.
 
-- **Maintainer email placeholder** in `debian/control` e
-  `debian/changelog` (`gradia@disroot.org`): correggilo se non è
-  l'indirizzo che vuoi rendere pubblico nel pacchetto.
-- **Versione hardcoded `0.1.0`** sia in `pyproject.toml` che in
-  `debian/changelog`: da tenere sincronizzata manualmente ad ogni
-  release finché non si automatizza.
-- Nessun test automatico verifica ancora l'installazione del `.deb` di
-  per sé (solo verificato manualmente in questa sessione): se il
-  progetto cresce, vale la pena aggiungere un job CI con `sbuild` o
-  `pbuilder` che lo ricostruisce da zero in un chroot pulito ad ogni
-  push, invece di fare l'unica verifica manuale fatta qui.
+    Il campo license usa deliberatamente il vecchio formato tabella
+    ({text = "..."}) invece della stringa SPDX: setuptools recenti
+    deprecano il primo con un warning, ma setuptools vecchi (verificato:
+    68.1.2, Ubuntu 24.04) rifiutano il secondo con errore fatale.
+    Meglio un warning cosmetico ovunque che un build rotto su alcuni
+    sistemi.
+     
 
-## Bug report pre-release 0.1.0 — 4 problemi risolti
+    Unit systemd a livello UTENTE (systemd --user), non di sistema
+    (perché, vedi sotto). I file si chiamano
+    debian/klamav-py.klamav-scan.user.service/.timer: il segmento
+    .user. nel nome è obbligatorio perché dh_installsystemduser
+    li riconosca — scoperto solo testando empiricamente un build reale.
+    Vanno a finire in /usr/lib/systemd/user/.
+     
 
-Un test reale su Debian Sid / KDE Plasma 6 (scansione della Home,
-oltre 334.000 file, EICAR via scansione manuale e Real-Time) ha
-prodotto un bug report con 4 problemi, tutti corretti:
+    postinst/postrm usano deb-systemd-helper --user: il symlink di
+    abilitazione va in /etc/systemd/user/timers.target.wants/ (vale per
+    tutti gli utenti) e il timer parte al prossimo login di ciascuno,
+    senza comandi manuali.
+     
 
-- **Nessuna notifica/report di fine scansione.** La scansione manuale
-  ora produce, al termine: un riepilogo esplicito con percorso, durata,
-  file scansionati, infetti, errori ed esito, mostrato in un dialogo
-  se la finestra è visibile in quel momento (se l'app è minimizzata in
-  tray non viene forzata in primo piano: basta la notifica tray, già
-  presente ma ora sempre inviata — prima un controllo `isVisible()`
-  sull'icona tray poteva sopprimerla). La durata viene misurata da
-  `time.monotonic()` all'avvio della scansione.
-- **Sezione Quarantena non aggiornata in tempo reale.** Mettere un
-  file in quarantena — manualmente dalla pagina Scansione, o
-  automaticamente da una scansione pianificata/Real-Time — ora
-  aggiorna subito la pagina Quarantena, senza dover riavviare l'app.
-  `ScanWorker` ha un nuovo segnale `quarantined`, emesso subito dopo
-  ogni spostamento riuscito in quarantena e collegato, in tutti e tre
-  i punti che creano un `ScanWorker` (scansione manuale, pianificata,
-  Real-Time), a un refresh della pagina Quarantena.
-- **Impossibile copiare il log della scansione.** Nuovo pulsante
-  "Copia log" nella pagina Scansione, accanto a "Metti in quarantena i
-  selezionati": copia negli appunti di sistema tutte le righe della
-  lista risultati (infetti ed errori).
-- **Sfarfallio/ridimensionamento della finestra durante la scansione.**
-  Causa reale, confermata col codice sorgente: `ScanWorker` emetteva
-  un segnale Qt per **ogni singolo file** scansionato (anche i puliti),
-  aggiornando due `QLabel` a testo dinamico ad ogni file. Su una
-  scansione di 334.000+ file questo significa altrettanti
-  ricalcoli di layout in rapida sequenza — è la causa dello sfarfallio,
-  non un problema di `sizePolicy`/`minimumSize` come inizialmente
-  ipotizzabile. Corretto rallentando lato worker la frequenza di
-  aggiornamento a un tick ogni 150ms (il conteggio interno resta
-  preciso al 100%, cambia solo quanto spesso viene *mostrato*) e
-  troncando con elisione (`…` nel mezzo) il testo "Scansione in corso:
-  ⟨percorso⟩" a una larghezza massima fissa, così un percorso molto
-  lungo non fa più crescere il `sizeHint` della label ad ogni update.
-  I risultati "puliti" non producono più nemmeno un segnale (prima
-  ne veniva emesso uno per ognuno, usato solo per il conteggio):
-  ora `result_ready` viene emesso solo per infetti/errori.
+    Una unit utente non può ordinarsi in modo affidabile rispetto a
+    una unit di sistema come clamav-daemon.service (manager systemd
+    separati, niente dipendenze cross-manager): il .service non ha
+    After=/Requires= su clamd. In pratica non è un problema: clamd
+    parte ben prima del login utente.
 
-Verificati con test funzionali mirati (istanziando le pagine in
-modalità offscreen e simulando segnali/azioni), non solo a occhio: il
-refresh incrociato Scansione→Quarantena, l'elisione del testo di
-stato, il contenuto copiato negli appunti e la formattazione della
-durata sono tutti confermati con asserzioni automatiche. Non è stato
-possibile riprodurre un carico realistico di 334.000 file in questo
-ambiente di sviluppo (nessun clamd reale disponibile): il fix allo
-sfarfallio è stato validato leggendo la causa nel codice (frequenza di
-emissione dei segnali) piuttosto che riproducendo il sintomo a piena
-scala.
+Perché unit utente e non di sistema
 
-## Estensioni naturali
+La primissima versione usava una unit di sistema con DynamicUser=yes.
+Sembrava pulita (niente useradd manuale), ma non regge a uso reale:
 
-- Notifiche desktop (`notify-send` o D-Bus diretto) quando il timer
-  trova un'infezione — oggi già presente in forma di notifica tramite
-  system tray (`QSystemTrayIcon.showMessage`) sia per la pianificazione
-  che per il Real-Time; da valutare se serve anche un canale D-Bus
-  nativo per desktop diversi da quelli con supporto tray.
-- Esportazione dell'indice quarantena in un formato che un frontend
-  web/TUI possa leggere, se vuoi vederlo dal NAS invece che da riga di
-  comando.
-- Rendere configurabile da UI se il Real-Time debba mettere in
-  quarantena automaticamente o solo segnalare (vedi "Problemi noti").
+     Le home nascono 0700/0750: un utente dinamico non legge nulla, e
+    la scansione di /home produceva solo Permission denied a raffica.
+     La quarantena finiva in /var/lib/klamav-py, di proprietà
+    dell'utente dinamico: la GUI non poteva né vederla né gestirla.
+
+L'unit utente gira come l'utente, legge la home senza problemi e usa la
+stessa quarantena di default della GUI: i percorsi coincidono.
+
+Upgrade da versioni precedenti (che avevano la unit di sistema):
+la rimozione del file della vecchia unit non ferma un'istanza già
+attiva — il symlink in /etc/systemd/system/timers.target.wants/ non
+è tracciato da dpkg. Per questo postinst include una migrazione
+dedicata che ferma e disabilita esplicitamente la vecchia unit di
+sistema prima di abilitare la nuova utente (verificato leggendo il
+postinst del .deb compilato).
+Da rivedere prima di una release stabile
+
+     Versione hardcoded sia in pyproject.toml che in
+    debian/changelog: da tenere sincronizzata manualmente ad ogni
+    release finché non si automatizza.
+     Nessun test automatico verifica l'installazione del .deb di per sé
+    (verifica manuale): se il progetto cresce, vale un job CI con
+    sbuild/pbuilder che lo ricostruisce da zero.
+
+Estensioni naturali
+
+     Circuit breaker sui risultati: se clamd muore a metà scansione,
+    ogni file rimanente produce un errore "impossibile aprire sessione"
+    (il meccanismo dietro un episodio osservato di ~10.200 errori). Un
+    contatore di errori consecutivi oltre soglia interromperebbe la
+    scansione con un fallimento rapido e leggibile invece del flood.
+     Esclusioni configurabili da UI (oggi solo via --exclude CLI):
+    cache, Trash, mount di rete — ridurrebbe ulteriormente il rumore e
+    accelererebbe le scansioni home-wide.
+     Differenziare il nome del QLocalServer per sys.prefix: su una
+    macchina di sviluppo con checkout+venv e .deb installati insieme,
+    installato e checkout non si contenderebbero la stessa istanza
+    single-instance.
+     Notifiche desktop native (notify-send o D-Bus diretto) oltre a
+    QSystemTrayIcon.showMessage, per desktop con supporto tray
+    irregolare.
+     Esportazione dell'indice quarantena in un formato leggibile da un
+    frontend web/TUI (es. per controllare la quarantena dal NAS).
+     Configurabile da UI se il Real-Time debba mettere in quarantena
+    automaticamente o solo segnalare.

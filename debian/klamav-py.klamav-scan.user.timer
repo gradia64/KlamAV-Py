@@ -1,5 +1,5 @@
 [Unit]
-Description=Esegue klamav-scan.service ogni giorno
+Description=Esegue klamav-scan.service ogni giorno (sessione utente)
 
 [Timer]
 OnCalendar=daily

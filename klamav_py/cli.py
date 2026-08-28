@@ -3,7 +3,11 @@ CLI di scansione. Pensata per due usi:
 
   1. interattivo:      klamav-py scan /percorso/da/controllare
   2. da systemd timer: klamav-py scan /home --quarantine --quiet
-     (vedi systemd/klamav-scan.service e klamav-scan.timer)
+     (vedi le unit utente in debian/ e systemd/)
+
+La directory di quarantena (--quarantine) è sempre esclusa
+automaticamente dall'attraversamento: i file già gestiti non devono
+essere ri-rilevati (e ri-quarantenati) a ogni scansione che la copre.
 
 Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore di
 esecuzione (clamd irraggiungibile, path inesistente, ecc.) — utile per
@@ -18,7 +22,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from .clamd_client import ClamdClient, ClamdError
+from .clamd_client import DEFAULT_MAX_STREAM_SIZE, ClamdClient, ClamdError
 from .quarantine import Quarantine
 
 
@@ -38,6 +42,32 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         type=Path,
         help="Se specificato, sposta i file infetti in questa directory",
+    )
+    scan.add_argument(
+        "--exclude",
+        metavar="DIR",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Directory da escludere dall'attraversamento ricorsivo "
+            "(ripetibile: una volta per ogni directory). Le directory "
+            "escluse non vengono nemmeno lette. La directory di "
+            "quarantena (--quarantine) è esclusa automaticamente."
+        ),
+    )
+    scan.add_argument(
+        "--max-stream-size",
+        metavar="BYTES",
+        type=int,
+        default=None,
+        help=(
+            "Soglia del pre-check dimensionale in byte: i file oltre "
+            "questa dimensione non vengono inviati a clamd (risparmia "
+            "sessione e I/O) e sono segnalati come 'non verificati'. "
+            "Default: 25MB, allineato a StreamMaxLength di clamd.conf. "
+            "0 disattiva il pre-check."
+        ),
     )
     scan.add_argument("--quiet", action="store_true", help="Stampa solo le infezioni trovate")
     scan.add_argument(
@@ -80,24 +110,61 @@ def _error_category(signature: str) -> str:
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    if not args.path.exists():
+    scan_root_input = args.path.expanduser()
+    if not scan_root_input.exists():
         print(f"Percorso inesistente: {args.path}", file=sys.stderr)
         return 2
 
+    # resolve() su TUTTI i percorsi coinvolti: il matching delle
+    # esclusioni in clamd_client._iter_files confronta path letterali
+    # (is_relative_to), quindi scan root ed esclusioni devono essere
+    # nella stessa forma canonica — altrimenti un'esclusione può non
+    # matchare per un dettaglio di forma (slash finale, symlink,
+    # '~' non espanso). Il resolve() del root cambia anche i path
+    # mostrati nei risultati (es. /home/utente invece di un symlink):
+    # su sistemi tipici sono identici.
+    scan_root = scan_root_input.resolve()
+    exclude_dirs = [Path(p).expanduser().resolve() for p in args.exclude]
+    if args.quarantine:
+        quarantine_dir = args.quarantine.expanduser().resolve()
+        # L'esclusione della directory di quarantena va SEMPRE aggiunta,
+        # indipendentemente da --exclude: è il dato gestito
+        # dall'applicazione stessa, ri-rilevarlo a ogni scansione che
+        # lo copre (es. scansione della home) gonfia per sempre
+        # infetti/errori con fantasmi già gestiti.
+        exclude_dirs.append(quarantine_dir)
+    else:
+        quarantine_dir = None
+
+    # Soglia del pre-check: None da argparse = default della libreria
+    # (DEFAULT_MAX_STREAM_SIZE, allineato a StreamMaxLength di
+    # clamd.conf); valore <= 0 esplicito = pre-check disattivato
+    # (max_stream_size=None nel client: TOO_LARGE riconosciuto solo
+    # dalla risposta letterale di clamd).
+    if args.max_stream_size is None:
+        max_stream_size = DEFAULT_MAX_STREAM_SIZE
+    elif args.max_stream_size <= 0:
+        max_stream_size = None
+    else:
+        max_stream_size = args.max_stream_size
+
     client = ClamdClient(unix_socket=str(args.socket))
-    quarantine = Quarantine(args.quarantine) if args.quarantine else None
+    quarantine = Quarantine(quarantine_dir) if quarantine_dir else None
 
     scanned = 0
     infections = 0
     errors = 0
+    too_large = 0
     error_categories: Counter[str] = Counter()
     log_fh = args.log_errors.open("w", encoding="utf-8") if args.log_errors else None
 
     try:
         for result in client.scan_stream(
-            args.path,
+            scan_root,
             persistent=not args.no_persistent,
             session_batch_size=args.session_batch_size,
+            exclude_dirs=exclude_dirs,
+            max_stream_size=max_stream_size,
         ):
             scanned += 1
             if result.infected:
@@ -109,6 +176,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
                         print(f"  -> messo in quarantena: {entry.quarantined_path}")
                     except Exception as exc:  # noqa: BLE001 - vogliamo continuare comunque
                         print(f"  -> quarantena fallita: {exc}", file=sys.stderr)
+            elif result.too_large:
+                # Non è un malfunzionamento: il file supera semplicemente
+                # StreamMaxLength (clamd.conf) e non è stato verificato,
+                # non va confuso con un errore generico nel riepilogo.
+                too_large += 1
+                if not args.quiet:
+                    print(f"NON VERIFICATO (troppo grande): {result.path}")
             elif result.status == "ERROR":
                 errors += 1
                 error_categories[_error_category(result.signature or "")] += 1
@@ -128,6 +202,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
             log_fh.close()
 
     print(f"\n{scanned} file scansionati, {infections} infetti, {errors} errori.")
+    if too_large:
+        print(f"{too_large} file oltre StreamMaxLength, non verificati (vedi clamd.conf).")
 
     if error_categories:
         print("\nDettaglio errori per tipo:")

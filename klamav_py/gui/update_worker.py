@@ -28,6 +28,25 @@ class UpdateWorker(QThread):
             # 4. systemctl start: Riavvia il demone di sistema.
             # 5. exit $res: Esce restituendo il codice di freshclam (per dire alla GUI se è andato bene o no).
             
+            # ============================================================
+            # ATTENZIONE — LEGGERE PRIMA DI MODIFICARE QUESTA STRINGA
+            # ============================================================
+            # command_string è ESCLUSIVAMENTE testo statico, scritto qui in
+            # fase di sviluppo. Non contiene e NON DEVE MAI contenere nulla
+            # proveniente dall'utente, da un file, da una variabile
+            # d'ambiente o da qualunque altro input esterno: pkexec la
+            # esegue con privilegi di root tramite `sh -c`, quindi
+            # un'eventuale interpolazione (f-string, .format(), +) qui
+            # dentro sarebbe ESATTAMENTE il tipo di shell injection che
+            # questo intero progetto esiste per eliminare rispetto a
+            # klamav 0.22 (vedi clamd_client.py e cli.py, che per lo
+            # stesso motivo non passano mai input attraverso una shell).
+            # Se in futuro serve rendere configurabile qualcosa qui
+            # (nome del servizio, opzioni di freshclam...), non va fatto
+            # con l'interpolazione di stringa: va passato come argomento
+            # separato a Popen (subprocess gestisce già il quoting in modo
+            # sicuro quando gli argomenti sono elementi distinti di una
+            # lista, non concatenati in un'unica stringa di shell).
             command_string = (
                 "systemctl stop clamav-freshclam 2>/dev/null; "
                 "systemctl stop freshclam 2>/dev/null; "

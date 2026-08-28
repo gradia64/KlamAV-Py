@@ -1,0 +1,30 @@
+#!/bin/sh
+set -e
+
+# Migrazione da versioni <= 0.1.1, che usavano una unit systemd di
+# SISTEMA con DynamicUser per la scansione pianificata, poi sostituita
+# da una unit UTENTE (vedi README, sezione "Perché le unit sono utente
+# e non di sistema").
+#
+# dpkg rimuove da solo il file della vecchia unit durante l'upgrade
+# (non fa più parte del pacchetto), ma questo NON ferma/disabilita
+# un'istanza già attiva, né rimuove il symlink di abilitazione in
+# /etc/systemd/system/timers.target.wants/klamav-scan.timer: dpkg
+# traccia solo i file che spedisce, non lo stato dinamico creato da
+# deb-systemd-helper. Senza questa pulizia esplicita, il vecchio timer
+# di sistema resterebbe attivo per sempre in parallelo al nuovo timer
+# utente — è un problema di packaging, non qualcosa che sistemi
+# aggiornando semplicemente i file.
+#
+# Idempotente e sicuro da eseguire anche quando non c'è nulla da
+# pulire (nessuna versione precedente con unit di sistema installata):
+# ogni comando è racchiuso in "|| true" per l'esatto motivo di non
+# far fallire l'installazione se non trova nulla da fermare.
+if [ "$1" = "configure" ] && [ -d /run/systemd/system ]; then
+	deb-systemd-invoke stop 'klamav-scan.timer' 'klamav-scan.service' >/dev/null 2>&1 || true
+	deb-systemd-helper disable 'klamav-scan.timer' >/dev/null 2>&1 || true
+	deb-systemd-helper purge 'klamav-scan.timer' >/dev/null 2>&1 || true
+	systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+#DEBHELPER#

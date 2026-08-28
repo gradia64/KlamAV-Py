@@ -5,10 +5,12 @@ export PYBUILD_NAME=klamav_py
 %:
 	dh $@ --buildsystem=pybuild --with python3
 
-override_dh_installsystemd:
-	# --no-start sul .service: e' un Type=oneshot innescato dal timer,
-	# non va avviato subito all'installazione/aggiornamento del pacchetto
-	# (altrimenti si scatena una scansione completa di /home a sorpresa).
-	# Il timer invece va abilitato e avviato normalmente.
-	dh_installsystemd --name=klamav-scan --no-start klamav-scan.service
-	dh_installsystemd --name=klamav-scan klamav-scan.timer
+# Unit utente (systemd --user), non di sistema: klamav-py è pensato per
+# uso desktop personale, e una unit di sistema con DynamicUser=yes non
+# riesce a leggere una home 0700/0750 né a condividere in modo sensato
+# la directory di quarantena con la GUI (vedi commenti nei file .service
+# per i dettagli). "--name=klamav-scan" fa cercare a dh_installsystemduser
+# i file debian/klamav-py.klamav-scan.user.{service,timer} invece del
+# solo debian/klamav-py.user.service.
+override_dh_installsystemduser:
+	dh_installsystemduser --name=klamav-scan

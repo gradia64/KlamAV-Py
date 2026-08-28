@@ -27,3 +27,13 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Debian packaging build artifacts
+.pybuild/
+debian/klamav-py/
+debian/files
+debian/*.debhelper
+debian/*.debhelper.log
+debian/*.substvars
+debian/debhelper-build-stamp
+debian/tmp/

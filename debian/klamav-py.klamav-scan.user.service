@@ -1,0 +1,25 @@
+[Unit]
+Description=Scansione ClamAV via klamav-py (sessione utente)
+
+[Service]
+Type=oneshot
+# %h si espande alla home dell'utente sotto il cui manager --user gira
+# questa unit: stessa home leggibile dalla GUI, stessa directory di
+# quarantena di default (~/.local/share/klamav-py/quarantine).
+ExecStart=/usr/bin/klamav-py scan %h --quarantine %h/.local/share/klamav-py/quarantine --quiet
+
+# NIENTE DynamicUser qui: gira come l'utente proprietario della sessione,
+# quindi legge la sua home senza i problemi di permessi che un utente
+# di sistema effimero avrebbe su home 0700/0750 (vedi anche il perché
+# non c'è più una unit di sistema, in fondo a questo file).
+#
+# NOTA SU After=/Requires=: una unit utente NON può ordinarsi in modo
+# affidabile rispetto a una unit di SISTEMA come clamav-daemon.service
+# — sono gestite da istanze separate di systemd (manager di sistema vs
+# manager --user), e le dipendenze across-manager non sono supportate.
+# In pratica non è un problema: clamav-daemon parte già molto prima
+# del login utente. Se clamd non fosse ancora pronto, klamav-py fallisce
+# con un errore leggibile ("clamd non raggiungibile"), non con un crash.
+
+NoNewPrivileges=true
+PrivateTmp=true
