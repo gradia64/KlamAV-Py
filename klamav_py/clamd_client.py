@@ -234,7 +234,31 @@ class ClamdClient:
         non deve interrompere la scansione degli altri: viene riportato
         come ScanResult(status="ERROR") e si continua con il prossimo.
         """
-        path = Path(path)
+        # Risoluzione della RADICE dell'attraversamento, una volta sola,
+        # per TUTTI i punti di ingresso (CLI, scansione GUI manuale,
+        # IPC/Dolphin, e futuri Real-Time/programmata): se il percorso da
+        # scansionare è un symlink-directory, os.walk() lo segue comunque
+        # quando è il punto di partenza (followlinks=False blocca solo i
+        # symlink INTERNI all'albero, non la radice). Senza risolvere qui,
+        # i risultati verrebbero riportati sotto il percorso del symlink
+        # invece che sotto quello reale effettivamente letto. Per un
+        # antivirus conta il contenuto reale controllato, non l'alias da
+        # cui ci si è arrivati: risolvere rende il referto coerente con
+        # ciò che è stato davvero scansionato e normalizza eventuali "..".
+        #
+        # Perché QUI e non in _iter_files: _iter_files produce il path di
+        # OGNI file durante l'attraversamento (centinaia di migliaia su una
+        # home) — risolvere lì significherebbe una syscall per file su un
+        # percorso hot, e altererebbe la logica di esclusione della
+        # quarantena (un file interno che è a sua volta un symlink verso la
+        # quarantena verrebbe valutato sul target risolto). Risolvere solo
+        # la radice ha costo trascurabile (una volta) e lascia intatto sia
+        # lo streaming a memoria costante sia l'esclusione, che continua a
+        # lavorare sui path non risolti dei file interni.
+        #
+        # È coerente con scan_file() (CONTSCAN), che già risolve, e con
+        # scan_worker, che già risolve la radice della quarantena.
+        path = Path(path).resolve()
         try:
             if not persistent:
                 for target in self._iter_files(path, exclude_dirs):

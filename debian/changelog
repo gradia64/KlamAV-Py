@@ -1,4 +1,13 @@
-klamav-py (0.1.4-1) UNRELEASED; urgency=medium
+klamav-py (0.1.4-2) UNRELEASED; urgency=medium
+
+  * Correttezza: la radice di ogni scansione viene risolta
+    (Path.resolve) in scan_stream, comune a tutti i punti di ingresso
+    (CLI, GUI, Dolphin/IPC), così il referto mostra il percorso reale e
+    non un eventuale symlink. Non è un fix di sicurezza.
+
+ -- gradia <gradia@disroot.org>  Sat, 29 Aug 2026 18:17:56 +0200
+
+klamav-py (0.1.4-1) unstable; urgency=medium
 
   * Fix branding: il nome visualizzato ovunque è ora "KlamAV-Py"
     (titolo finestra, menu applicazioni, tooltip e notifiche della
@@ -36,4 +45,4 @@ klamav-py (0.1.4-1) UNRELEASED; urgency=medium
     da 0o755 a 0o644 (standard freedesktop.org).
   * Aggiunti 9 test (quarantena TOCTOU/symlink/FIFO, payload IPC).
 
- -- gradia <gradia@disroot.org>  Sat, 29 Aug 2026 10:42:54 +0200
+ -- gradia <gradia@disroot.org>  Sat, 29 Aug 2026 18:17:13 +0200

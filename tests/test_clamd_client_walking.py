@@ -161,3 +161,44 @@ def test_stream_failure_below_threshold_is_error(tmp_path):
     result = ClamdClient._stream_failure_result(small, BrokenPipeError("pipe"), 50)
     assert result.status == "ERROR"
     assert not result.too_large
+
+
+def test_scan_stream_risolve_symlink_radice(tmp_path):
+    # Correttezza (non sicurezza): se la RADICE della scansione è un
+    # symlink-directory, scan_stream deve riportare i risultati sotto il
+    # percorso reale, non sotto l'alias. os.walk() segue comunque il
+    # symlink-radice (followlinks=False blocca solo i symlink interni),
+    # ma senza risolvere a monte il path mostrato sarebbe quello del
+    # symlink. Vale per tutti i punti di ingresso (CLI, GUI, IPC), non
+    # solo IPC: il fix è in scan_stream, comune a tutti.
+    #
+    # Socket inesistente + max_stream_size basso: i file escono come
+    # TOO_LARGE dal pre-check senza mai toccare clamd (come gli altri
+    # test di scan_stream qui).
+    reale = tmp_path / "directory_reale"
+    reale.mkdir()
+    (reale / "documento.txt").write_bytes(b"x" * 100)
+    link = tmp_path / "collegamento"
+    link.symlink_to(reale, target_is_directory=True)
+
+    client = ClamdClient(unix_socket="/non/esiste/clamd.ctl")
+    results = list(client.scan_stream(link, max_stream_size=50))
+
+    assert len(results) == 1
+    # Il path riportato è sotto la directory REALE, non sotto il symlink.
+    assert results[0].path == str(reale / "documento.txt")
+    assert "collegamento" not in results[0].path
+
+
+def test_scan_stream_normalizza_dotdot_nella_radice(tmp_path):
+    # La radice con ".." viene canonicalizzata: il path riportato è pulito.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "f.txt").write_bytes(b"y" * 100)
+    tortuosa = tmp_path / "a" / ".." / "a"
+
+    client = ClamdClient(unix_socket="/non/esiste/clamd.ctl")
+    results = list(client.scan_stream(tortuosa, max_stream_size=50))
+
+    assert len(results) == 1
+    assert ".." not in results[0].path
+    assert results[0].path == str((tmp_path / "a" / "f.txt").resolve())
