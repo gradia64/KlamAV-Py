@@ -67,6 +67,13 @@ def main() -> int:
     # Siamo la prima istanza: creiamo il server IPC per ricevere future richieste
     QLocalServer.removeServer("klamav_py_ipc")
     ipc_server = QLocalServer(app)
+    # Su Linux, senza setSocketOptions(), i permessi del socket UNIX
+    # dipendono dallo umask del processo (documentato da Qt): con uno
+    # umask permissivo (es. 022, comune di default) altri UTENTI del
+    # sistema — non solo altri processi tuoi — potrebbero connettersi al
+    # socket. UserAccessOption forza esplicitamente l'accesso al solo
+    # utente proprietario, indipendentemente dallo umask attivo.
+    ipc_server.setSocketOptions(QLocalServer.UserAccessOption)
     ipc_server.listen("klamav_py_ipc")
     # ------------------------------------
 

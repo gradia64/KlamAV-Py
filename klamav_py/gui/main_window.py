@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import datetime
 import os
 import shutil
+import subprocess
 import sys
 import time
 import json
@@ -97,6 +98,57 @@ def _icon(*theme_names: str) -> QIcon:
 
 def _app_icon() -> QIcon:
     return _icon("klamav-icon", "emblem-virus", "security-high", "security-medium")
+
+
+# Un singolo percorso di filesystem su Linux è al massimo PATH_MAX (4096
+# byte, incluso il terminatore). Qualunque payload IPC più lungo di così
+# non può essere un percorso legittimo: è o un errore del chiamante o un
+# tentativo di far leggere/processare all'app dati arbitrariamente grandi
+# (DoS). Il limite è generoso di proposito (margine per UTF-8 multi-byte)
+# senza aprire la porta a payload da megabyte.
+_IPC_MAX_PAYLOAD_BYTES = 4096
+
+
+def _decode_ipc_payload(raw: bytes) -> str | None:
+    """
+    Decodifica il payload ricevuto dal socket IPC (single-instance),
+    separata dagli effetti collaterali Qt/UI per essere testabile in
+    isolamento.
+
+    Ritorna None se il payload è vuoto o malformato: in nessun caso
+    propaga un'eccezione al chiamante (che gira nell'event loop Qt), né
+    prova a "recuperare" un input malformato interpretandolo alla meglio.
+    """
+    if not raw:
+        return None
+    try:
+        data = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        # Payload malformato: un client IPC legittimo (la nostra stessa
+        # app, da un'altra istanza) invia sempre un percorso UTF-8 valido.
+        return None
+    return data or None
+
+
+def _rebuild_kde_service_cache() -> None:
+    """Rigenera la cache dei servizi KDE dopo aver installato/rimosso la
+    voce di menu Dolphin.
+
+    os.system() passa sempre per /bin/sh, quindi è preferibile
+    subprocess.run() con un argv esplicito (nessuna shell, nessuna stringa
+    da interpretare) anche quando, come qui, il comando è del tutto
+    hardcoded: se in futuro uno di questi nomi diventasse configurabile,
+    questa forma non aprirebbe comunque la porta a shell injection.
+    kbuildsycoca6 è per KDE Plasma 6, kbuildsycoca5 è il fallback per
+    Plasma 5: si prova entrambi, ignorando quello mancante (FileNotFoundError)
+    o che fallisce (CalledProcessError) — nessuno dei due è fatale per
+    l'operazione di installazione/rimozione già completata sul filesystem.
+    """
+    for binary in ("kbuildsycoca6", "kbuildsycoca5"):
+        try:
+            subprocess.run([binary], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (FileNotFoundError, OSError):
+            pass
 
 
 def _default_tray_tooltip() -> str:
@@ -1464,9 +1516,14 @@ Exec={exec_cmd} --scan-target %f
                 d.mkdir(parents=True, exist_ok=True)
                 file_path = d / file_name
                 file_path.write_text(content)
-                os.chmod(file_path, 0o755)
+                # I file .desktop sono file di CONFIGURAZIONE letti da
+                # Dolphin/KDE, non eseguibili direttamente: lo spec
+                # freedesktop.org si aspetta 0o644. 0o755 (usato in
+                # precedenza) marcava il file come eseguibile senza motivo,
+                # oltre a violare lo standard.
+                os.chmod(file_path, 0o644)
 
-            os.system("kbuildsycoca6 2>/dev/null; kbuildsycoca5 2>/dev/null")
+            _rebuild_kde_service_cache()
 
             QMessageBox.information(self, "Integrazione Dolphin", "Integrazione installata con successo!\n\nChiudi tutte le finestre di Dolphin e riaprile per vedere la voce nel menu.")
 
@@ -1493,7 +1550,7 @@ Exec={exec_cmd} --scan-target %f
                 if f.exists():
                     f.unlink()
 
-            os.system("kbuildsycoca6 2>/dev/null; kbuildsycoca5 2>/dev/null")
+            _rebuild_kde_service_cache()
 
             QMessageBox.information(self, "Integrazione Dolphin", "Integrazione rimossa con successo.")
 
@@ -1661,9 +1718,13 @@ class MainWindow(QMainWindow):
         client = self.ipc_server.nextPendingConnection()
         if client:
             client.waitForReadyRead(1000)
-            data = client.readAll().data().decode('utf-8')
+            # read(), non readAll(): impone il limite in _decode_ipc_payload
+            # invece di accettare e poi eventualmente scartare un payload
+            # già ricevuto per intero in memoria.
+            raw = bytes(client.read(_IPC_MAX_PAYLOAD_BYTES))
             client.disconnectFromServer()
 
+            data = _decode_ipc_payload(raw)
             if data:
                 target_path = Path(data)
                 self._restore_from_tray() # Mostra la finestra se in tray

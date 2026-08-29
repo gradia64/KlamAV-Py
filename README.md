@@ -370,6 +370,46 @@ file) gli errori residui sono fisiologici e riconoscibili:
     per tipo della CLI (o il log persistente della programmata) rende
     questo caso immediatamente distinguibile dal rumore fisiologico.
 
+Fix di sicurezza nella 0.1.4
+
+Questa versione risolve una serie di problemi di sicurezza emersi da un
+audit del codice. Il modello di minaccia di riferimento è un sistema
+multi-utente e, per la quarantena, il file infetto stesso trattato come
+contenuto potenzialmente ostile (non un aggressore esterno).
+
+     TOCTOU in quarantena e ripristino. quarantine_file() apre il file
+    con O_NOFOLLOW e verifica l'identità dell'inode (dev+ino) dopo lo
+    spostamento, invece di fidarsi di un controllo is_file() separato
+    dall'operazione di move: un file infetto potrebbe tentare di evadere
+    l'isolamento sostituendosi con un symlink nella finestra tra il
+    controllo e lo spostamento. I symlink (e i file speciali come le
+    FIFO) sono ora rifiutati esplicitamente. restore() reclama la
+    destinazione in modo atomico con O_CREAT|O_EXCL invece di un
+    exists() seguito da move(), eliminando la finestra in cui un altro
+    processo poteva creare il file di destinazione nel mezzo.
+     Socket IPC single-instance ristretto e validato. Il QLocalServer
+    usa UserAccessOption: senza, su Linux i permessi del socket
+    dipendono dallo umask del processo e potrebbero risultare
+    accessibili ad altri utenti del sistema. Il percorso ricevuto dal
+    socket è ora limitato in dimensione (evita payload enormi pensati
+    come DoS) e decodificato in modo robusto (un payload UTF-8
+    malformato viene ignorato, non fa propagare eccezioni).
+     Aggiornamento database senza stringa di shell costruita a runtime.
+    L'operazione via pkexec non passa più una stringa di comandi
+    costruita in Python a sh -c: esegue uno script fisso spedito col
+    pacchetto (klamav_py/gui/resources/freshclam-update.sh). Elimina
+    alla radice la possibilità che un futuro parametro reso configurabile
+    finisca interpolato in una riga di shell eseguita come root.
+     Rigenerazione cache servizi KDE senza shell. os.system() è stato
+    sostituito da subprocess.run() con argv esplicito (nessuna shell).
+     Permessi dei file .desktop dell'integrazione Dolphin corretti da
+    0755 a 0644, in linea con lo standard freedesktop.org (sono file di
+    configurazione, non eseguibili).
+
+I fix sono coperti da 9 nuovi test automatici (rifiuto di symlink e FIFO
+in quarantena, verifica del reclamo atomico della destinazione nel
+ripristino, validazione del payload IPC).
+
 Cosa manca rispetto a KlamAV originale (di proposito)
 
      Nessun on-access scanning kernel-level. Il monitoraggio Real-Time
@@ -518,4 +558,3 @@ Estensioni naturali
     frontend web/TUI (es. per controllare la quarantena dal NAS).
      Configurabile da UI se il Real-Time debba mettere in quarantena
     automaticamente o solo segnalare.
-

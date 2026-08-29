@@ -5,6 +5,7 @@ Test per Quarantine: usano solo il filesystem temporaneo di pytest
 
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
@@ -144,6 +145,56 @@ def test_delete_rimuove_file_e_voce_indice(tmp_path, quarantine):
     assert not original.exists()
     assert not Path(entry.quarantined_path).exists()
     assert quarantine.list_entries() == []
+
+
+def test_quarantine_file_rifiuta_symlink(tmp_path, quarantine):
+    # Un file infetto può essere un symlink che punta altrove: quarantenare
+    # "il file" significherebbe seguire il link e spostare il bersaglio (o,
+    # a seconda dell'implementazione, il link stesso lasciando il bersaglio
+    # intatto e accessibile) — nessuno dei due esiti isola davvero nulla.
+    bersaglio = tmp_path / "bersaglio.txt"
+    bersaglio.write_text("contenuto reale, non deve essere toccato")
+    link = tmp_path / "link_malevolo.txt"
+    link.symlink_to(bersaglio)
+
+    with pytest.raises(QuarantineError):
+        quarantine.quarantine_file(link)
+
+    assert link.is_symlink(), "il link non deve essere stato spostato"
+    assert bersaglio.read_text() == "contenuto reale, non deve essere toccato"
+    assert quarantine.list_entries() == []
+
+
+def test_quarantine_file_rifiuta_fifo(tmp_path, quarantine):
+    # Difesa in profondità: os.open con O_NOFOLLOW segue comunque i file
+    # speciali non-symlink (FIFO, device...). Il controllo S_ISREG dopo la
+    # fstat() deve rigettarli esplicitamente invece di provare a spostarli.
+    fifo_path = tmp_path / "fifo_sospetto"
+    os.mkfifo(fifo_path)
+
+    with pytest.raises(QuarantineError):
+        quarantine.quarantine_file(fifo_path)
+
+    assert quarantine.list_entries() == []
+
+
+def test_restore_reclama_destinazione_atomicamente(tmp_path, quarantine):
+    # Verifica che il meccanismo O_CREAT|O_EXCL lasci comunque il file
+    # originale recuperabile in quarantena quando la destinazione è già
+    # occupata (stesso comportamento visibile della versione precedente
+    # basata su exists(), ma senza la finestra di race nel mezzo).
+    original = _crea_file_infetto(tmp_path)
+    entry = quarantine.quarantine_file(original)
+
+    original.write_text("qualcun altro ha ricreato questo file")
+
+    with pytest.raises(QuarantineError):
+        quarantine.restore(entry.quarantined_path)
+
+    # Nessun placeholder vuoto lasciato al posto del contenuto rioccupato.
+    assert original.read_text() == "qualcun altro ha ricreato questo file"
+    assert Path(entry.quarantined_path).exists(), "il file resta recuperabile in quarantena"
+    assert len(quarantine.list_entries()) == 1
 
 
 def test_index_json_vecchio_senza_original_mode(tmp_path, quarantine):

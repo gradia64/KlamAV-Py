@@ -7,8 +7,32 @@ il demone di sistema clamav-freshclam.
 
 from __future__ import annotations
 
+import importlib.resources
 import subprocess
 from PySide6.QtCore import QThread, Signal
+
+
+def _freshclam_update_script() -> str:
+    """
+    Percorso dello script di aggiornamento spedito col pacchetto
+    (klamav_py/gui/resources/freshclam-update.sh).
+
+    Passare a `pkexec sh <percorso>` un FILE fisso, invece di costruire la
+    sequenza di comandi come stringa Python passata a `sh -c`, elimina
+    strutturalmente la possibilità di shell injection lato Python: non
+    esiste più, da nessuna parte in questo modulo, una stringa di comandi
+    costruita a runtime che un futuro refactor potrebbe interpolare con
+    input esterno. Il contenuto dello script (vedi il file) resta
+    comunque testo statico, con lo stesso vincolo.
+
+    importlib.resources risolve il file sia da un'installazione .deb/pip
+    (dove tipicamente non è scrivibile dall'utente che lancia l'app,
+    essendo root a possedere i pacchetti installati) sia da un checkout
+    di sviluppo con venv attivo — stesso meccanismo già usato altrove nel
+    progetto per le risorse (icona SVG).
+    """
+    resource = importlib.resources.files("klamav_py.gui") / "resources" / "freshclam-update.sh"
+    return str(resource)
 
 
 class UpdateWorker(QThread):
@@ -20,46 +44,11 @@ class UpdateWorker(QThread):
 
     def run(self) -> None:
         try:
-            # Spiegazione dei comandi:
-            # 1. systemctl stop: Ferma il demone (su Debian/Ubuntu è clamav-freshclam, su Arch/Fedora è freshclam). 
-            #    Usiamo 2>/dev/null per silenziare gli errori se il servizio ha un nome diverso o non esiste.
-            # 2. freshclam --stdout: Lancia l'aggiornamento reale.
-            # 3. res=$?: Salva il codice di uscita di freshclam.
-            # 4. systemctl start: Riavvia il demone di sistema.
-            # 5. exit $res: Esce restituendo il codice di freshclam (per dire alla GUI se è andato bene o no).
-            
-            # ============================================================
-            # ATTENZIONE — LEGGERE PRIMA DI MODIFICARE QUESTA STRINGA
-            # ============================================================
-            # command_string è ESCLUSIVAMENTE testo statico, scritto qui in
-            # fase di sviluppo. Non contiene e NON DEVE MAI contenere nulla
-            # proveniente dall'utente, da un file, da una variabile
-            # d'ambiente o da qualunque altro input esterno: pkexec la
-            # esegue con privilegi di root tramite `sh -c`, quindi
-            # un'eventuale interpolazione (f-string, .format(), +) qui
-            # dentro sarebbe ESATTAMENTE il tipo di shell injection che
-            # questo intero progetto esiste per eliminare rispetto a
-            # klamav 0.22 (vedi clamd_client.py e cli.py, che per lo
-            # stesso motivo non passano mai input attraverso una shell).
-            # Se in futuro serve rendere configurabile qualcosa qui
-            # (nome del servizio, opzioni di freshclam...), non va fatto
-            # con l'interpolazione di stringa: va passato come argomento
-            # separato a Popen (subprocess gestisce già il quoting in modo
-            # sicuro quando gli argomenti sono elementi distinti di una
-            # lista, non concatenati in un'unica stringa di shell).
-            command_string = (
-                "systemctl stop clamav-freshclam 2>/dev/null; "
-                "systemctl stop freshclam 2>/dev/null; "
-                "freshclam --stdout; "
-                "res=$?; "
-                "systemctl start clamav-freshclam 2>/dev/null; "
-                "systemctl start freshclam 2>/dev/null; "
-                "exit $res"
-            )
-            
-            # pkexec esegue sh, che esegue la nostra stringa di comandi in sequenza
-            cmd = ["pkexec", "sh", "-c", command_string]
-            
+            # pkexec esegue `sh <script>` con privilegi di root: sh legge
+            # ed esegue il contenuto del file (vedi _freshclam_update_script
+            # e il file stesso per i dettagli e le garanzie di sicurezza).
+            cmd = ["pkexec", "sh", _freshclam_update_script()]
+
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,

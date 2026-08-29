@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "klamav-py"
-version = "0.1.3"
+version = "0.1.4"
 description = "Frontend Python minimale per ClamAV via clamd, erede spirituale di KlamAV 0.22"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -48,4 +48,4 @@ klamav-py-gui = "klamav_py.gui.app:main"
 include = ["klamav_py*"]
 
 [tool.setuptools.package-data]
-"klamav_py.gui" = ["resources/*.svg"]
+"klamav_py.gui" = ["resources/*.svg", "resources/*.sh"]
