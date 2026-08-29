@@ -1,11 +1,11 @@
-klamav-py (0.1.4-2) UNRELEASED; urgency=medium
+klamav-py (0.1.4-2) unstable; urgency=medium
 
   * Correttezza: la radice di ogni scansione viene risolta
     (Path.resolve) in scan_stream, comune a tutti i punti di ingresso
     (CLI, GUI, Dolphin/IPC), così il referto mostra il percorso reale e
     non un eventuale symlink. Non è un fix di sicurezza.
 
- -- gradia <gradia@disroot.org>  Sat, 29 Aug 2026 18:17:56 +0200
+ -- gradia <gradia@disroot.org>  Sat, 29 Aug 2026 18:27:48 +0200
 
 klamav-py (0.1.4-1) unstable; urgency=medium
 
