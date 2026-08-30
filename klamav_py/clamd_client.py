@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import os
 import socket
+import stat
 import struct
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
@@ -27,6 +29,18 @@ CHUNK_SIZE = 8192
 # riconosciuto solo quando clamd risponde letteralmente
 # "INSTREAM size limit exceeded".
 DEFAULT_MAX_STREAM_SIZE = 25 * 1024 * 1024
+
+# Timeout (secondi) per l'ATTESA del verdetto di clamd, distinto dal
+# timeout di connessione/invio. Sono due cose diverse: mandare i byte è
+# veloce, ma l'analisi di un archivio o di un PDF con molti oggetti
+# annidati può richiedere ben più di 30s. Un valore unico basso strozza
+# i file complessi (falsi "errori" su file perfettamente leggibili),
+# uno alto ritarda il rilevamento di un clamd morto.
+#
+# Va tenuto coerente con CommandReadTimeout/ReadTimeout in clamd.conf:
+# se clamd molla prima di noi, allungare il timeout qui non serve a
+# nulla.
+DEFAULT_SCAN_TIMEOUT = 120.0
 
 
 class ClamdError(RuntimeError):
@@ -74,6 +88,7 @@ class ClamdClient:
         tcp_host: Optional[str] = None,
         tcp_port: int = 3310,
         timeout: float = 30.0,
+        scan_timeout: float = DEFAULT_SCAN_TIMEOUT,
     ) -> None:
         if not unix_socket and not tcp_host:
             raise ValueError("Serve unix_socket oppure tcp_host")
@@ -81,6 +96,16 @@ class ClamdClient:
         self.tcp_host = tcp_host
         self.tcp_port = tcp_port
         self.timeout = timeout
+        self.scan_timeout = scan_timeout
+        # Contatori delle entry saltate senza essere inviate a clamd.
+        # NON entrano nei risultati emessi da scan_stream (vedi
+        # _classify_entry per il perché): un symlink o un socket non ha
+        # contenuto proprio da verificare, quindi non è né "scansionato"
+        # né "non verificato". Restano leggibili qui per chi vuole
+        # mostrarli in un riepilogo diagnostico, senza dover cambiare la
+        # forma dei risultati né l'invariante
+        # scanned = clean + infected + errors + too_large.
+        self.skipped: Counter[str] = Counter()
         # Stato della sessione persistente: attributo dell'istanza (non
         # variabile locale del generatore) perché reset_session() debba
         # potere essere chiamato dall'esterno (ScanWorker, dopo pause
@@ -262,6 +287,8 @@ class ClamdClient:
         try:
             if not persistent:
                 for target in self._iter_files(path, exclude_dirs):
+                    if self._should_skip_entry(target):
+                        continue
                     if on_file_start:
                         on_file_start(target)
                     skip = self._size_limit_result(target, max_stream_size)
@@ -275,6 +302,10 @@ class ClamdClient:
                 return
 
             for target in self._iter_files(path, exclude_dirs):
+                # Prima di on_file_start: le entry saltate non devono
+                # nemmeno comparire come "sto scansionando X" nella UI.
+                if self._should_skip_entry(target):
+                    continue
                 if on_file_start:
                     on_file_start(target)
 
@@ -297,6 +328,25 @@ class ClamdClient:
 
                 try:
                     result = self._session.scan_one(target)
+                except TimeoutError as exc:
+                    # Un timeout è quasi sempre transitorio o legato a un
+                    # file che ha richiesto un'analisi eccezionalmente
+                    # lunga: vale UN secondo tentativo su sessione
+                    # pulita. Solo su TimeoutError, non su
+                    # BrokenPipeError/ConnectionResetError — quelli sui
+                    # file grandi significano rifiuto per
+                    # StreamMaxLength, e ritentare è puro spreco.
+                    self.reset_session()
+                    try:
+                        self._session = _ClamdSession(self)
+                        self._scanned_in_session = 0
+                        result = self._session.scan_one(target)
+                    except (ClamdError, OSError) as retry_exc:
+                        self.reset_session()
+                        yield self._stream_failure_result(
+                            target, retry_exc, max_stream_size, after_retry=True
+                        )
+                        continue
                 except (ClamdError, OSError) as exc:
                     # La sessione è da buttare in ogni caso: clamd può
                     # aver chiuso la connessione (rifiuto per size limit,
@@ -348,6 +398,76 @@ class ClamdClient:
             session.close()
 
     @staticmethod
+    def _open_regular(target: Path):
+        """
+        Apre un file per la lettura garantendo che sia un file REGOLARE,
+        senza finestra TOCTOU tra il controllo e l'apertura.
+
+        O_NONBLOCK: l'apertura di una FIFO ritorna subito invece di
+        bloccare in attesa di uno scrittore (il fallimento silenzioso
+        peggiore: la scansione si pianta senza errore né timeout).
+        O_NOFOLLOW: un symlink fa fallire l'apertura con ELOOP invece di
+        aprire il target.
+        fstat sul descrittore già aperto: si controlla ESATTAMENTE
+        l'oggetto che verrà letto, non un path che nel frattempo può
+        essere stato sostituito.
+
+        Solleva OSError, che i chiamanti già gestiscono. Il flag
+        bloccante viene ripristinato dopo il controllo: sui file
+        regolari O_NONBLOCK è ininfluente, ma lasciarlo attivo
+        renderebbe fragile un'eventuale lettura futura.
+        """
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(f"non è un file regolare: {target}")
+            os.set_blocking(fd, True)
+            return os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def _should_skip_entry(self, target: Path) -> bool:
+        """
+        Filtro su lstat() PRIMA di qualsiasi apertura: True se l'entry va
+        saltata senza inviarla a clamd.
+
+        Non è cosmesi sul log, è una protezione. os.walk() classifica
+        come "file" tutto ciò che non è una directory: symlink pendenti,
+        socket, FIFO, device finiscono tutti nell'elenco dei file da
+        scansionare. E open() su una FIFO senza scrittore BLOCCA
+        indefinitamente nel kernel — nessuna eccezione, nessun timeout:
+        una singola FIFO nell'albero pianta l'intera scansione.
+
+        Perché saltare invece di riportare un errore: un symlink non ha
+        contenuto proprio (il target, se è dentro l'albero, viene
+        scansionato quando lo si incontra come file reale — e se è fuori
+        dall'albero, non era nel perimetro richiesto); socket, FIFO e
+        device non hanno contenuto persistente infettabile. Non sono
+        buchi di copertura, a differenza di TOO_LARGE e degli errori di
+        permessi, che restano visibili proprio perché lo sono.
+
+        Nota: lstat() NON segue il symlink, quindi un link pendente
+        viene riconosciuto come tale invece di produrre ENOENT — è la
+        causa delle centinaia di righe "File o directory non esistente"
+        su alberi con node_modules/store pnpm ripuliti.
+        """
+        try:
+            mode = os.lstat(target).st_mode
+        except OSError:
+            # Entry sparita tra la traversata e adesso: nessun filtro,
+            # il flusso normale produrrà l'errore appropriato.
+            return False
+
+        if stat.S_ISLNK(mode):
+            self.skipped["collegamenti simbolici"] += 1
+            return True
+        if not stat.S_ISREG(mode):
+            self.skipped["file non regolari (socket, FIFO, device)"] += 1
+            return True
+        return False
+
+    @staticmethod
     def _size_limit_result(
         target: Path, max_stream_size: Optional[int]
     ) -> Optional[ScanResult]:
@@ -379,7 +499,10 @@ class ClamdClient:
 
     @staticmethod
     def _stream_failure_result(
-        target: Path, exc: Exception, max_stream_size: Optional[int]
+        target: Path,
+        exc: Exception,
+        max_stream_size: Optional[int],
+        after_retry: bool = False,
     ) -> ScanResult:
         """
         Classificazione di un fallimento di stream. Se il file è sopra la
@@ -402,6 +525,16 @@ class ClamdClient:
                     )
             except OSError:
                 pass
+        if after_retry:
+            # Messaggio distinto: questo file NON è stato verificato
+            # nemmeno al secondo tentativo. È un buco di copertura vero,
+            # va detto in modo che si distingua nel riepilogo per
+            # categoria della CLI.
+            return ScanResult(
+                path=str(target),
+                status="ERROR",
+                signature=f"file non verificato dopo 2 tentativi: {exc}",
+            )
         return ScanResult(
             path=str(target),
             status="ERROR",
@@ -413,7 +546,7 @@ class ClamdClient:
             with self._connect() as sock:
                 sock.sendall(b"zINSTREAM\0")
                 try:
-                    with open(target, "rb") as fh:
+                    with self._open_regular(target) as fh:
                         while chunk := fh.read(CHUNK_SIZE):
                             sock.sendall(struct.pack("!L", len(chunk)) + chunk)
                     sock.sendall(struct.pack("!L", 0))  # chunk di lunghezza zero = fine stream
@@ -524,7 +657,7 @@ class _ClamdSession:
 
     def scan_one(self, target: Path) -> ScanResult:
         try:
-            fh = open(target, "rb")
+            fh = self._client._open_regular(target)
         except OSError as exc:
             # Non abbiamo mandato nessun comando a clamd: la sessione resta
             # valida, riportiamo solo l'errore di lettura locale.
@@ -561,12 +694,24 @@ class _ClamdSession:
         return result
 
     def _read_reply(self) -> str:
-        while b"\0" not in self._buffer:
-            data = self._sock.recv(CHUNK_SIZE)
-            if not data:
-                self.dead = True
-                raise ClamdError("clamd ha chiuso la connessione durante la sessione IDSESSION")
-            self._buffer += data
+        # Il timeout dell'ATTESA del verdetto è più lungo di quello di
+        # connessione/invio: clamd può metterci molto su archivi o PDF
+        # con molti oggetti annidati, e con un timeout unico da 30s quei
+        # file uscivano come "sessione clamd interrotta: timed out" pur
+        # essendo perfettamente leggibili. Ripristinato subito dopo,
+        # così l'invio del file successivo torna a rilevare in fretta un
+        # clamd morto.
+        previous = self._sock.gettimeout()
+        self._sock.settimeout(self._client.scan_timeout)
+        try:
+            while b"\0" not in self._buffer:
+                data = self._sock.recv(CHUNK_SIZE)
+                if not data:
+                    self.dead = True
+                    raise ClamdError("clamd ha chiuso la connessione durante la sessione IDSESSION")
+                self._buffer += data
+        finally:
+            self._sock.settimeout(previous)
         reply, _, self._buffer = self._buffer.partition(b"\0")
         return reply.decode("utf-8", errors="replace").strip("\n ")
 

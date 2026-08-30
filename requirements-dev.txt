@@ -1,2 +1,8 @@
 -r requirements.txt
 pytest>=7.0
+# Necessario per i test su FIFO/file speciali: una regressione del
+# filtro si manifesta come BLOCCO indefinito (open() su FIFO senza
+# scrittore), non come fallimento. Senza questo plugin il marker
+# @pytest.mark.timeout viene ignorato in silenzio e la suite resterebbe
+# appesa in CI invece di segnalare l'errore.
+pytest-timeout>=2.0

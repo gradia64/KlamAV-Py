@@ -1516,12 +1516,19 @@ Exec={exec_cmd} --scan-target %f
                 d.mkdir(parents=True, exist_ok=True)
                 file_path = d / file_name
                 file_path.write_text(content)
-                # I file .desktop sono file di CONFIGURAZIONE letti da
-                # Dolphin/KDE, non eseguibili direttamente: lo spec
-                # freedesktop.org si aspetta 0o644. 0o755 (usato in
-                # precedenza) marcava il file come eseguibile senza motivo,
-                # oltre a violare lo standard.
-                os.chmod(file_path, 0o644)
+                # 0o755, NON 0o644. Da KFrameworks 5.85 i servicemenu di
+                # KIO devono avere il bit di esecuzione: senza, Dolphin
+                # li rifiuta con "Non sei autorizzato ad eseguire questo
+                # file" e la voce di menu non funziona.
+                #
+                # Regola OPPOSTA a quella del launcher installato in
+                # /usr/share/applications (debian/klamav-py.desktop), che
+                # resta 0o644 perché lì il bit di esecuzione non serve e
+                # lo spec freedesktop non lo vuole. Le due destinazioni
+                # hanno requisiti diversi: 0o644 qui è la regressione
+                # introdotta in 0.1.4-1 applicando la regola del
+                # launcher al servicemenu.
+                os.chmod(file_path, 0o755)
 
             _rebuild_kde_service_cache()
 
@@ -1676,8 +1683,17 @@ class MainWindow(QMainWindow):
         self._pending_realtime_scans = {}
         self._dir_snapshots = {}
         self._realtime_queue = []
+        # Distinzione importante: _realtime_roots sono le cartelle che
+        # l'utente ha configurato, _realtime_configured_paths è la loro
+        # espansione ricorsiva (le sottocartelle effettivamente passate
+        # a QFileSystemWatcher). La riconciliazione periodica lavora
+        # sulla seconda; la label di stato mostra entrambe, perché
+        # "attivo su 847/2000 cartelle" quando l'utente ne ha
+        # configurate 3 sarebbe più confondente che informativo.
+        self._realtime_roots: list[str] = []
         self._realtime_configured_paths: list[str] = []
         self._realtime_watch_failures: list[str] = []
+        self._realtime_watch_truncated = False
         self.realtime_worker = None
         self._current_realtime_target = ""
         self._load_realtime()
@@ -1966,10 +1982,18 @@ X-GNOME-Autostart-enabled=true
             self.quarantine_page.refresh()
 
     def _load_realtime(self) -> None:
-        paths = self.settings.value("realtime_paths", [])
-        if isinstance(paths, str): paths = [paths]
+        roots = self.settings.value("realtime_paths", [])
+        if isinstance(roots, str): roots = [roots]
 
-        self._realtime_configured_paths = list(paths)
+        self._realtime_roots = list(roots)
+        # QFileSystemWatcher NON è ricorsivo: osserva esattamente le
+        # cartelle che gli passi. Senza espansione, i file creati nelle
+        # sottocartelle di una cartella monitorata non generavano alcun
+        # evento e il Real-Time non li vedeva — pur dicendo all'utente
+        # di essere attivo su quella cartella.
+        paths, truncated = self._expand_recursive(self._realtime_roots)
+        self._realtime_configured_paths = paths
+        self._realtime_watch_truncated = truncated
 
         old_paths = self.fs_watcher.directories()
         if old_paths:
@@ -1990,6 +2014,73 @@ X-GNOME-Autostart-enabled=true
 
         self._update_realtime_status_label()
 
+    # Tetto al numero di cartelle osservate. Ogni cartella consuma un
+    # watch inotify: fs.inotify.max_user_watches (default 8192 su molte
+    # distribuzioni, condiviso con TUTTI i processi dell'utente — IDE,
+    # sincronizzatori cloud, indicizzatori). Espandere ricorsivamente
+    # una home senza tetto esaurirebbe la quota e romperebbe anche le
+    # altre applicazioni dell'utente, non solo questa.
+    # Tarabile: su sistemi con max_user_watches alto (leggi il valore
+    # con `cat /proc/sys/fs/inotify/max_user_watches`) si può alzare
+    # parecchio. Il default resta prudente perché 8192 è ancora comune
+    # e la quota è condivisa con TUTTI i processi dell'utente.
+    MAX_WATCH_DIRS = 8000
+
+    # Pseudo-filesystem: contenuto sintetico generato dal kernel, non
+    # file veri da sorvegliare, e l'attraversamento può essere
+    # patologicamente lento o infinito.
+    _PSEUDO_FS_PREFIXES = ("/proc", "/sys", "/dev", "/run")
+
+    @classmethod
+    def _expand_recursive(cls, roots: list[str]) -> tuple[list[str], bool]:
+        """
+        Espande le cartelle configurate nell'elenco completo delle
+        sottocartelle da passare a QFileSystemWatcher.
+
+        Ritorna (elenco, troncato). `troncato` è True se si è raggiunto
+        MAX_WATCH_DIRS: il chiamante DEVE mostrarlo all'utente, perché
+        significa che parte dell'albero non è sorvegliata — un
+        Real-Time che si dichiara attivo mentre è cieco su metà delle
+        cartelle è peggio di uno spento.
+
+        followlinks=False: un symlink dentro l'albero non viene seguito,
+        così una cartella non entra due volte e non si creano cicli.
+        Le cartelle nascoste vengono saltate: sono per lo più cache
+        applicative che generano eventi in continuazione (il rumore che
+        satura il Real-Time senza aggiungere protezione utile).
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+
+        for root in roots:
+            if any(root.startswith(p) for p in cls._PSEUDO_FS_PREFIXES):
+                continue
+            if root not in seen:
+                seen.add(root)
+                out.append(root)
+                if len(out) >= cls.MAX_WATCH_DIRS:
+                    return out, True
+            try:
+                walker = os.walk(root, followlinks=False)
+                for dirpath, dirnames, _ in walker:
+                    dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                    for name in dirnames:
+                        full = os.path.join(dirpath, name)
+                        if full in seen:
+                            continue
+                        seen.add(full)
+                        out.append(full)
+                        if len(out) >= cls.MAX_WATCH_DIRS:
+                            walker.close()
+                            return out, True
+            except OSError:
+                # Cartella sparita o illeggibile: la radice resta
+                # comunque nell'elenco, la riconciliazione periodica
+                # riproverà.
+                continue
+
+        return out, False
+
     def _reconcile_realtime_watches(self) -> None:
         """
         Confronta le cartelle effettivamente osservate da fs_watcher con
@@ -2000,8 +2091,18 @@ X-GNOME-Autostart-enabled=true
         periodica il Real-Time resterebbe cieco su quella cartella fino
         al riavvio dell'app.
         """
-        if not self._realtime_configured_paths:
+        if not self._realtime_roots:
             return
+
+        # Ri-espansione a ogni giro: intercetta le sottocartelle create
+        # dopo l'avvio. _on_dir_changed le aggiunge già subito quando
+        # compaiono in una cartella osservata, ma questo copre i casi
+        # che quell'evento non vede (es. un intero albero spostato
+        # dentro con mv, che genera un solo evento sul livello
+        # superiore).
+        paths, truncated = self._expand_recursive(self._realtime_roots)
+        self._realtime_configured_paths = paths
+        self._realtime_watch_truncated = truncated
 
         watched = set(self.fs_watcher.directories())
         missing = [p for p in self._realtime_configured_paths if p not in watched]
@@ -2015,10 +2116,12 @@ X-GNOME-Autostart-enabled=true
         self._realtime_watch_failures = list(failed)
         for p in missing:
             if p not in failed:
-                # Cartella appena ripristinata: lo snapshot va ricostruito
-                # da zero, altrimenti al primo giro _on_dir_changed
-                # confronterebbe con uno snapshot vuoto o obsoleto.
-                self._update_snapshot(p)
+                # scan_existing=True: queste cartelle sono comparse DOPO
+                # l'avvio (albero spostato dentro con mv, cartella
+                # eliminata e ricreata). I file già presenti sono
+                # arrivati con loro e vanno analizzati, non messi in
+                # baseline.
+                self._update_snapshot(p, scan_existing=True)
 
         self._update_realtime_status_label()
 
@@ -2026,30 +2129,83 @@ X-GNOME-Autostart-enabled=true
         if not hasattr(self, "settings_page"):
             return
 
-        total = len(self._realtime_configured_paths)
-        if total == 0:
+        radici = len(self._realtime_roots)
+        if radici == 0:
             self.settings_page.rt_status_label.setText("")
             return
 
+        total = len(self._realtime_configured_paths)
         active = total - len(self._realtime_watch_failures)
-        if not self._realtime_watch_failures:
-            self.settings_page.rt_status_label.setText(f"Real-Time attivo su {active}/{total} cartelle.")
-            self.settings_page.rt_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
-        else:
-            failed_names = ", ".join(self._realtime_watch_failures)
-            self.settings_page.rt_status_label.setText(
-                f"⚠ Real-Time attivo solo su {active}/{total} cartelle. "
-                f"Non monitorate: {failed_names} — probabile limite di sistema "
-                f"(fs.inotify.max_user_watches/max_user_instances)."
-            )
-            self.settings_page.rt_status_label.setStyleSheet("font-size: 12px; color: #e4311b;")
+        plurale = "cartella" if radici == 1 else "cartelle"
 
-    def _update_snapshot(self, dir_path: str) -> None:
+        problemi = []
+        if self._realtime_watch_failures:
+            # Solo i primi nomi: con l'espansione ricorsiva la lista dei
+            # falliti può contenere centinaia di percorsi e renderebbe
+            # la label illeggibile.
+            campione = ", ".join(self._realtime_watch_failures[:3])
+            if len(self._realtime_watch_failures) > 3:
+                campione += f", e altre {len(self._realtime_watch_failures) - 3}"
+            problemi.append(
+                f"{len(self._realtime_watch_failures)} sottocartelle non monitorate "
+                f"({campione}) — probabile limite di sistema "
+                f"(fs.inotify.max_user_watches/max_user_instances)"
+            )
+        if self._realtime_watch_truncated:
+            problemi.append(
+                f"raggiunto il tetto di {self.MAX_WATCH_DIRS} cartelle sorvegliate: "
+                f"le sottocartelle oltre questo limite NON sono protette"
+            )
+
+        if not problemi:
+            self.settings_page.rt_status_label.setText(
+                f"Real-Time attivo su {radici} {plurale} "
+                f"({active} sottocartelle incluse, ricorsivo)."
+            )
+            # Niente color: eredita il colore di testo del tema.
+            # palette(mid) è pensato per elementi decorativi e su molti
+            # temi Plasma finisce grigio-su-grigio: questa label è
+            # l'unico posto dove l'utente vede se il Real-Time è cieco
+            # su parte dell'albero, illeggibile equivale ad assente.
+            self.settings_page.rt_status_label.setStyleSheet("font-size: 12px;")
+        else:
+            self.settings_page.rt_status_label.setText(
+                f"⚠ Real-Time parziale su {radici} {plurale} "
+                f"({active}/{total} sottocartelle attive). " + " | ".join(problemi)
+            )
+            # Grassetto oltre al colore: il rosso hardcoded ha poco
+            # contrasto su temi scuri, il peso del carattere fa passare
+            # il segnale comunque.
+            self.settings_page.rt_status_label.setStyleSheet(
+                "font-size: 12px; font-weight: bold; color: #d32f2f;"
+            )
+
+    def _update_snapshot(self, dir_path: str, scan_existing: bool = False) -> None:
+        """
+        Registra lo stato corrente della cartella come riferimento per
+        il confronto successivo.
+
+        scan_existing=False (avvio dell'applicazione): i file già
+        presenti diventano la baseline e NON vengono scansionati —
+        altrimenti ogni riavvio riscansionerebbe l'intera cartella
+        monitorata.
+
+        scan_existing=True (cartella scoperta DOPO l'avvio): i file
+        presenti sono arrivati insieme alla cartella e vanno
+        scansionati. È il caso di un albero spostato dentro con mv o di
+        un archivio estratto: `mv` genera un solo evento sul livello
+        superiore, quindi senza questo i file dentro le sottocartelle
+        entrerebbero direttamente nella baseline e non verrebbero
+        analizzati mai — con l'interfaccia che continua a dichiarare il
+        Real-Time attivo su quella cartella.
+        """
         snap = {}
         try:
             for entry in os.scandir(dir_path):
-                if entry.is_file():
+                if entry.is_file(follow_symlinks=False):
                     snap[entry.path] = entry.stat().st_mtime
+                    if scan_existing:
+                        self._schedule_realtime_scan(entry.path)
         except OSError:
             pass
         self._dir_snapshots[dir_path] = snap
@@ -2057,10 +2213,18 @@ X-GNOME-Autostart-enabled=true
     def _on_dir_changed(self, dir_path: str) -> None:
         old_snap = self._dir_snapshots.get(dir_path, {})
         new_snap = {}
+        new_subdirs: list[str] = []
         try:
             for entry in os.scandir(dir_path):
-                if entry.is_file():
+                # follow_symlinks=False: un symlink non ha contenuto
+                # proprio e il target, se è nell'albero sorvegliato,
+                # viene già visto per conto suo. Seguirlo qui
+                # significherebbe anche ri-scansionare lo stesso file a
+                # ogni tocco di un link.
+                if entry.is_file(follow_symlinks=False):
                     new_snap[entry.path] = entry.stat().st_mtime
+                elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
+                    new_subdirs.append(entry.path)
         except OSError:
             return
 
@@ -2069,6 +2233,28 @@ X-GNOME-Autostart-enabled=true
                 self._schedule_realtime_scan(fpath)
 
         self._dir_snapshots[dir_path] = new_snap
+
+        # Sottocartelle appena create: vanno sorvegliate subito, non al
+        # prossimo giro di riconciliazione (fino a 60s dopo). Senza
+        # questo, una cartella scaricata ed estratta resterebbe scoperta
+        # proprio nel momento in cui conta.
+        watched = set(self.fs_watcher.directories())
+        to_add = [d for d in new_subdirs if d not in watched]
+        if to_add and len(watched) < self.MAX_WATCH_DIRS:
+            capienza = self.MAX_WATCH_DIRS - len(watched)
+            aggiunte = to_add[:capienza]
+            failed = self.fs_watcher.addPaths(aggiunte)
+            for d in aggiunte:
+                if d not in failed:
+                    self._realtime_configured_paths.append(d)
+                    # scan_existing=True: se la sottocartella è arrivata
+                    # già piena (estrazione di un archivio, copia
+                    # ricorsiva), i file dentro non hanno generato un
+                    # evento proprio e verrebbero altrimenti persi.
+                    self._update_snapshot(d, scan_existing=True)
+            if len(to_add) > capienza:
+                self._realtime_watch_truncated = True
+                self._update_realtime_status_label()
 
     def _schedule_realtime_scan(self, file_path: str) -> None:
         if file_path in self._pending_realtime_scans:

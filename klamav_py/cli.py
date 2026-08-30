@@ -22,12 +22,20 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from . import __version__
 from .clamd_client import DEFAULT_MAX_STREAM_SIZE, ClamdClient, ClamdError
 from .quarantine import Quarantine
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="klamav-py", description="Scanner ClamAV via clamd")
+    # Deliberatamente senza "-V" abbreviato: resta libero per usi futuri
+    # e non rischia collisioni con un eventuale "-v" verbose.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
     parser.add_argument(
         "--socket",
         default="/run/clamav/clamd.ctl",
@@ -204,6 +212,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
     print(f"\n{scanned} file scansionati, {infections} infetti, {errors} errori.")
     if too_large:
         print(f"{too_large} file oltre StreamMaxLength, non verificati (vedi clamd.conf).")
+
+    # Entry saltate: non sono né scansionate né "non verificate" (un
+    # symlink o un socket non ha contenuto proprio), quindi restano
+    # fuori dai contatori principali e dall'invariante
+    # scanned = clean + infetti + errori + troppo grandi. Le mostriamo
+    # comunque come informazione diagnostica, non in --quiet.
+    if client.skipped and not args.quiet:
+        totale_saltati = sum(client.skipped.values())
+        dettaglio = ", ".join(f"{n} {tipo}" for tipo, n in client.skipped.most_common())
+        print(f"{totale_saltati} voci saltate ({dettaglio}).")
 
     if error_categories:
         print("\nDettaglio errori per tipo:")

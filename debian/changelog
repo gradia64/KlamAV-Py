@@ -1,3 +1,65 @@
+klamav-py (0.1.5-1) unstable; urgency=medium
+
+  * Fix critico: le entry non regolari (FIFO, socket, device) e i
+    symlink non vengono più inviati a clamd. os.walk() li classificava
+    come file normali: open() su una FIFO senza scrittore BLOCCA
+    indefinitamente nel kernel, quindi una singola FIFO nell'albero
+    scansionato piantava l'intera scansione senza errore né timeout.
+  * Fix: i symlink pendenti non producono più falsi ERRORE
+    "[Errno 2] File o directory non esistente". Su alberi con
+    node_modules o store pnpm ripuliti erano centinaia di righe di
+    rumore che nascondevano gli errori veri. Il filtro usa lstat(),
+    che non segue il link.
+  * Sicurezza: l'apertura dei file usa O_NOFOLLOW|O_NONBLOCK con
+    verifica fstat() sul descrittore già aperto, chiudendo la finestra
+    TOCTOU tra il controllo del tipo e la lettura.
+  * Fix regressione (introdotta in 0.1.4-1): il servicemenu di Dolphin
+    torna a 0755. Da KFrameworks 5.85 i servicemenu KIO devono avere il
+    bit di esecuzione; con 0644 Dolphin rispondeva "Non sei autorizzato
+    ad eseguire questo file" e la voce di menu non funzionava. Il
+    launcher in /usr/share/applications resta correttamente 0644: le
+    due destinazioni hanno requisiti opposti.
+  * Fix: il timeout di attesa del verdetto di clamd è ora distinto da
+    quello di connessione/invio (default 120s contro 30s) e i timeout
+    hanno un secondo tentativo su sessione pulita. File grandi e
+    leciti, tipicamente PDF con molti oggetti annidati, uscivano come
+    "sessione clamd interrotta: timed out" pur essendo leggibili. I
+    file non verificati nemmeno al secondo tentativo hanno ora un
+    messaggio distinto: sono un buco di copertura vero e devono
+    distinguersi nel riepilogo.
+  * Real-Time: il monitoraggio è ora ricorsivo. QFileSystemWatcher non
+    lo è per costruzione, quindi i file creati nelle sottocartelle non
+    generavano alcun evento — il Real-Time si dichiarava attivo su una
+    cartella restando cieco su tutto ciò che stava sotto. Le nuove
+    sottocartelle vengono osservate appena create, non al giro di
+    riconciliazione successivo. Tetto di 8000 cartelle per non
+    esaurire fs.inotify.max_user_watches, che è condiviso con tutte le
+    altre applicazioni dell'utente; il raggiungimento del tetto è
+    segnalato esplicitamente nell'interfaccia.
+  * Real-Time: i file già presenti in una cartella scoperta DOPO
+    l'avvio vengono analizzati invece di finire nella baseline. `mv` di
+    un albero dentro una cartella monitorata genera un solo evento sul
+    livello superiore: i file nelle sottocartelle non ne generavano
+    alcuno e venivano registrati come stato di partenza, quindi mai
+    scansionati — con l'interfaccia che continuava a dichiarare il
+    Real-Time attivo. Scenario reale: archivio estratto altrove e
+    spostato dentro. All'avvio dell'applicazione il comportamento resta
+    invariato (baseline senza scansione), altrimenti ogni riavvio
+    riscansionerebbe tutto.
+  * Real-Time: la label di stato non usa più palette(mid), che su molti
+    temi Plasma risulta grigio su grigio. È l'unico posto in cui
+    l'utente vede se il monitoraggio è parziale: illeggibile equivale
+    ad assente.
+  * Aggiunto --version alla CLI: la versione era visibile solo nella
+    GUI.
+  * Test: nuovo file per symlink, FIFO e socket, con timeout espliciti
+    (una regressione del filtro si manifesta come blocco, non come
+    fallimento). Aggiunto pytest-timeout a requirements-dev.txt, senza
+    il quale il marker verrebbe ignorato in silenzio. Nuovo test di
+    coerenza tra klamav_py.__version__ e debian/changelog.
+
+ -- gradia <gradia@disroot.org>  Sun, 30 Aug 2026 12:00:00 +0200
+
 klamav-py (0.1.4-2) unstable; urgency=medium
 
   * Correttezza: la radice di ogni scansione viene risolta

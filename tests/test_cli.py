@@ -5,7 +5,13 @@ Non lanciano clamd né toccano il filesystem reale.
 
 from __future__ import annotations
 
-from klamav_py.cli import _error_category, build_parser
+import re
+from pathlib import Path
+
+import pytest
+
+from klamav_py import __version__
+from klamav_py.cli import _error_category, build_parser, main
 
 
 def test_error_category_rimuove_errno():
@@ -69,3 +75,41 @@ def test_cmd_scan_conta_too_large_separatamente(tmp_path, monkeypatch, capsys):
     assert exit_code == 0
     assert "3 file scansionati, 0 infetti, 1 errori." in captured.out
     assert "1 file oltre StreamMaxLength, non verificati" in captured.out
+
+
+def test_flag_version_stampa_versione_ed_esce(capsys):
+    """
+    argparse con action="version" stampa su stdout ed esce con codice 0
+    sollevando SystemExit: va intercettato, non è un errore.
+    """
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert __version__ in out
+    assert "klamav-py" in out
+
+
+def test_version_coerente_con_changelog_debian():
+    """
+    __version__ è la fonte mostrata da --version e nella GUI. Se diverge
+    dalla parte upstream di debian/changelog, --version mente al primo
+    che la usa per un bug report — e nessuno se ne accorge.
+
+    Confronta solo la parte upstream: il suffisso di revisione Debian
+    ("-2" in "0.1.5-2") è legittimo che esista solo nel changelog.
+    """
+    changelog = Path(__file__).resolve().parent.parent / "debian" / "changelog"
+    if not changelog.exists():
+        pytest.skip("debian/changelog non presente (sorgente non completo)")
+
+    prima_riga = changelog.read_text(encoding="utf-8").splitlines()[0]
+    match = re.match(r"^\S+ \(([^)]+)\)", prima_riga)
+    assert match, f"prima riga di debian/changelog non riconosciuta: {prima_riga!r}"
+
+    upstream = match.group(1).split("-")[0]
+    assert upstream == __version__, (
+        f"debian/changelog dice {upstream}, klamav_py.__version__ dice "
+        f"{__version__}: allinearli prima del rilascio"
+    )
