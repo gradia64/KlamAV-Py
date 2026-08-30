@@ -113,3 +113,35 @@ def test_version_coerente_con_changelog_debian():
         f"debian/changelog dice {upstream}, klamav_py.__version__ dice "
         f"{__version__}: allinearli prima del rilascio"
     )
+
+
+def test_pyproject_non_duplica_la_versione():
+    """
+    pyproject.toml deve derivare la versione da klamav_py.__version__,
+    non ridichiararla. Era una terza fonte di verità (dopo __init__.py e
+    debian/changelog) ed è rimasta indietro alla 0.1.4 mentre le altre
+    due erano già alla 0.1.5 — esattamente il disallineamento che una
+    versione duplicata rende inevitabile.
+    """
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject.exists():
+        pytest.skip("pyproject.toml non presente (sorgente non completo)")
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python < 3.11
+        pytest.skip("tomllib non disponibile su questa versione di Python")
+
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    project = data["project"]
+
+    assert "version" not in project, (
+        "pyproject.toml dichiara una versione statica: usare "
+        'dynamic = ["version"] con [tool.setuptools.dynamic] '
+        "version = { attr = \"klamav_py.__version__\" }"
+    )
+    assert "version" in project.get("dynamic", [])
+    assert (
+        data["tool"]["setuptools"]["dynamic"]["version"]["attr"]
+        == "klamav_py.__version__"
+    )

@@ -661,9 +661,14 @@ sistema prima di abilitare la nuova utente (verificato leggendo il
 postinst del .deb compilato).
 Da rivedere prima di una release stabile
 
-     Versione hardcoded sia in pyproject.toml che in
-    debian/changelog: da tenere sincronizzata manualmente ad ogni
-    release finché non si automatizza.
+     Versione: dalla 0.1.5 pyproject.toml la deriva da
+    klamav_py.__version__ ([tool.setuptools.dynamic]) invece di
+    ridichiararla, quindi l'unico punto da toccare a ogni rilascio è
+    klamav_py/__init__.py. Resta da allineare a mano debian/changelog,
+    ma la coerenza fra i due è verificata da tests/test_cli.py. Il
+    disallineamento non era teorico: la versione in pyproject.toml è
+    rimasta ferma alla 0.1.4 mentre le altre due fonti erano già alla
+    0.1.5.
      Nessun test automatico verifica l'installazione del .deb di per sé
     (verifica manuale): se il progetto cresce, vale un job CI con
     sbuild/pbuilder che lo ricostruisce da zero.

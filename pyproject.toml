@@ -4,7 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "klamav-py"
-version = "0.1.4"
+# Versione derivata da klamav_py/__init__.py invece che duplicata qui:
+# era una terza fonte di verità (dopo __init__.py e debian/changelog) e
+# infatti è quella rimasta indietro alla 0.1.4 mentre le altre due
+# erano già alla 0.1.5. Con dynamic, l'unico punto da toccare a ogni
+# rilascio è __init__.py; la coerenza con debian/changelog è verificata
+# da tests/test_cli.py::test_version_coerente_con_changelog_debian.
+dynamic = ["version"]
 description = "Frontend Python minimale per ClamAV via clamd, erede spirituale di KlamAV 0.22"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,8 +50,19 @@ klamav-py = "klamav_py.cli:main"
 [project.gui-scripts]
 klamav-py-gui = "klamav_py.gui.app:main"
 
+[tool.setuptools.dynamic]
+version = { attr = "klamav_py.__version__" }
+
 [tool.setuptools.packages.find]
 include = ["klamav_py*"]
 
 [tool.setuptools.package-data]
 "klamav_py.gui" = ["resources/*.svg", "resources/*.sh"]
+
+[tool.pytest.ini_options]
+# Rete di sicurezza globale: alcune regressioni di questo progetto si
+# manifestano come BLOCCO e non come fallimento (open() su FIFO senza
+# scrittore, socket in attesa). Senza un timeout di default la suite
+# resterebbe appesa in CI invece di segnalare l'errore, e sarebbero
+# protetti solo i test che ricordano il marker esplicito.
+timeout = 60
