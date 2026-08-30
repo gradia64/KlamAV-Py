@@ -1375,7 +1375,7 @@ class SettingsPage(QWidget):
         # MainWindow._update_realtime_status_label().
         self.rt_status_label = QLabel("")
         self.rt_status_label.setWordWrap(True)
-        self.rt_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+        self.rt_status_label.setStyleSheet("font-size: 12px;")
         rt_layout.addWidget(self.rt_status_label)
 
         layout.addWidget(rt_group)

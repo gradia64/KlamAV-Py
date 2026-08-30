@@ -11,7 +11,7 @@ Caratteristiche
     CLI senza dipendenze esterne (solo libreria standard), GUI in PySide6.
     Quarantena con permessi neutralizzati (0400), nome su disco nonprevedibile, ripristino dei permessi originali, indice condiviso eprotetto da lock tra CLI/GUI/worker.
     Scansioni pianificate: timer interno alla GUI e/o unit systemd utente(via pacchetto .deb), con log persistente dei risultati.
-    Monitoraggio Real-Time delle cartelle configurate (QFileSystemWatcher,con riconciliazione periodica dei watch persi).
+    Monitoraggio Real-Time RICORSIVO delle cartelle configurate(QFileSystemWatcher, con espansione delle sottocartelle,riconciliazione periodica dei watch persi e tetto configurabile pernon esaurire fs.inotify.max_user_watches).
     Pausa/Ripresa delle scansioni, guard "una scansione alla volta".
     Pre-check dimensionale: i file oltre StreamMaxLength sono segnalati"non verificati" senza sprecare la sessione clamd.
     Integrazione menu contestuale Dolphin, autostart, system tray,single-instance con IPC.
@@ -131,6 +131,8 @@ CLI: opzioni di scansione
     (default 25MB, allineato a StreamMaxLength di clamd.conf;
     0 disattiva il pre-check).
      --log-errors FILE — dettaglio di ogni errore (path e motivo) su file.
+     --version — stampa la versione ed esce (opzione globale, non
+    del sottocomando scan).
      --no-persistent / --session-batch-size N — controllo della
     sessione persistente (vedi sezione dedicata).
 
@@ -161,6 +163,42 @@ una "pipe interrotta" su un file che in realtà sta bene (vedi
 accettata — un file che cresce oltre soglia tra il controllo e l'invio
 viene comunque gestito dal fallback che classifica gli errori di stream
 su file sopra soglia come TOO_LARGE.
+
+Entry non regolari (dalla 0.1.5): symlink, socket, FIFO e device
+vengono scartati durante l'attraversamento e non inviati a clamd.
+os.walk() classifica come "file" tutto ciò che non è una directory,
+quindi finivano nell'elenco da scansionare con due conseguenze: i
+symlink pendenti (frequentissimi in node_modules e negli store pnpm
+ripuliti) producevano centinaia di falsi ERRORE "[Errno 2] File o
+directory non esistente", e open() su una FIFO senza scrittore BLOCCA
+indefinitamente nel kernel — nessuna eccezione, nessun timeout: una
+sola FIFO nell'albero piantava l'intera scansione.
+
+Non sono buchi di copertura: un symlink non ha contenuto proprio (il
+target, se è nell'albero, viene scansionato come file reale), e socket,
+FIFO e device non hanno contenuto persistente infettabile. Per questo
+non compaiono nei risultati e non entrano nell'invariante
+scanned = puliti + infetti + errori + troppo_grandi; sono conteggiati
+a parte e mostrati nel riepilogo della CLI. TOO_LARGE e i permessi
+negati restano invece visibili proprio perché sono buchi veri.
+
+L'apertura usa O_NOFOLLOW|O_NONBLOCK con verifica fstat() sul
+descrittore già aperto: il controllo del tipo riguarda esattamente
+l'oggetto che verrà letto, senza finestra TOCTOU rispetto al path.
+
+Timeout (dalla 0.1.5): l'attesa del verdetto di clamd ha un timeout
+proprio (120s), distinto da quello di connessione e invio (30s). Sono
+cose diverse: mandare i byte è veloce, ma l'analisi di un archivio o
+di un PDF con molti oggetti annidati può richiedere molto di più. Con
+un valore unico basso quei file uscivano come "sessione clamd
+interrotta: timed out" pur essendo perfettamente leggibili. I timeout
+danno diritto a un secondo tentativo su sessione pulita (solo i
+timeout: su pipe interrotta significherebbe rifiuto per
+StreamMaxLength e ritentare sarebbe spreco); un file non verificato
+nemmeno al secondo tentativo ha un messaggio distinto, perché quello
+sì è un buco di copertura. Il valore va tenuto coerente con
+CommandReadTimeout/ReadTimeout in clamd.conf: se clamd molla prima,
+allungare il timeout lato client non serve.
 
 Se sospetti che un problema sia legato alla sessione persistente,
 --no-persistent torna al comportamento "una connessione per file"
@@ -251,8 +289,49 @@ Sette sezioni:
 
     Impostazioni — socket di clamd, directory di quarantena,
     cartelle monitorate per il Real-Time (con indicatore "Real-Time
-    attivo su N/M cartelle"), autostart al login, avvio minimizzato in
-    tray, aggiornamento DB all'avvio, integrazione Dolphin.
+    attivo su N cartelle (M sottocartelle incluse, ricorsivo)"),
+    autostart al login, avvio minimizzato in tray, aggiornamento DB
+    all'avvio, integrazione Dolphin.
+
+Monitoraggio Real-Time: come funziona (0.1.5)
+
+QFileSystemWatcher non è ricorsivo: osserva esattamente le cartelle che
+gli vengono passate. Fino alla 0.1.4 questo significava che i file
+creati nelle SOTTOCARTELLE di una cartella monitorata non generavano
+alcun evento — l'interfaccia dichiarava il Real-Time attivo su una
+cartella restando cieca su tutto ciò che stava sotto.
+
+Dalla 0.1.5 le cartelle configurate vengono espanse ricorsivamente
+(symlink non seguiti, cartelle nascoste saltate perché sono per lo più
+cache che generano eventi in continuazione). Tre percorsi tengono
+aggiornata la copertura:
+
+     sottocartelle create dopo l'avvio: agganciate subito, alla
+    ricezione dell'evento sulla cartella che le contiene;
+     alberi spostati dentro con mv o estratti da un archivio: mv
+    genera un solo evento sul livello superiore, quindi le
+    sottocartelle che arrivano già piene sono recuperate dalla
+    riconciliazione periodica (fino a 60s di latenza);
+     watch persi (cartella eliminata e ricreata): stessa
+    riconciliazione.
+
+I file già presenti in una cartella scoperta DOPO l'avvio vengono
+analizzati, non messi in baseline: è lo scenario dell'archivio estratto
+altrove e poi spostato dentro, in cui altrimenti il contenuto non
+verrebbe mai scansionato. All'avvio dell'applicazione il comportamento
+è opposto e voluto: i file già presenti diventano lo stato di
+riferimento senza essere scansionati, altrimenti ogni riavvio
+riscansionerebbe l'intera cartella monitorata.
+
+Ogni cartella osservata consuma un watch inotify, e
+fs.inotify.max_user_watches è condiviso con TUTTI i processi
+dell'utente (IDE, sincronizzatori cloud, indicizzatori). Per questo
+c'è un tetto (MAX_WATCH_DIRS, default 8000): controlla il proprio
+limite con `cat /proc/sys/fs/inotify/max_user_watches` e taralo di
+conseguenza. Sia il raggiungimento del tetto sia i fallimenti di
+addPaths() sono segnalati esplicitamente nell'indicatore di stato —
+un Real-Time che si dichiara attivo mentre è cieco su metà delle
+cartelle è peggio di uno spento.
 
 La versione del programma è visibile nel titolo della finestra, nel
 tooltip di riposo della system tray e nel pannello Impostazioni.
@@ -358,11 +437,29 @@ file) gli errori residui sono fisiologici e riconoscibili:
      Errno 13 "Permesso negato" — permessi reali del filesystem (es.
     file posseduti da container Docker dentro la home). Non è un
     problema del progetto.
-     Errno 2 "File o directory non esistente" — file spariti durante
-    la traversata (Trash svuotato, sync cloud che desincronizza, browser
-    che riscrive la cache). Rumore atteso.
-     "timed out" — tipicamente file grandi letti via mount di rete
-    (Nextcloud, NFS): latenza, non malfunzionamento.
+     Errno 2 "File o directory non esistente" — dalla 0.1.5 dovrebbe
+    essere raro. Fino alla 0.1.4 la causa dominante NON era quella
+    documentata qui (file spariti durante la traversata): erano
+    symlink pendenti, che os.walk() classifica come file e che
+    open() non può aprire. Su alberi con node_modules o store pnpm
+    ripuliti erano centinaia di righe che nascondevano gli errori
+    veri. Ora i symlink sono scartati a monte. Quel che resta è la
+    causa originariamente ipotizzata — file davvero spariti tra la
+    traversata e la lettura (Trash svuotato, sync cloud, browser che
+    riscrive la cache) — e in quella forma è rumore atteso.
+     Errno 6 "Device o indirizzo non esistente" — socket AF_UNIX
+    (agent GPG, MEGAsync, native messaging host dei browser). Come
+    sopra: scartati a monte dalla 0.1.5, non dovrebbero più comparire.
+     "timed out" — anche qui la spiegazione fino alla 0.1.4 era
+    incompleta. Non solo latenza di mount di rete: il timeout unico da
+    30s copriva sia l'invio sia l'ATTESA del verdetto, e clamd può
+    metterci molto di più su archivi o PDF con molti oggetti annidati.
+    File locali perfettamente leggibili risultavano "sessione clamd
+    interrotta: timed out" in modo riproducibile. Dalla 0.1.5 l'attesa
+    ha un timeout proprio (120s) e i timeout hanno un secondo
+    tentativo. Se ne vedi ancora, controlla
+    CommandReadTimeout/ReadTimeout in clamd.conf prima di sospettare
+    il filesystem.
      Errori a raffica di un solo tipo (migliaia) — quasi certamente
     clamd morto o riavviato a metà scansione:
     journalctl -u clamav-daemon.service nell'intervallo della
@@ -402,9 +499,20 @@ contenuto potenzialmente ostile (non un aggressore esterno).
     finisca interpolato in una riga di shell eseguita come root.
      Rigenerazione cache servizi KDE senza shell. os.system() è stato
     sostituito da subprocess.run() con argv esplicito (nessuna shell).
-     Permessi dei file .desktop dell'integrazione Dolphin corretti da
-    0755 a 0644, in linea con lo standard freedesktop.org (sono file di
-    configurazione, non eseguibili).
+     Permessi dei file .desktop dell'integrazione Dolphin portati da
+    0755 a 0644.
+
+    ATTENZIONE — questa modifica era SBAGLIATA ed è stata revocata
+    nella 0.1.5. Il ragionamento (i .desktop sono file di
+    configurazione, lo spec freedesktop non vuole il bit di
+    esecuzione) vale per i launcher in /usr/share/applications, NON
+    per i servicemenu di KIO: da KFrameworks 5.85 questi devono essere
+    eseguibili, e con 0644 Dolphin risponde "Non sei autorizzato ad
+    eseguire questo file" e la voce di menu smette di funzionare. Le
+    due destinazioni hanno requisiti opposti: il launcher resta 0644,
+    il servicemenu torna 0755. Lasciato qui documentato perché la
+    giustificazione sembra corretta letta da sola ed è esattamente il
+    modo in cui la regressione può essere reintrodotta.
 
 I fix sono coperti da 9 nuovi test automatici (rifiuto di symlink e FIFO
 in quarantena, verifica del reclamo atomico della destinazione nel
@@ -436,8 +544,8 @@ coerente con scan_file() (CONTSCAN), che già risolveva il proprio path.
 Cosa manca rispetto a KlamAV originale (di proposito)
 
      Nessun on-access scanning kernel-level. Il monitoraggio Real-Time
-    è basato su QFileSystemWatcher (modifiche a directory osservate
-    esplicitamente, non ricorsivo, con qualche secondo di latenza) —
+    è basato su QFileSystemWatcher (ricorsivo dalla 0.1.5, con qualche
+    secondo di latenza e un tetto al numero di cartelle osservate) —
     non è un sostituto di un vero on-access scanner. Per quello ClamAV
     fornisce già clamonacc (fanotify-based): non ha senso
     reimplementare un equivalente di Dazuko. Se serve on-access reale,
