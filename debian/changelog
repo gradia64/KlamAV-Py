@@ -57,8 +57,13 @@ klamav-py (0.1.5-1) unstable; urgency=medium
     fallimento). Aggiunto pytest-timeout a requirements-dev.txt, senza
     il quale il marker verrebbe ignorato in silenzio. Nuovo test di
     coerenza tra klamav_py.__version__ e debian/changelog.
+  * pyproject.toml deriva la versione da klamav_py.__version__ invece di
+    ridichiararla: era una terza fonte di verità dopo __init__.py e
+    debian/changelog, ed è rimasta indietro alla 0.1.4 mentre le altre
+    due erano già alla 0.1.5. Aggiunta configurazione pytest con timeout
+    globale di 60s.
 
- -- gradia <gradia@disroot.org>  Sun, 30 Aug 2026 12:00:00 +0200
+ -- gradia <gradia@disroot.org>  Sun, 30 Aug 2026 10:15:56 +0200
 
 klamav-py (0.1.4-2) unstable; urgency=medium
 
