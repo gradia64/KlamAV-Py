@@ -21,7 +21,7 @@ klamav-py (0.1.6-1) unstable; urgency=medium
   * Test da 67 a 75, con i nuovi controlli di coerenza fra le fonti della
     versione e la regressione sul rilascio dei QThread.
 
- -- gradia <gradia@disroot.org>  ...
+ -- gradia <gradia@disroot.org>  Mon, 31 Aug 2026 10:47:38 +0200
 
 klamav-py (0.1.5-1) unstable; urgency=medium
 
@@ -88,7 +88,7 @@ klamav-py (0.1.5-1) unstable; urgency=medium
     due erano già alla 0.1.5. Aggiunta configurazione pytest con timeout
     globale di 60s.
 
- -- gradia <gradia@disroot.org>  Sun, 30 Aug 2026 10:15:56 +0200
+ -- gradia <gradia@disroot.org>  Mon, 31 Aug 2026 10:51:40 +0200
 
 klamav-py (0.1.4-2) unstable; urgency=medium
 
