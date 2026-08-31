@@ -40,6 +40,23 @@ sudo apt-get install -f    # sistema le dipendenze mancanti, se servono
 
 Installa klamav-py (CLI) e klamav-py-gui in /usr/bin/, abilita automaticamente il timer systemd utente per la scansione programmata e registra l'applicazione nei menu. Dettagli e avvertenze nella sezione "Pacchettizzazione .deb" più sotto.
 
+### Da AUR (Arch Linux e derivate)
+
+```sh
+git clone https://aur.archlinux.org/klamav-py.git
+cd klamav-py && makepkg -si
+```
+
+Oppure con un AUR helper: `yay -S klamav-py`, `paru -S klamav-py`.
+
+Il pacchetto vale anche per Manjaro, EndeavourOS, CachyOS e le altre derivate che utilizzano AUR. `pyside6` e `clamav` sono dipendenze opzionali a livello pacman: la CLI funziona senza GUI, ma per l'uso normale servono entrambe.
+
+A differenza del `.deb`, il timer di scansione programmata **non** viene abilitato durante l'installazione: su Arch la policy è che lo stato del sistema lo decide l'utente. Il pacchetto stampa l'istruzione da eseguire:
+
+```sh
+systemctl --user enable --now klamav-scan.timer
+```
+
 ### Da sorgenti (sviluppo o build del pacchetto)
 
 **Build del .deb:**
@@ -296,6 +313,24 @@ L'unit utente gira come l'utente, legge la home senza problemi e usa la stessa q
 ### Upgrade da versioni precedenti (che avevano la unit di sistema)
 
 La rimozione del file della vecchia unit non ferma un'istanza già attiva — il symlink in /etc/systemd/system/timers.target.wants/ non è tracciato da dpkg. Per questo postinst include una migrazione dedicata che ferma e disabilita esplicitamente la vecchia unit di sistema prima di abilitare la nuova utente (verificato leggendo il postinst del .deb compilato).
+
+## Pacchettizzazione Arch (AUR)
+
+Il PKGBUILD è in `arch/`, insieme allo script `klamav-py.install` e a `test-local.sh`.
+
+Il `source` punta al tag GitHub della release. Attenzione a un dettaglio asimmetrico: i tag del progetto hanno il prefisso `v` (`v0.1.6`) ma la directory dentro l'archivio no (`KlamAV-Py-0.1.6`), da cui il `v$pkgver` nell'URL e il `$pkgver` nei `cd` di `build()` e `package()`. Il file scaricato viene rinominato in `$pkgname-$pkgver.tar.gz` per non collidere in `SRCDEST` con archivi di altri pacchetti.
+
+`pkgver` va aggiornato a ogni rilascio insieme a `klamav_py/__init__.py`, `debian/changelog` e `CHANGELOG.md`; `tests/test_changelog.py` verifica l'allineamento e che i file installati da `package()` esistano davvero. Il `sha256sums` va rigenerato a ogni nuovo tag, con `updpkgsums` su una macchina Arch o a mano.
+
+`arch/test-local.sh` permette di validare il pacchetto in un container Arch senza avere una macchina Arch:
+
+```sh
+arch/test-local.sh --tag      # build dal tag GitHub, PKGBUILD non modificato
+arch/test-local.sh            # build dall'albero di lavoro corrente
+KLAMAV_TEST_GUI=1 arch/test-local.sh   # verifica anche l'avvio della GUI
+```
+
+La modalità `--tag` è quella da usare prima di pubblicare su AUR: è l'unica che verifica davvero URL e checksum, perché le altre costruiscono da un tarball locale e patchano il PKGBUILD al volo.
 
 ## Da rivedere prima di una release stabile
 
