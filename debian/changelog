@@ -1,3 +1,28 @@
+klamav-py (0.1.6-1) unstable; urgency=medium
+
+  * Corretto il crash "QThread: Destroyed while thread is still running"
+    (SIGABRT via qFatal) osservato su Arch con Python 3.14 e PySide6
+    6.11.2 durante l'aggiornamento del database. I worker emettono il
+    segnale di fine dentro run(), quindi la slot azzerava l'ultimo
+    riferimento Python mentre il thread C++ era ancora in teardown.
+    Agganciare deleteLater a finished non basta: la connessione non
+    trattiene il wrapper Python. Il rilascio passa ora da
+    _retire_qthread, che mantiene un riferimento forte fino a finished.
+  * Icona rinominata da klamav-icon a klamav-py per coerenza con il nome
+    dell'applicazione: risorsa bundlata, nome cercato nel tema e voce
+    Icon= del .desktop.
+  * Corretta una riga malformata in debian/klamav-py.install: il secondo
+    campo e' sempre una directory di destinazione, quindi il pacchetto
+    installava una directory chiamata klamav-py.svg contenente
+    klamav-icon.svg.
+  * Changelog riorganizzato: CHANGELOG.md sintetico e allineato alla
+    versione corrente, storia estesa in docs/CHANGELOG-archive.md, bozza
+    delle nuove voci generata da tools/changelog-stub.sh.
+  * Test da 67 a 75, con i nuovi controlli di coerenza fra le fonti della
+    versione e la regressione sul rilascio dei QThread.
+
+ -- gradia <gradia@disroot.org>  ...
+
 klamav-py (0.1.5-1) unstable; urgency=medium
 
   * Fix critico: le entry non regolari (FIFO, socket, device) e i
