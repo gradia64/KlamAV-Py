@@ -19,7 +19,7 @@ import sys
 import time
 import json
 
-from PySide6.QtCore import Qt, QSize, QSettings, Signal, QTimer, QFileSystemWatcher
+from PySide6.QtCore import Qt, QSize, QSettings, Signal, QTimer, QFileSystemWatcher, QThread
 from PySide6.QtGui import QIcon, QColor, QAction, QFont
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import (
@@ -98,6 +98,60 @@ def _icon(*theme_names: str) -> QIcon:
 
 def _app_icon() -> QIcon:
     return _icon("klamav-icon", "emblem-virus", "security-high", "security-medium")
+
+
+# Worker in attesa di distruzione: vedi _retire_qthread. Deve essere un
+# riferimento Python forte e a livello di modulo, perché la sua unica
+# ragione d'essere è sopravvivere all'uscita di scope del chiamante.
+_in_ritiro: set[QThread] = set()
+
+
+def _retire_qthread(worker: QThread) -> None:
+    """
+    Rilascio sicuro di un QThread la cui logica run() è finita ma il cui
+    thread C++ può non essere ancora completamente terminato.
+
+    Il crash "QThread: Destroyed while thread is still running" (SIGABRT
+    via qFatal, osservato su Arch con Python 3.14 + PySide6 6.11 durante
+    l'aggiornamento freshclam) scatta quando l'ultimo riferimento Python
+    al wrapper cade PRIMA che QThread::finished sia stato consegnato:
+    shiboken distrugge l'oggetto C++ mentre il thread è ancora in
+    teardown. La finestra di gara è reale perché il segnale custom del
+    worker (finished_scan/finished_update) è emesso DENTRO run(), prima
+    che run() restituisca il controllo.
+
+    Due casi distinti, con rimedi diversi:
+
+    - Thread GIÀ terminato: deleteLater() basta, perché trasferisce la
+      ownership dell'oggetto al C++. Da quel momento la caduta del
+      riferimento Python è innocua. È il caso comune quando run() ha
+      fatto lavoro lungo (freshclam) e la slot gira molto dopo.
+
+    - Thread ANCORA in teardown: non basta agganciare deleteLater a
+      finished. La connessione non trattiene il wrapper Python, quindi
+      appena il chiamante esce di scope shiboken distrugge comunque
+      l'oggetto C++ e il qFatal scatta lo stesso — la connessione non fa
+      in tempo a servire a niente. Serve un riferimento Python forte che
+      sopravviva al chiamante: da qui il set _in_ritiro, svuotato dalla
+      stessa slot che poi chiama deleteLater().
+
+    Il set è l'unica cosa che tiene in vita il wrapper nella finestra fra
+    l'uscita del chiamante e l'arrivo di finished. finished è emesso dal
+    thread che sta morendo ma l'oggetto vive nel thread GUI, quindi la
+    connessione è queued e _finito() gira nel thread GUI a thread ormai
+    terminato: è lì che deleteLater() è sicuro.
+    """
+    if worker.isFinished():
+        worker.deleteLater()
+        return
+
+    _in_ritiro.add(worker)
+
+    def _finito() -> None:
+        _in_ritiro.discard(worker)
+        worker.deleteLater()
+
+    worker.finished.connect(_finito)
 
 
 # Un singolo percorso di filesystem su Linux è al massimo PATH_MAX (4096
@@ -529,6 +583,14 @@ class ScanPage(QWidget):
         self.pause_button.setText("Sospendi")
         self.pause_button.setIcon(QIcon.fromTheme("media-playback-pause"))
 
+        # Difesa: non dovrebbe mai esserci un worker residuo qui (ogni
+        # fine scansione lo azzera, stop incluso), ma se ci fosse,
+        # sovrascriverlo lo scaricherebbe col thread magari ancora in
+        # teardown — parcheggio invece che rilascio immediato.
+        if self.worker is not None:
+            _retire_qthread(self.worker)
+            self.worker = None
+
         self.worker = ScanWorker(
             socket_path=self.socket_path,
             target=target,
@@ -800,7 +862,12 @@ class ScanPage(QWidget):
             report_box.setText(report_text)
             report_box.exec()
 
-        self.worker = None
+        # Rilascio differito, vedi _retire_qthread: l'emit di
+        # finished_scan è dentro run(), il thread può non essere ancora
+        # completamente terminato quando questa slot gira.
+        worker, self.worker = self.worker, None
+        if worker is not None:
+            _retire_qthread(worker)
 
 
 class QuarantinePage(QWidget):
@@ -970,7 +1037,12 @@ class UpdatePage(QWidget):
                 f"{APP_NAME} - Aggiornamento", message, _icon(icon_type), 5000
             )
 
-        self.worker = None
+        # Rilascio differito: self.worker = None qui scaricherebbe il
+        # QThread mentre run() sta ancora chiudendo (l'emit che ha
+        # invocato questa slot è dentro run()) — vedi _retire_qthread.
+        worker, self.worker = self.worker, None
+        if worker is not None:
+            _retire_qthread(worker)
 
 
 class RealTimePage(QWidget):
@@ -1970,7 +2042,12 @@ X-GNOME-Autostart-enabled=true
             summary += f"\nLog: {log_path}"
         self.scheduler_page.update_progress(summary)
 
-        self.bg_worker = None
+        # Rilascio differito, vedi _retire_qthread: anche qui l'emit di
+        # finished_scan è dentro run(), il thread può non essere ancora
+        # completamente terminato quando questa slot gira.
+        worker, self.bg_worker = self.bg_worker, None
+        if worker is not None:
+            _retire_qthread(worker)
 
     def _on_quarantine_changed(self, original_path: str) -> None:
         """
@@ -2323,7 +2400,13 @@ X-GNOME-Autostart-enabled=true
         )
         self.history_page.refresh()
 
-        self.realtime_worker = None
+        # Rilascio differito, vedi _retire_qthread; qui il rilascio è
+        # ancora più critico perché _process_realtime_queue() può creare
+        # SUBITO il worker del file successivo: il vecchio andrebbe
+        # distrutto proprio mentre il nuovo parte.
+        worker, self.realtime_worker = self.realtime_worker, None
+        if worker is not None:
+            _retire_qthread(worker)
         self._process_realtime_queue()
 
     def _check_clamd(self, socket_path: str) -> None:
@@ -2348,4 +2431,16 @@ X-GNOME-Autostart-enabled=true
                 f"Non riesco a contattare clamd su {socket_path}.\n"
                 "Verifica che il servizio clamav-daemon sia attivo.",
             )
+        # A differenza degli altri worker questo NON passa da
+        # _retire_qthread, ed è deliberato: PingWorker è l'unico creato
+        # con un parent Qt (vedi _check_clamd, `PingWorker(socket_path,
+        # self)`). Con un parent la ownership dell'oggetto passa al C++,
+        # quindi la caduta del riferimento Python qui sotto non distrugge
+        # l'oggetto sottostante e il qFatal "Destroyed while thread is
+        # still running" non può scattare.
+        #
+        # Il corollario: se qualcuno togliesse quel `self`, o copiasse
+        # questo schema per un worker nuovo senza parent, il crash
+        # tornerebbe silenziosamente. tests/test_qthread_retire.py
+        # verifica che il parent resti.
         self._ping_worker = None
