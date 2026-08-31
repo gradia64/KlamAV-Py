@@ -83,7 +83,7 @@ APP_NAME = "KlamAV-Py"
 _LEGACY_SETTINGS_ORG = "KlamAV"
 _LEGACY_SETTINGS_APP = "KlamAV"
 
-_BUNDLED_ICON_PATH = Path(__file__).parent / "resources" / "klamav-icon.svg"
+_BUNDLED_ICON_PATH = Path(__file__).parent / "resources" / "klamav-py.svg"
 
 
 def _icon(*theme_names: str) -> QIcon:
@@ -97,7 +97,7 @@ def _icon(*theme_names: str) -> QIcon:
 
 
 def _app_icon() -> QIcon:
-    return _icon("klamav-icon", "emblem-virus", "security-high", "security-medium")
+    return _icon("klamav-py", "emblem-virus", "security-high", "security-medium")
 
 
 # Worker in attesa di distruzione: vedi _retire_qthread. Deve essere un
