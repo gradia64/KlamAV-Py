@@ -179,7 +179,25 @@ class Quarantine:
             # coincida con quello del file descriptor aperto all'inizio.
             os.rename(path, dest)
 
-            moved_st = os.stat(dest)
+            # os.lstat(), NON os.stat(): la verifica deve riguardare la voce
+            # appena spostata, non il file che quella voce eventualmente
+            # indica. os.stat() segue i symlink, e questo rendeva il
+            # controllo aggirabile:
+            #
+            #   1. il malware crea un hardlink del file infetto altrove
+            #      (stesso inode, quindi stessi st_dev/st_ino);
+            #   2. sostituisce 'path' con un symlink verso quell'hardlink;
+            #   3. rename() sposta il SYMLINK in quarantena;
+            #   4. os.stat(dest) segue il link e ritrova l'inode originale:
+            #      il confronto passava, e in quarantena finiva un symlink
+            #      mentre il contenuto infetto restava fuori, eseguibile.
+            #
+            # L'esito era il peggiore possibile: l'indice registrava una
+            # quarantena riuscita, la UI mostrava il file come neutralizzato
+            # e "Elimina definitivamente" rimuoveva il solo link. Con
+            # lstat() il symlink ha il proprio inode, il confronto fallisce
+            # e si finisce nel ramo di cleanup qui sotto.
+            moved_st = os.lstat(dest)
             if (moved_st.st_dev, moved_st.st_ino) != (st.st_dev, st.st_ino):
                 # Il file è stato sostituito durante l'operazione: quello
                 # finito in quarantena non è quello controllato sopra.
@@ -198,7 +216,16 @@ class Quarantine:
 
             # Read-only per il proprietario: non eseguibile, non modificabile
             # per errore mentre è in quarantena.
-            dest.chmod(0o400)
+            #
+            # os.fchmod(fd), non dest.chmod(): si agisce sull'inode già
+            # aperto e verificato, senza passare dal path. Path.chmod()
+            # segue i symlink, quindi nello scenario di evasione descritto
+            # sopra applicava 0o400 al file infetto rimasto FUORI dalla
+            # quarantena — cambiandone i permessi ma lasciandolo dov'era.
+            # Ora che lstat() blocca quello scenario è una difesa in
+            # profondità, ma toglie comunque una dipendenza dal path in un
+            # punto dove ne abbiamo già una verificata.
+            os.fchmod(fd, 0o400)
         finally:
             os.close(fd)
 
