@@ -1,6 +1,6 @@
 # KlamAV-Py
 
-CILicense
+**License:** GNU General Public License v3.0
 
 Frontend minimale per ClamAV via clamd — CLI e GUI per Linux.
 
@@ -299,7 +299,8 @@ La rimozione del file della vecchia unit non ferma un'istanza già attiva — il
 
 ## Da rivedere prima di una release stabile
 
-- **Versione:** dalla 0.1.5 pyproject.toml la deriva da `klamav_py.__version__` (`[tool.setuptools.dynamic]`) invece di ridichiararla, quindi l'unico punto da toccare a ogni rilascio è `klamav_py/__init__.py`. Resta da allineare a mano debian/changelog, ma la coerenza fra i due è verificata da tests/test_cli.py. Il disallineamento non era teorico: la versione in pyproject.toml è rimasta ferma alla 0.1.4 mentre le altre due fonti erano già alla 0.1.5.
+- **Versione:** `klamav_py/__init__.py` è la fonte di verità. Dalla 0.1.5 pyproject.toml la deriva da `klamav_py.__version__` (`[tool.setuptools.dynamic]`) invece di ridichiararla. Restano da allineare a mano `debian/changelog` (con `dch`) e `CHANGELOG.md`, ma la coerenza è verificata da `tests/test_cli.py` e `tests/test_changelog.py`, che girano anche in CI. Il disallineamento non era teorico, in due modi diversi: la versione in pyproject.toml è rimasta ferma alla 0.1.4 mentre le altre fonti erano già alla 0.1.5, e `CHANGELOG.md` è rimasto fermo alla 0.1.3 per tre rilasci, perché nessun passo del processo di rilascio lo toccava.
+- **Changelog:** `CHANGELOG.md` è la cronologia per gli utenti, indipendente dalla distribuzione; `debian/changelog` contiene i metadati del pacchetto Debian; `docs/CHANGELOG-archive.md` conserva il dettaglio esteso fino alla 0.1.3 e le tornate di audit. Dopo `dch`, `tools/changelog-stub.sh` genera la bozza della nuova voce di `CHANGELOG.md` a partire da quella appena scritta in `debian/changelog`, da accorciare a mano.
 - Nessun test automatico verifica l'installazione del .deb di per sé (verifica manuale): se il progetto cresce, vale un job CI con sbuild/pbuilder che lo ricostruisce da zero.
 
 ## Estensioni naturali
