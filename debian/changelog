@@ -1,3 +1,35 @@
+klamav-py (0.1.7-1) unstable; urgency=medium
+
+  * Sicurezza: chiuso un aggiramento della quarantena via hardlink +
+    symlink. La verifica dopo il rename usava os.stat(), che segue i
+    symlink: in quarantena poteva finire solo un link mentre il file
+    infetto restava fuori, con l'indice che registrava una quarantena
+    riuscita. Ora os.lstat() per la verifica e os.fchmod() sul
+    descrittore gia' verificato per i permessi.
+  * Sicurezza: socket IPC single-instance spostato da /tmp/klamav_py_ipc
+    alla runtime directory dell'utente. Un altro utente locale poteva
+    occupare il nome in /tmp, intercettare i percorsi mandati in
+    scansione e impedire l'avvio della GUI. Il client verifica
+    SO_PEERCRED prima di inviare dati; un fallimento di listen() viene
+    segnalato e la GUI parte comunque senza single-instance.
+  * Nuovo controllo aggiornamenti tramite GitHub Releases, con dati di
+    rete escapati, link limitato al repository ufficiale e risposta
+    limitata a 256 KB.
+  * Chiusura ordinata dei worker all'uscita (scadenza complessiva di 3
+    secondi): niente piu' abort "QThread: Destroyed while thread is still
+    running" con un thread ancora attivo.
+  * "Esci" durante l'aggiornamento del database rinvia la chiusura alla
+    fine dell'aggiornamento invece di interromperlo.
+  * freshclam-update.sh: il demone viene riavviato da un trap su EXIT
+    anche se lo script e' interrotto da un segnale, SIGPIPE e' ignorato,
+    e vengono riavviati solo i servizi che erano attivi prima.
+  * Corretti: sovrapposizione fra scansione da Dolphin e scansione
+    manuale, colore dei risultati puliti non valido, intervalli di
+    pianificazione oltre il limite di QTimer.
+  * Test da 75 a 87.
+
+ -- gradia <gradia@disroot.org>  Mon, 21 Sep 2026 19:45:00 +0200
+
 klamav-py (0.1.6-1) unstable; urgency=medium
 
   * Corretto il crash "QThread: Destroyed while thread is still running"

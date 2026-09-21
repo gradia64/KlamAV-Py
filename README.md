@@ -16,6 +16,7 @@ Riscrittura minimale, in Python, dell'idea alla base di KlamAV 0.22 (frontend a 
 - Pausa/Ripresa delle scansioni, guard "una scansione alla volta".
 - Pre-check dimensionale: i file oltre StreamMaxLength sono segnalati "non verificati" senza sprecare la sessione clamd.
 - Integrazione menu contestuale Dolphin, autostart, system tray, single-instance con IPC.
+- Controllo aggiornamenti dell'applicazione tramite GitHub Releases, manuale o all'avvio.
 
 ## Requisiti
 
@@ -164,10 +165,10 @@ Applicazione PySide6 a finestra unica con barra laterale e stile ispirato a KDE 
 - **Quarantena manuale di default.** La casella "Metti in quarantena automaticamente i file infetti" è disattivata di default: i file segnalati restano dove sono e li sposti tu con "Metti in quarantena i selezionati" — comodo per valutare un falso positivo prima di spostare qualcosa. "Copia log" copia negli appunti tutte le righe della lista (infetti, errori, non verificati).
 - **Cronologia** — registro persistente (~/.local/share/klamav-py/history.json, ultime 1000 voci) con data/ora, tipo, percorso, scansionati, infetti, errori e non verificati. Le scansioni programmate indicizzano anche il log dettagliato su disco (tooltip sulla riga): il dettaglio infetti/errori di una scansione in background, che non passa da nessuna lista UI, resta così sempre ispezionabile.
 - **Quarantena** — legge lo stesso indice JSON usato dalla CLI (index.json nella directory di quarantena): i due strumenti sono intercambiabili sugli stessi dati. Ripristino nella posizione originale (con ripristino dei permessi originali, rifiuto esplicito se il percorso è stato nel frattempo rioccupato) o eliminazione definitiva.
-- **Aggiornamenti** — scarica le definizioni virus lanciando `freshclam --stdout` tramite pkexec (autenticazione PolicyKit), fermando e riavviando automaticamente il demone clamav-freshclam/freshclam di sistema per evitare conflitti di lock sul file di log. Output mostrato in tempo reale. Di default parte automaticamente 1.5s dopo l'avvio dell'app (disattivabile in Impostazioni).
+- **Aggiornamenti** — scarica le definizioni virus lanciando `freshclam --stdout` tramite pkexec (autenticazione PolicyKit), fermando il demone clamav-freshclam/freshclam di sistema per evitare conflitti di lock sul file di log e riavviandolo alla fine. Dalla 0.1.7 il riavvio avviene anche se l'aggiornamento viene interrotto (logout, segnale), e riguarda solo i servizi che erano attivi prima: un demone fermato di proposito resta fermo. Output mostrato in tempo reale. Scegliendo "Esci" durante l'aggiornamento, l'app si chiude appena termina invece di interromperlo. Di default parte automaticamente 1.5s dopo l'avvio dell'app (disattivabile in Impostazioni).
 - **Real-Time** — log delle scansioni automatiche sulle cartelle monitorate (configurabili in Impostazioni). Usa QFileSystemWatcher: creazione/modifica di un file → scansione dopo un debounce di 3s (per non scansionare file ancora in scrittura), e i file infetti vengono sempre messi in quarantena automaticamente. I file troppo grandi sono etichettati "Non verificato", non "Sicuro" (vedi scelte di design).
 - **Pianificazione** — scansione ricorrente (ogni N ore o giorni) su una cartella a scelta, tramite QTimer interno: richiede l'app in esecuzione (anche minimizzata in tray). Durante l'esecuzione la pagina mostra lo stato e i contatori live; il tooltip della tray riflette l'avanzamento; a fine scansione il log dettagliato viene scritto in ~/.local/share/klamav-py/logs/scheduled-<timestamp>.log (rotazione: ultime 10 esecuzioni) e referenziato in Cronologia. Non è un timer di sistema come quello del pacchetto .deb, che funziona anche a GUI chiusa (vedi "Scansioni pianificate: i tre meccanismi").
-- **Impostazioni** — socket di clamd, directory di quarantena, cartelle monitorate per il Real-Time (con indicatore "Real-Time attivo su N cartelle (M sottocartelle incluse, ricorsivo)"), autostart al login, avvio minimizzato in tray, aggiornamento DB all'avvio, integrazione Dolphin.
+- **Impostazioni** — socket di clamd, directory di quarantena, cartelle monitorate per il Real-Time (con indicatore "Real-Time attivo su N cartelle (M sottocartelle incluse, ricorsivo)"), autostart al login, avvio minimizzato in tray, aggiornamento DB all'avvio, controllo aggiornamenti dell'applicazione (pulsante e opzione all'avvio), integrazione Dolphin.
 
 ## Monitoraggio Real-Time: come funziona (0.1.5)
 
@@ -199,9 +200,13 @@ Esclusione della directory di quarantena. I file in quarantena sono i dati gesti
 
 ## System tray e single-instance
 
-L'app resta attiva nella system tray anche chiudendo la finestra (la X la nasconde, non la termina: si esce dal menu della tray o da "Esci"). È pensata per restare in background per pianificazione e Real-Time.
+L'app resta attiva nella system tray anche chiudendo la finestra (la X la nasconde, non la termina: si esce dal menu della tray o da "Esci"). È pensata per restare in background per pianificazione e Real-Time. All'uscita i thread in corso (scansioni, ping a clamd, controllo aggiornamenti) vengono fermati e attesi per al massimo 3 secondi; quelli bloccati su I/O oltre quel limite non impediscono la chiusura.
 
-È inoltre single-instance: se lanci la GUI mentre un'altra istanza è già attiva, la seconda invia il proprio `--scan-target` (se presente) alla prima via QLocalServer/QLocalSocket e termina subito, invece di aprire una seconda finestra. È il meccanismo che rende sensata l'integrazione Dolphin: cliccando "Scansiona con KlamAV-Py" su più file/cartelle, tutte le richieste finiscono nella stessa finestra già aperta.
+È inoltre single-instance: se lanci la GUI mentre un'altra istanza è già attiva, la seconda invia il proprio `--scan-target` (se presente) alla prima e termina subito, invece di aprire una seconda finestra. È il meccanismo che rende sensata l'integrazione Dolphin: cliccando "Scansiona con KlamAV-Py" su più file/cartelle, tutte le richieste finiscono nella stessa finestra già aperta.
+
+Il socket IPC sta nella runtime directory dell'utente (`$XDG_RUNTIME_DIR/klamav-py-ipc`, tipicamente `/run/user/<uid>/`), non in `/tmp`, e prima di inviare qualunque dato la seconda istanza verifica con `SO_PEERCRED` che il processo in ascolto appartenga allo stesso utente. Se non esiste una runtime directory sicura, o il server IPC non riesce a partire, la GUI parte comunque senza single-instance e lo segnala: un secondo avvio aprirebbe un'altra copia.
+
+Aggiornando dalla 0.1.6 o precedenti, un'istanza vecchia ancora aperta usa il vecchio socket e non viene riconosciuta dalla nuova: chiudila dalla tray prima di riavviare l'applicazione.
 
 ## Integrazione Dolphin
 
@@ -210,6 +215,12 @@ Dal pannello Impostazioni si può installare la voce "Scansiona con KlamAV-Py" n
 ## Autostart
 
 Se abilitato, scrive un file .desktop in ~/.config/autostart/ che lancia la GUI con l'interprete Python correntemente in uso; se disabilitato, rimuove il file.
+
+## Controllo aggiornamenti dell'applicazione (0.1.7)
+
+Il pulsante "Controlla aggiornamenti" in Impostazioni interroga l'API delle release GitHub del progetto e confronta l'ultima versione pubblicata con quella in uso. L'opzione "Controlla aggiornamenti all'avvio" è disattivata di default: senza di essa l'applicazione non contatta GitHub se non su richiesta esplicita. Se c'è una versione nuova compare un link alla pagina della release (e una notifica in tray, per il controllo all'avvio); l'installazione resta manuale, tramite .deb o AUR.
+
+La risposta di GitHub è trattata come dato non fidato: viene letta fino a un massimo di 256 KB, versione e note sono escapate prima di essere mostrate, e il link è reso cliccabile solo se punta alle release del repository ufficiale.
 
 ## Scansioni pianificate: i tre meccanismi
 
@@ -238,13 +249,19 @@ Su una scansione home-wide di una macchina di sviluppo reale (330k+ file) gli er
 - **Errori a raffica di un solo tipo (migliaia)** — quasi certamente clamd morto o riavviato a metà scansione:
   `journalctl -u clamav-daemon.service` nell'intervallo della scansione, e `dmesg | grep -i oom` per il caso OOM. Il riepilogo per tipo della CLI (o il log persistente della programmata) rende questo caso immediatamente distinguibile dal rumore fisiologico.
 
+## Fix di sicurezza nella 0.1.7
+
+- **Aggiramento della quarantena via hardlink + symlink.** La verifica dell'identità dell'inode dopo lo spostamento (introdotta nella 0.1.4, vedi sotto) usava `os.stat()`, che segue i symlink. Un file infetto poteva crearsi un hardlink altrove e sostituire il proprio percorso con un symlink verso quell'hardlink: lo spostamento portava in quarantena il solo link, `os.stat()` ritrovava l'inode originale e la verifica passava. Il contenuto infetto restava fuori ed eseguibile, l'indice registrava una quarantena riuscita e "Elimina definitivamente" rimuoveva solo il link. La verifica ora usa `os.lstat()` e i permessi sono applicati con `fchmod()` sul descrittore già verificato. Richiede una gara vinta da un processo dello stesso utente, ma è ripetibile in ciclo.
+
+- **Socket IPC single-instance in /tmp.** Fino alla 0.1.6 il socket era `/tmp/klamav_py_ipc`, in una directory condivisa da tutti gli utenti. `UserAccessOption` impediva ad altri di connettersi al socket dell'applicazione, ma non impediva all'applicazione di connettersi al socket di qualcun altro: un secondo utente locale poteva occupare il nome per primo, ricevere i percorsi dei file mandati in scansione e, rispondendo alla connessione, far credere a ogni avvio che un'istanza fosse già attiva, impedendo del tutto l'avvio della GUI (niente Real-Time, niente scansioni programmate). Ora il socket sta nella runtime directory dell'utente, il client verifica il peer con `SO_PEERCRED` e il fallimento di `listen()` viene segnalato. Non sfruttabile su un desktop con un solo utente.
+
 ## Fix di sicurezza nella 0.1.4
 
 Questa versione risolve una serie di problemi di sicurezza emersi da un audit del codice. Il modello di minaccia di riferimento è un sistema multi-utente e, per la quarantena, il file infetto stesso trattato come contenuto potenzialmente ostile (non un aggressore esterno).
 
 - **TOCTOU in quarantena e ripristino.** `quarantine_file()` apre il file con O_NOFOLLOW e verifica l'identità dell'inode (dev+ino) dopo lo spostamento, invece di fidarsi di un controllo is_file() separato dall'operazione di move: un file infetto potrebbe tentare di evadere l'isolamento sostituendosi con un symlink nella finestra tra il controllo e lo spostamento. I symlink (e i file speciali come le FIFO) sono ora rifiutati esplicitamente. `restore()` reclama la destinazione in modo atomico con O_CREAT|O_EXCL invece di un exists() seguito da move(), eliminando la finestra in cui un altro processo poteva creare il file di destinazione nel mezzo.
 
-- **Socket IPC single-instance ristretto e validato.** Il QLocalServer usa UserAccessOption: senza, su Linux i permessi del socket dipendono dallo umask del processo e potrebbero risultare accessibili ad altri utenti del sistema. Il percorso ricevuto dal socket è ora limitato in dimensione (evita payload enormi pensati come DoS) e decodificato in modo robusto (un payload UTF-8 malformato viene ignorato, non fa propagare eccezioni).
+- **Socket IPC single-instance ristretto e validato.** Il QLocalServer usa UserAccessOption: senza, su Linux i permessi del socket dipendono dallo umask del processo e potrebbero risultare accessibili ad altri utenti del sistema. Il percorso ricevuto dal socket è ora limitato in dimensione (evita payload enormi pensati come DoS) e decodificato in modo robusto (un payload UTF-8 malformato viene ignorato, non fa propagare eccezioni). Dalla 0.1.7 il socket non è più in `/tmp`: vedi la sezione precedente.
 
 - **Aggiornamento database senza stringa di shell costruita a runtime.** L'operazione via pkexec non passa più una stringa di comandi costruita in Python a sh -c: esegue uno script fisso spedito col pacchetto (klamav_py/gui/resources/freshclam-update.sh). Elimina alla radice la possibilità che un futuro parametro reso configurabile finisca interpolato in una riga di shell eseguita come root.
 
