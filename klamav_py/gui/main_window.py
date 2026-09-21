@@ -116,6 +116,12 @@ def _mid_color(widget: QWidget) -> QColor:
 # ragione d'essere è sopravvivere all'uscita di scope del chiamante.
 _in_ritiro: set[QThread] = set()
 
+# Tempo COMPLESSIVO (non per singolo worker) concesso ai thread per
+# terminare quando l'applicazione si chiude: vedi
+# MainWindow._shutdown_workers. Con un wait() a tempo fisso per ognuno,
+# sei worker bloccati terrebbero l'app appesa sei volte tanto.
+_SHUTDOWN_DEADLINE_SECONDS = 3.0
+
 
 def _retire_qthread(worker: QThread) -> None:
     """
@@ -1801,7 +1807,7 @@ class MainWindow(QMainWindow):
         show_action = QAction("Mostra finestra", self)
         show_action.triggered.connect(self._restore_from_tray)
         quit_action = QAction("Esci", self)
-        quit_action.triggered.connect(QApplication.instance().quit)
+        quit_action.triggered.connect(self._request_quit)
         tray_menu.addAction(show_action)
         tray_menu.addSeparator()
         tray_menu.addAction(quit_action)
@@ -1910,6 +1916,11 @@ class MainWindow(QMainWindow):
         self.realtime_reconcile_timer.timeout.connect(self._reconcile_realtime_watches)
         self.realtime_reconcile_timer.start(60_000)
 
+        # Chiusura ordinata dei worker: vedi _shutdown_workers. Agganciata
+        # qui, prima che parta qualunque worker (il primo è il ping).
+        self._quit_after_update = False
+        QApplication.instance().aboutToQuit.connect(self._shutdown_workers)
+
         self._check_clamd(saved_socket)
 
         if self.settings.value("startup_update", True, type=bool):
@@ -1927,6 +1938,110 @@ class MainWindow(QMainWindow):
         ogni attività che lo ha modificato (scansione manuale,
         programmata, pausa)."""
         self.tray_icon.setToolTip(_default_tray_tooltip())
+
+    def _request_quit(self) -> None:
+        """
+        Uscita dal menu della tray.
+
+        Se è in corso l'aggiornamento del database l'uscita viene
+        RINVIATA alla sua fine invece di interromperlo. Lo stdout di
+        freshclam-update.sh è una pipe letta da questo processo: appena il
+        processo non c'è più, le scritture di freshclam su quella pipe
+        falliscono. Lo script ignora SIGPIPE e ripristina comunque il
+        demone di sistema (trap su EXIT, vedi il file), ma come si
+        comporta freshclam quando le sue scritture falliscono (EPIPE) non
+        dipende da noi: aspettare la fine è la garanzia più semplice che
+        l'aggiornamento si completi, e l'utente ne vede anche l'esito.
+        """
+        worker = self.update_page.worker
+        if worker is not None and worker.isRunning():
+            if not self._quit_after_update:
+                self._quit_after_update = True
+                # Connessa dopo UpdatePage._on_finished, quindi eseguita
+                # dopo di lei (connessioni queued, ordine preservato):
+                # quando gira, il worker è già stato ritirato.
+                worker.finished_update.connect(self._quit_when_update_done)
+            if self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    APP_NAME,
+                    "Aggiornamento del database in corso: l'applicazione "
+                    "si chiuderà appena termina.",
+                    _app_icon(),
+                    5000,
+                )
+            return
+        QApplication.instance().quit()
+
+    def _quit_when_update_done(self, *_args) -> None:
+        QTimer.singleShot(0, QApplication.instance().quit)
+
+    def _shutdown_workers(self) -> None:
+        """
+        Connessa a QApplication.aboutToQuit: copre OGNI uscita, anche
+        quelle che non passano da _request_quit (logout della sessione).
+
+        Quando app.exec() restituisce, Python e Qt distruggono i wrapper
+        e la MainWindow con i suoi figli: un QThread ancora in esecuzione
+        a quel punto produce il qFatal "QThread: Destroyed while thread is
+        still running" (SIGABRT). PingWorker è il caso più diretto, perché
+        il parent Qt che lo protegge durante l'esecuzione (vedi
+        _on_ping_result) qui lo porta a essere distrutto con la finestra.
+
+        _in_ritiro da solo non basta: contiene solo i worker GIÀ ritirati.
+        Quelli ancora attivi stanno negli attributi delle pagine.
+
+        I thread che non terminano entro _SHUTDOWN_DEADLINE_SECONDS sono,
+        per costruzione, bloccati su I/O non interrompibile (urlopen,
+        ping verso un clamd appeso, file grosso in streaming): il loro
+        risultato alla chiusura non serve più. Per loro niente terminate()
+        (ucciderebbe il thread a metà di qualunque operazione, lock
+        compresi) ma os._exit(), dopo aver salvato le impostazioni: il
+        processo esce senza passare dai distruttori, quindi senza abort.
+        """
+        workers: dict[int, QThread] = {}
+
+        for w in (
+            self.scan_page.worker,
+            getattr(self, "bg_worker", None),
+            getattr(self, "realtime_worker", None),
+        ):
+            if w is not None:
+                # stop() sveglia anche un worker in pausa (vedi
+                # ScanWorker.stop): esce al confine del file corrente.
+                w.stop()
+                workers[id(w)] = w
+
+        for w in (
+            self.update_page.worker,
+            self.settings_page._update_check_worker,
+            getattr(self, "_ping_worker", None),
+            *list(_in_ritiro),
+        ):
+            if w is not None:
+                workers[id(w)] = w
+
+        for w in workers.values():
+            w.requestInterruption()
+
+        deadline = time.monotonic() + _SHUTDOWN_DEADLINE_SECONDS
+        for w in workers.values():
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            w.wait(remaining_ms)
+
+        survivors = [w for w in workers.values() if w.isRunning()]
+        if not survivors:
+            return
+
+        names = ", ".join(sorted({type(w).__name__ for w in survivors}))
+        print(
+            f"{APP_NAME}: thread ancora attivi alla chiusura ({names}), "
+            "uscita forzata.",
+            file=sys.stderr,
+        )
+        QSettings(APP_NAME, APP_NAME).sync()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
     def setup_ipc(self, server: QLocalServer):
         """Configura il server IPC per ricevere file da scansionare da altre istanze."""

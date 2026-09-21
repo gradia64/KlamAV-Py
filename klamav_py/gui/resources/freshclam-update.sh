@@ -13,23 +13,57 @@
 # fisso installato dal pacchetto, non c'è alcuna stringa costruita a
 # runtime da interpolare: se serve rendere qualcosa configurabile, va
 # passato a freshclam come argomento separato di argv, non concatenato
-# qui dentro.
+# qui dentro. L'unica variabile qui sotto ($to_restart) contiene solo
+# nomi di servizio scritti letteralmente in questo file.
 #
-# 1. systemctl stop: ferma il demone di sistema (nome varia per
-#    distribuzione: clamav-freshclam su Debian/Ubuntu, freshclam su
-#    Arch/Fedora). 2>/dev/null silenzia l'errore se il servizio ha un
-#    nome diverso o non esiste su questo sistema.
-# 2. freshclam --stdout: l'aggiornamento vero e proprio.
-# 3. res=$?: salva il codice di uscita di freshclam PRIMA di eseguire
-#    altro (systemctl start altrimenti lo sovrascriverebbe).
-# 4. systemctl start: riavvia il demone di sistema.
-# 5. exit $res: il codice di uscita restituito alla GUI è quello di
-#    freshclam, non quello dell'ultimo systemctl.
+# Sequenza:
+# 1. Si annotano i servizi del demone di sistema ATTIVI in questo momento
+#    (il nome varia per distribuzione: clamav-freshclam su Debian/Ubuntu,
+#    freshclam su Arch/Fedora). Alla fine si riavviano solo quelli: un
+#    demone fermato di proposito dall'utente resta fermo.
+# 2. systemctl stop: ferma il demone (tiene il lock sul log/database).
+# 3. freshclam --stdout: l'aggiornamento vero e proprio.
+# 4. Il riavvio avviene nel trap su EXIT, non in fondo allo script, così
+#    scatta in OGNI caso di uscita: fine normale, errore di freshclam,
+#    SIGTERM/SIGHUP/SIGINT (es. logout della sessione). Unica eccezione
+#    possibile: SIGKILL, che per definizione non è intercettabile.
+# 5. SIGPIPE ignorato: lo stdout di questo script è una pipe letta dalla
+#    GUI. Se la GUI termina prima di noi, la prima scrittura successiva
+#    ucciderebbe lo script con SIGPIPE PRIMA del riavvio del demone,
+#    lasciando il servizio di sistema fermo. Con SIGPIPE ignorato le
+#    scritture falliscono (EPIPE) senza uccidere nessuno; l'impostazione
+#    è ereditata da freshclam, e anche se freshclam dovesse comunque
+#    fermarsi, il trap riavvia il demone, che aggiorna da sé.
+# 6. Il codice di uscita restituito alla GUI è quello di freshclam, non
+#    quello dei systemctl eseguiti nel trap.
 
-systemctl stop clamav-freshclam 2>/dev/null
-systemctl stop freshclam 2>/dev/null
+trap '' PIPE
+
+to_restart=""
+for svc in clamav-freshclam freshclam; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        to_restart="$to_restart $svc"
+    fi
+done
+
+# shellcheck disable=SC2329  # invocata dal trap su EXIT
+restore_daemon() {
+    for svc in $to_restart; do
+        systemctl start "$svc" 2>/dev/null
+    done
+}
+
+# EXIT per l'uscita normale; i segnali vengono convertiti in exit (con il
+# codice convenzionale 128+N) perché in sh POSIX il trap su EXIT non
+# scatta se lo script viene ucciso da un segnale non gestito.
+trap restore_daemon EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+for svc in $to_restart; do
+    systemctl stop "$svc" 2>/dev/null
+done
+
 freshclam --stdout
-res=$?
-systemctl start clamav-freshclam 2>/dev/null
-systemctl start freshclam 2>/dev/null
-exit $res
+exit $?
