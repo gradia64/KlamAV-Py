@@ -10,8 +10,8 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
-from PySide6.QtNetwork import QLocalSocket, QLocalServer
+from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtNetwork import QLocalServer
 
 from .main_window import (
     APP_NAME,
@@ -20,6 +20,7 @@ from .main_window import (
     MainWindow,
     _migrate_legacy_settings,
 )
+from .single_instance import ipc_socket_path, notify_running_instance
 
 
 def main() -> int:
@@ -53,28 +54,46 @@ def main() -> int:
     _migrate_legacy_settings()
 
     # --- SISTEMA SINGLE INSTANCE E IPC ---
-    ipc_socket = QLocalSocket()
-    ipc_socket.connectToServer("klamav_py_ipc")
-
-    if ipc_socket.waitForConnected(500):
-        # Un'altra istanza è già attiva. Invia il target e chiudi questa.
-        if args.scan_target:
-            ipc_socket.write(str(args.scan_target).encode('utf-8'))
-            ipc_socket.waitForBytesWritten(1000)
-        ipc_socket.disconnectFromServer()
+    # Socket nella runtime directory dell'utente, mai in /tmp, e verifica
+    # del peer prima di inviare qualunque dato: vedi single_instance.py
+    # per l'attacco (squatting di /tmp/klamav_py_ipc da parte di un altro
+    # utente locale) che questo schema chiude.
+    ipc_path = ipc_socket_path()
+    payload = str(args.scan_target).encode("utf-8") if args.scan_target else None
+    if ipc_path is not None and notify_running_instance(ipc_path, payload):
+        # Un'istanza dello stesso utente è attiva e ha ricevuto il target.
         return 0
 
-    # Siamo la prima istanza: creiamo il server IPC per ricevere future richieste
-    QLocalServer.removeServer("klamav_py_ipc")
-    ipc_server = QLocalServer(app)
-    # Su Linux, senza setSocketOptions(), i permessi del socket UNIX
-    # dipendono dallo umask del processo (documentato da Qt): con uno
-    # umask permissivo (es. 022, comune di default) altri UTENTI del
-    # sistema — non solo altri processi tuoi — potrebbero connettersi al
-    # socket. UserAccessOption forza esplicitamente l'accesso al solo
-    # utente proprietario, indipendentemente dallo umask attivo.
-    ipc_server.setSocketOptions(QLocalServer.UserAccessOption)
-    ipc_server.listen("klamav_py_ipc")
+    # Siamo la prima istanza. Se il server IPC non può partire, la GUI
+    # parte COMUNQUE, senza single-instance, e l'utente viene avvisato:
+    # rifiutare l'avvio consegnerebbe a chi causa il fallimento proprio
+    # il blocco dell'antivirus che questo codice deve impedire.
+    ipc_server: QLocalServer | None = None
+    ipc_error: str | None = None
+    if ipc_path is None:
+        ipc_error = (
+            "nessuna directory runtime sicura disponibile "
+            "(XDG_RUNTIME_DIR assente o non valida)"
+        )
+    else:
+        # Rimuove un socket morto lasciato da un'istanza precedente
+        # terminata male: nella runtime directory può essere solo nostro.
+        QLocalServer.removeServer(ipc_path)
+        server = QLocalServer(app)
+        # Su Linux, senza setSocketOptions(), i permessi del socket UNIX
+        # dipendono dallo umask del processo (documentato da Qt): con uno
+        # umask permissivo (es. 022, comune di default) altri UTENTI del
+        # sistema — non solo altri processi tuoi — potrebbero connettersi
+        # al socket. UserAccessOption forza esplicitamente l'accesso al
+        # solo utente proprietario, indipendentemente dallo umask attivo.
+        # Con il socket nella runtime directory (0700) è ridondante, ma
+        # resta valido se il percorso dovesse cambiare.
+        server.setSocketOptions(QLocalServer.UserAccessOption)
+        if server.listen(ipc_path):
+            ipc_server = server
+        else:
+            ipc_error = server.errorString() or "listen() non riuscita"
+            server.deleteLater()
     # ------------------------------------
 
     window = MainWindow(
@@ -82,8 +101,8 @@ def main() -> int:
         quarantine_dir=args.quarantine_dir,
         scan_target=args.scan_target
     )
-    # Passa il server IPC alla finestra
-    window.setup_ipc(ipc_server)
+    if ipc_server is not None:
+        window.setup_ipc(ipc_server)
 
     # QSettings SEMPRE espliciti (org/app), mai il default da
     # QApplication: la lettura non deve dipendere dall'ordine con cui
@@ -101,7 +120,29 @@ def main() -> int:
     else:
         window.show()
 
+    if ipc_server is None:
+        _warn_no_single_instance(window, ipc_error or "motivo sconosciuto")
+
     return app.exec()
+
+
+def _warn_no_single_instance(window: MainWindow, reason: str) -> None:
+    """
+    Avviso quando il single-instance non è attivo. Senza, due istanze
+    possono girare insieme (quarantene e scansioni programmate
+    concorrenti) e "Scansiona con KlamAV-Py" da Dolphin apre una nuova
+    istanza invece di passare il file a questa.
+    """
+    print(f"{APP_NAME}: controllo di istanza singola non attivo: {reason}", file=sys.stderr)
+    text = (
+        "Il controllo di istanza singola non è attivo, quindi un secondo "
+        f"avvio di {APP_NAME} aprirebbe un'altra copia dell'applicazione.\n\n"
+        f"Motivo: {reason}"
+    )
+    if window.tray_icon.isVisible():
+        window.tray_icon.showMessage(APP_NAME, text, window.windowIcon(), 10000)
+    else:
+        QMessageBox.warning(window, APP_NAME, text)
 
 
 if __name__ == "__main__":
