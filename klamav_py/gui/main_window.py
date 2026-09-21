@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..clamd_client import ScanResult
 from ..quarantine import Quarantine
+from ..private_files import ensure_private_dir, write_private_text
 from .scan_worker import ScanWorker
 from .update_worker import UpdateWorker
 from .ping_worker import PingWorker
@@ -375,7 +376,19 @@ KDE_STYLESHEET = """
 class HistoryManager:
     def __init__(self, file_path: Path = DEFAULT_HISTORY_FILE):
         self.file_path = file_path
-        self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        # La directory della cronologia (di default ~/.local/share/klamav-py)
+        # contiene anche i log delle scansioni programmate e la quarantena
+        # di default: renderla 0700 qui, all'avvio, protegge tutto ciò che
+        # ci sta sotto a prescindere dai permessi dei singoli file e della
+        # home. Vedi private_files.py. Un fallimento non deve impedire
+        # l'avvio dell'antivirus: si segnala e si prosegue.
+        try:
+            ensure_private_dir(self.file_path.parent)
+        except OSError as exc:
+            print(
+                f"{APP_NAME}: impossibile rendere privata {self.file_path.parent}: {exc}",
+                file=sys.stderr,
+            )
 
     def add_entry(
         self,
@@ -412,8 +425,8 @@ class HistoryManager:
         if len(entries) > 1000:
             entries = entries[-1000:]
         try:
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump(entries, f, indent=4)
+            # Scrittura atomica e 0600: vedi private_files.write_private_text.
+            write_private_text(self.file_path, json.dumps(entries, indent=4))
         except Exception:
             pass
 
@@ -428,8 +441,7 @@ class HistoryManager:
 
     def clear(self):
         try:
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump([], f)
+            write_private_text(self.file_path, json.dumps([]))
         except Exception:
             pass
 
@@ -2255,10 +2267,11 @@ X-GNOME-Autostart-enabled=true
         log_path = None
         if self._bg_result_lines:
             try:
-                logs_dir = DEFAULT_LOGS_DIR
-                logs_dir.mkdir(parents=True, exist_ok=True)
+                # Directory 0700 e file 0600: i log elencano percorsi,
+                # firme e file infetti (vedi private_files.py).
+                logs_dir = ensure_private_dir(DEFAULT_LOGS_DIR)
                 log_path = logs_dir / f"scheduled-{datetime.now():%Y%m%d-%H%M%S}.log"
-                log_path.write_text("\n".join(self._bg_result_lines) + "\n", encoding="utf-8")
+                write_private_text(log_path, "\n".join(self._bg_result_lines) + "\n")
             except OSError:
                 log_path = None  # meglio niente log che far fallire il flusso
             self._bg_result_lines = []

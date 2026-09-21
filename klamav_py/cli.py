@@ -24,6 +24,7 @@ from pathlib import Path
 
 from . import __version__
 from .clamd_client import DEFAULT_MAX_STREAM_SIZE, ClamdClient, ClamdError
+from .private_files import open_private_for_write
 from .quarantine import Quarantine
 
 
@@ -164,7 +165,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
     errors = 0
     too_large = 0
     error_categories: Counter[str] = Counter()
-    log_fh = args.log_errors.open("w", encoding="utf-8") if args.log_errors else None
+    # Il log degli errori elenca percorsi di file dell'utente: 0600, niente
+    # symlink, niente file preesistenti di altri utenti (es. pre-creato in
+    # /tmp per leggerne il contenuto). Vedi private_files.py.
+    log_fh = None
+    if args.log_errors:
+        try:
+            log_fh = open_private_for_write(args.log_errors.expanduser())
+        except OSError as exc:
+            print(f"Impossibile aprire il log degli errori: {exc}", file=sys.stderr)
+            return 2
 
     try:
         for result in client.scan_stream(

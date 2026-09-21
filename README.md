@@ -103,7 +103,7 @@ python3 -m klamav_py.cli scan /home/utente/Scaricati \
 python3 -m klamav_py.cli scan ~ \
     --exclude ~/.local/share/klamav-py \
     --exclude ~/.cache \
-    --log-errors /tmp/klamav-errors.log
+    --log-errors ~/klamav-errors.log
 
 # GUI (richiede il venv attivo o l'interprete del venv, vedi sopra)
 python3 -m klamav_py.gui.app
@@ -124,7 +124,7 @@ La directory passata a `--quarantine` è sempre esclusa automaticamente dall'att
 - `--quarantine DIR` — sposta i file infetti in DIR (creata con permessi 0700).
 - `--exclude DIR` — directory da escludere dall'attraversamento ricorsivo (ripetibile). Le directory escluse non vengono nemmeno lette (pruning): utile per cache, Trash, mount di rete sincronizzati.
 - `--max-stream-size BYTES` — soglia del pre-check dimensionale (default 25MB, allineato a StreamMaxLength di clamd.conf; 0 disattiva il pre-check).
-- `--log-errors FILE` — dettaglio di ogni errore (path e motivo) su file.
+- `--log-errors FILE` — dettaglio di ogni errore (path e motivo) su file. Il file viene creato con permessi 0600; symlink, FIFO e file già esistenti di un altro utente vengono rifiutati (exit 2). Evita comunque directory condivise come /tmp: il log elenca percorsi dei tuoi file.
 - `--version` — stampa la versione ed esce (opzione globale, non del sottocomando scan).
 - `--no-persistent` / `--session-batch-size N` — controllo della sessione persistente (vedi sezione dedicata).
 
@@ -163,7 +163,7 @@ Applicazione PySide6 a finestra unica con barra laterale e stile ispirato a KDE 
 - **Scansione** — scansione manuale su un percorso a scelta, in un QThread separato (ScanWorker): la finestra resta reattiva anche su directory grandi, e la barra di stato mostra il file in elaborazione in tempo reale (con elisione del testo per non far crescere il layout su percorsi lunghi). I contatori distinguono scansionati / infetti / errori / non verificati (troppo grandi), e solo infetti/errori/non-verificati producono righe in lista.
 - **Sospendi / Riprendi.** La pausa ha granularità di file intero: il file in streaming viene completato, poi il worker si ferma (il pulsante segue i segnali del worker, non il click, quindi lo stato mostrato è sempre quello effettivo). "Interrompi" resta attivo anche in pausa. Dopo una pausa più lunga di ~25s (vicino all'IdleTimeout di clamd, 30s di default) la sessione viene ricreata proattivamente alla ripresa, per non produrre un errore finto sul primo file. Con la finestra minimizzata in tray, il tooltip dell'icona mostra i contatori della scansione in corso e lo stato di pausa.
 - **Quarantena manuale di default.** La casella "Metti in quarantena automaticamente i file infetti" è disattivata di default: i file segnalati restano dove sono e li sposti tu con "Metti in quarantena i selezionati" — comodo per valutare un falso positivo prima di spostare qualcosa. "Copia log" copia negli appunti tutte le righe della lista (infetti, errori, non verificati).
-- **Cronologia** — registro persistente (~/.local/share/klamav-py/history.json, ultime 1000 voci) con data/ora, tipo, percorso, scansionati, infetti, errori e non verificati. Le scansioni programmate indicizzano anche il log dettagliato su disco (tooltip sulla riga): il dettaglio infetti/errori di una scansione in background, che non passa da nessuna lista UI, resta così sempre ispezionabile.
+- **Cronologia** — registro persistente (~/.local/share/klamav-py/history.json, ultime 1000 voci; la directory è 0700 e i file 0600, perché elencano percorsi e file infetti) con data/ora, tipo, percorso, scansionati, infetti, errori e non verificati. Le scansioni programmate indicizzano anche il log dettagliato su disco (tooltip sulla riga): il dettaglio infetti/errori di una scansione in background, che non passa da nessuna lista UI, resta così sempre ispezionabile.
 - **Quarantena** — legge lo stesso indice JSON usato dalla CLI (index.json nella directory di quarantena): i due strumenti sono intercambiabili sugli stessi dati. Ripristino nella posizione originale (con ripristino dei permessi originali, rifiuto esplicito se il percorso è stato nel frattempo rioccupato) o eliminazione definitiva.
 - **Aggiornamenti** — scarica le definizioni virus lanciando `freshclam --stdout` tramite pkexec (autenticazione PolicyKit), fermando il demone clamav-freshclam/freshclam di sistema per evitare conflitti di lock sul file di log e riavviandolo alla fine. Dalla 0.1.7 il riavvio avviene anche se l'aggiornamento viene interrotto (logout, segnale), e riguarda solo i servizi che erano attivi prima: un demone fermato di proposito resta fermo. Output mostrato in tempo reale. Scegliendo "Esci" durante l'aggiornamento, l'app si chiude appena termina invece di interromperlo. Di default parte automaticamente 1.5s dopo l'avvio dell'app (disattivabile in Impostazioni).
 - **Real-Time** — log delle scansioni automatiche sulle cartelle monitorate (configurabili in Impostazioni). Usa QFileSystemWatcher: creazione/modifica di un file → scansione dopo un debounce di 3s (per non scansionare file ancora in scrittura), e i file infetti vengono sempre messi in quarantena automaticamente. I file troppo grandi sono etichettati "Non verificato", non "Sicuro" (vedi scelte di design).
