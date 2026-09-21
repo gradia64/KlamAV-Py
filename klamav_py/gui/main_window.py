@@ -18,9 +18,10 @@ import subprocess
 import sys
 import time
 import json
+import html
 
 from PySide6.QtCore import Qt, QSize, QSettings, Signal, QTimer, QFileSystemWatcher, QThread
-from PySide6.QtGui import QIcon, QColor, QAction, QFont
+from PySide6.QtGui import QIcon, QColor, QAction, QFont, QPalette
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -60,6 +61,7 @@ from ..quarantine import Quarantine
 from .scan_worker import ScanWorker
 from .update_worker import UpdateWorker
 from .ping_worker import PingWorker
+from .update_check_worker import UpdateCheckWorker, UpdateInfo
 
 DEFAULT_SOCKET = "/run/clamav/clamd.ctl"
 DEFAULT_QUARANTINE_DIR = Path.home() / ".local/share/klamav-py/quarantine"
@@ -98,6 +100,15 @@ def _icon(*theme_names: str) -> QIcon:
 
 def _app_icon() -> QIcon:
     return _icon("klamav-py", "emblem-virus", "security-high", "security-medium")
+
+
+def _mid_color(widget: QWidget) -> QColor:
+    """Colore 'mid' della palette del tema, per testo decorativo.
+
+    QColor("palette(mid)") non è valido: la sintassi palette(...) vale
+    solo nei fogli di stile Qt, non nel costruttore di QColor.
+    """
+    return widget.palette().color(QPalette.Mid)
 
 
 # Worker in attesa di distruzione: vedi _retire_qthread. Deve essere un
@@ -406,7 +417,7 @@ class HistoryManager:
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, Exception):
+        except Exception:
             return []
 
     def clear(self):
@@ -569,6 +580,12 @@ class ScanPage(QWidget):
             )
             return
 
+        # Guard anti-doppio avvio: start_external_scan rilancia questa
+        # funzione con un ritardo di 500ms e può sovrapporsi a un avvio
+        # manuale fatto dall'utente nel frattempo.
+        if self.worker is not None:
+            return
+
         self.results_list.clear()
         self.progress.setVisible(True)
         self._set_status_text("Scansione in corso…")
@@ -711,7 +728,7 @@ class ScanPage(QWidget):
             # malfunzionamento.
             item = QListWidgetItem(f"NON VERIFICATO (troppo grande) — {result.path}")
             item.setIcon(QIcon.fromTheme("dialog-information"))
-            item.setForeground(QColor("palette(mid)"))
+            item.setForeground(_mid_color(self))
             self.results_list.addItem(item)
             self.results_list.scrollToBottom()
         elif result.status == "ERROR":
@@ -1325,6 +1342,9 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         # QSettings sempre con org/app ESPLICITI (vedi SchedulerPage).
         self.settings = QSettings(APP_NAME, APP_NAME)
+        # Worker del controllo aggiornamenti: None quando nessun controllo
+        # è in corso. Vedi _check_updates / _release_update_check_worker.
+        self._update_check_worker: UpdateCheckWorker | None = None
 
         # FIX SOVRAPPOSIZIONE WIDGET: il contenuto della pagina (parecchi
         # widget a dimensione fissa: QLineEdit/QPushButton alti 36px,
@@ -1409,6 +1429,9 @@ class SettingsPage(QWidget):
         self.startup_update_check = QCheckBox("Aggiorna il database dei virus all'avvio dell'applicazione")
         general_layout.addWidget(self.startup_update_check)
 
+        self.auto_check_updates = QCheckBox("Controlla aggiornamenti all'avvio")
+        general_layout.addWidget(self.auto_check_updates)
+
         layout.addWidget(general_group)
 
         rt_group = QGroupBox("Protezione Real-Time")
@@ -1478,9 +1501,21 @@ class SettingsPage(QWidget):
 
         about_group = QGroupBox("Informazioni")
         about_layout = QVBoxLayout(about_group)
-        version_label = QLabel(f"Versione: {__version__}")
-        version_label.setStyleSheet("font-size: 12px; color: palette(mid);")
-        about_layout.addWidget(version_label)
+        self.version_label = QLabel(f"Versione corrente: {__version__}")
+        self.version_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+        about_layout.addWidget(self.version_label)
+
+        self.update_status_label = QLabel("")
+        self.update_status_label.setTextFormat(Qt.PlainText)
+        self.update_status_label.setWordWrap(True)
+        self.update_status_label.setStyleSheet("font-size: 12px;")
+        about_layout.addWidget(self.update_status_label)
+
+        self.check_update_btn = QPushButton("Controlla aggiornamenti")
+        self.check_update_btn.setFixedHeight(36)
+        self.check_update_btn.setIcon(QIcon.fromTheme("system-software-update"))
+        self.check_update_btn.clicked.connect(self._check_updates)
+        about_layout.addWidget(self.check_update_btn)
         layout.addWidget(about_group)
 
         buttons_row = QHBoxLayout()
@@ -1529,6 +1564,7 @@ class SettingsPage(QWidget):
         self.quar_edit.setText(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR)))
         self.auto_quar_check.setChecked(self.settings.value("auto_quarantine", False, type=bool))
         self.startup_update_check.setChecked(self.settings.value("startup_update", True, type=bool))
+        self.auto_check_updates.setChecked(self.settings.value("auto_check_updates", False, type=bool))
 
         rt_dirs = self.settings.value("realtime_paths", [])
         if isinstance(rt_dirs, str): rt_dirs = [rt_dirs]
@@ -1541,6 +1577,7 @@ class SettingsPage(QWidget):
         self.quar_edit.setText(str(DEFAULT_QUARANTINE_DIR))
         self.auto_quar_check.setChecked(False)
         self.startup_update_check.setChecked(True)
+        self.auto_check_updates.setChecked(False)
         self.rt_dirs_list.clear()
 
     def _save_settings(self) -> None:
@@ -1550,6 +1587,7 @@ class SettingsPage(QWidget):
         self.settings.setValue("quarantine_dir", self.quar_edit.text())
         self.settings.setValue("auto_quarantine", self.auto_quar_check.isChecked())
         self.settings.setValue("startup_update", self.startup_update_check.isChecked())
+        self.settings.setValue("auto_check_updates", self.auto_check_updates.isChecked())
 
         rt_dirs = [self.rt_dirs_list.item(i).text() for i in range(self.rt_dirs_list.count())]
         self.settings.setValue("realtime_paths", rt_dirs)
@@ -1561,6 +1599,97 @@ class SettingsPage(QWidget):
             main_window.tray_icon.showMessage(
                 APP_NAME, "Impostazioni salvate con successo.", _icon("emblem-checked"), 3000
             )
+
+    def _check_updates(self) -> None:
+        # Due punti di ingresso (pulsante + QTimer all'avvio): senza questa
+        # guardia un secondo worker sovrascriverebbe il riferimento al primo
+        # ancora in esecuzione.
+        if self._update_check_worker is not None and self._update_check_worker.isRunning():
+            return
+
+        self.check_update_btn.setEnabled(False)
+        self.check_update_btn.setText("Controllo in corso…")
+        self.update_status_label.setText("")
+        self.update_status_label.setToolTip("")
+        self.update_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+
+        # Niente parent Qt: il rilascio passa da _retire_qthread come per
+        # tutti gli altri worker, così alla distruzione della pagina Qt non
+        # distrugge un QThread ancora in esecuzione (timeout di rete 15 s).
+        worker = UpdateCheckWorker(__version__)
+        self._update_check_worker = worker
+        worker.check_finished.connect(self._on_update_check_finished)
+        worker.error.connect(self._on_update_check_error)
+        worker.start()
+
+    def _release_update_check_worker(self) -> None:
+        worker, self._update_check_worker = self._update_check_worker, None
+        if worker is not None:
+            _retire_qthread(worker)
+
+    def _on_update_check_finished(self, info: UpdateInfo) -> None:
+        self._release_update_check_worker()
+        self.check_update_btn.setEnabled(True)
+        self.check_update_btn.setText("Controlla aggiornamenti")
+
+        if info.has_update:
+            self.version_label.setText(
+                f"Versione corrente: {info.current_version}  →  Disponibile: {info.latest_version}"
+            )
+            self.version_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #d32f2f;")
+
+            # I dati arrivano dalla rete: escape sempre, e link cliccabile
+            # solo se punta davvero alle release del repository.
+            version_html = html.escape(info.latest_version)
+            date_suffix = f" rilasciata il {info.published_at}" if info.published_at else ""
+            date_html = html.escape(date_suffix)
+            if info.release_url_trusted:
+                self.update_status_label.setTextFormat(Qt.RichText)
+                self.update_status_label.setOpenExternalLinks(True)
+                self.update_status_label.setText(
+                    f"Nuova versione <a href='{html.escape(info.release_url, quote=True)}'>"
+                    f"{version_html}</a>{date_html}."
+                )
+            else:
+                self.update_status_label.setTextFormat(Qt.PlainText)
+                self.update_status_label.setOpenExternalLinks(False)
+                self.update_status_label.setText(
+                    f"Nuova versione {info.latest_version}{date_suffix}."
+                )
+            self.update_status_label.setStyleSheet("font-size: 12px; color: #d32f2f;")
+
+            notes = info.release_notes
+            notes_preview = notes[:300] + ("…" if len(notes) > 300 else "")
+            # I tooltip Qt diventano rich text se il contenuto "sembra" HTML:
+            # escape + <pre> per mostrarlo sempre come testo.
+            self.update_status_label.setToolTip(
+                f"<b>Note di rilascio:</b><pre>{html.escape(notes_preview)}</pre>"
+            )
+
+            main_window = self.window()
+            if hasattr(main_window, "tray_icon") and main_window.tray_icon.isVisible():
+                main_window.tray_icon.showMessage(
+                    APP_NAME,
+                    f"È disponibile la versione {info.latest_version}.",
+                    _icon("system-software-update"),
+                    5000,
+                )
+        else:
+            self.version_label.setText(f"Versione corrente: {info.current_version} (aggiornata)")
+            self.version_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+            self.update_status_label.setTextFormat(Qt.PlainText)
+            self.update_status_label.setText("Hai già l'ultima versione.")
+            self.update_status_label.setToolTip("")
+            self.update_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+
+    def _on_update_check_error(self, message: str) -> None:
+        self._release_update_check_worker()
+        self.check_update_btn.setEnabled(True)
+        self.check_update_btn.setText("Controlla aggiornamenti")
+        self.update_status_label.setTextFormat(Qt.PlainText)
+        self.update_status_label.setText(f"Errore: {message}")
+        self.update_status_label.setToolTip("")
+        self.update_status_label.setStyleSheet("font-size: 12px; color: #d32f2f;")
 
     def _install_dolphin(self):
         try:
@@ -1786,6 +1915,9 @@ class MainWindow(QMainWindow):
         if self.settings.value("startup_update", True, type=bool):
             QTimer.singleShot(1500, self.update_page._start_update)
 
+        if self.settings.value("auto_check_updates", False, type=bool):
+            QTimer.singleShot(3000, self.settings_page._check_updates)
+
         # Se avviata con un target (es. da Dolphin in prima istanza), avvia la scansione
         if scan_target:
             self.scan_page.start_external_scan(scan_target)
@@ -1913,6 +2045,11 @@ X-GNOME-Autostart-enabled=true
             ms = interval * 24 * 60 * 60 * 1000
         else:
             ms = interval * 60 * 60 * 1000
+
+        # QTimer accetta al massimo INT_MAX ms (~24,8 giorni): oltre,
+        # l'intervallo verrebbe troncato e la pianificazione risulterebbe
+        # più frequente di quella richiesta.
+        ms = min(ms, 2**31 - 1)
 
         self.schedule_timer.setInterval(ms)
         self.schedule_timer.start()
