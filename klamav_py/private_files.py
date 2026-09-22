@@ -14,7 +14,7 @@ directory condivisa un altro utente può creare il file per primo con
 permessi 0666 e leggere tutto ciò che la vittima ci scrive (bloccato dal
 kernel solo se fs.protected_regular è attivo).
 
-Due primitive, usate da GUI e CLI (per questo il modulo sta alla radice
+Tre primitive, usate da GUI e CLI (per questo il modulo sta alla radice
 del pacchetto e non importa nulla di Qt):
 
 - ensure_private_dir(): directory 0700, riportata a 0700 se esiste con
@@ -23,6 +23,10 @@ del pacchetto e non importa nulla di Qt):
   permessi dei singoli file e della home.
 - write_private_text() / open_private_for_write(): file 0600 creati
   senza seguire symlink e verificando di esserne i proprietari.
+- ensure_private_file(): porta a 0600 un file il cui contenuto è scritto
+  da Qt (il .conf di QSettings), toccando solo i permessi; con
+  create=False non lo crea se manca (il conf legacy non deve nascere
+  su installazioni nuove).
 """
 
 from __future__ import annotations

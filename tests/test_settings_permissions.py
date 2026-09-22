@@ -94,3 +94,36 @@ def test_conf_legacy_ristretto_e_migrato(tmp_path):
 def test_legacy_assente_non_viene_creato(tmp_path):
     _esegui(tmp_path)
     assert not (tmp_path / ".config" / "KlamAV").exists()
+
+
+@pytest.mark.timeout(180)
+def test_legacy_ristretto_anche_con_migrazione_gia_fatta(tmp_path):
+    """
+    Il conf nuovo già popolato (installazione che ha già girato una
+    versione >= 0.1.4) non deve saltare la restrizione del legacy:
+    prima della correzione l'hardening del legacy stava DOPO l'early
+    return della migrazione e il file — ancora 0644 — non veniva mai
+    toccato.
+    """
+    nuovo = tmp_path / ".config" / "KlamAV-Py"
+    nuovo.mkdir(parents=True)
+    conf = nuovo / "KlamAV-Py.conf"
+    conf.write_text("[General]\nsocket=/run/clamav/clamd.ctl\n")
+    os.chmod(conf, 0o644)
+
+    legacy_dir = tmp_path / ".config" / "KlamAV"
+    legacy_dir.mkdir(parents=True)
+    legacy = legacy_dir / "KlamAV.conf"
+    legacy.write_text("[General]\nrealtime_paths=/home/utente/Privato\n")
+    os.chmod(legacy, 0o644)
+
+    _, chiavi = _esegui(tmp_path)
+
+    assert _mode(legacy) == 0o600
+    assert _mode(conf) == 0o600
+    assert "socket" in chiavi
+    # Conf nuovo già configurato: la migrazione non riparte, le chiavi
+    # del legacy non devono finire nel conf nuovo...
+    assert "realtime_paths" not in chiavi
+    # ...e il legacy resta intatto nel contenuto.
+    assert "Privato" in legacy.read_text()

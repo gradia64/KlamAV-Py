@@ -271,13 +271,18 @@ def _migrate_legacy_settings() -> None:
     # Vedi private_files.ensure_private_file.
     _harden_settings_file(new, create=True)
 
-    if new.allKeys():
-        return  # già migrato, o già configurato: non toccare nulla
     old = QSettings(_LEGACY_SETTINGS_ORG, _LEGACY_SETTINGS_APP)
     # Il vecchio file contiene le stesse chiavi e sulle installazioni
     # aggiornate dalla 0.1.3 è ancora 0644. create=False: se non esiste
-    # non va creato (genererebbe una ~/.config/KlamAV/ vuota).
+    # non va creato (genererebbe una ~/.config/KlamAV/ vuota). Va
+    # ristretto PRIMA dell'early return qui sotto: sulle installazioni
+    # che hanno già migrato (conf nuovo popolato da una versione >= 0.1.4)
+    # la migrazione non riparte, e il legacy — se ancora su disco —
+    # resterebbe 0644 per sempre.
     _harden_settings_file(old, create=False)
+
+    if new.allKeys():
+        return  # già migrato, o già configurato: non toccare nulla
     if not old.allKeys():
         return  # nessuna installazione precedente: niente da migrare
     for key in old.allKeys():
