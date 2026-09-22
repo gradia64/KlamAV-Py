@@ -42,6 +42,17 @@ DEFAULT_MAX_STREAM_SIZE = 25 * 1024 * 1024
 # nulla.
 DEFAULT_SCAN_TIMEOUT = 120.0
 
+# Tetto alla risposta accumulata in memoria da una singola lettura.
+# Le risposte di clamd sono corte: un verdetto INSTREAM è una riga
+# (percorso + firma, al massimo qualche KB), PING/VERSION poche decine
+# di byte; il caso più voluminoso è CONTSCAN su una directory, che
+# restituisce una riga per file — da qui 1 MiB, largo per qualunque uso
+# legittimo. Senza tetto, un interlocutore che invia senza fermarsi fa
+# crescere il buffer fino a esaurire la memoria: non è il clamd di
+# sistema (è di root, e chi lo controlla ha già vinto), ma lo è un clamd
+# remoto via TCP o un socket in un percorso configurabile dall'utente.
+MAX_REPLY_BYTES = 1024 * 1024
+
 
 class ClamdError(RuntimeError):
     """Errore di comunicazione con clamd o risposta inattesa."""
@@ -132,10 +143,18 @@ class ClamdClient:
     @staticmethod
     def _read_all(sock: socket.socket) -> str:
         chunks = []
+        totale = 0
         while True:
             data = sock.recv(CHUNK_SIZE)
             if not data:
                 break
+            totale += len(data)
+            if totale > MAX_REPLY_BYTES:
+                # Si smette di accumulare invece di crescere senza limite:
+                # vedi MAX_REPLY_BYTES.
+                raise ClamdError(
+                    f"risposta di clamd oltre {MAX_REPLY_BYTES} byte: lettura interrotta"
+                )
             chunks.append(data)
         return b"".join(chunks).decode("utf-8", errors="replace").strip("\0\n ")
 
@@ -560,6 +579,11 @@ class ClamdClient:
                 raw = self._read_all(sock)
         except (BrokenPipeError, ConnectionResetError) as exc:
             return self._stream_failure_result(target, exc, max_stream_size)
+        except ClamdError as exc:
+            # Risposta oltre il tetto: è un problema di QUESTO file, non
+            # della scansione. Diventa un errore sulla riga corrispondente
+            # invece di propagarsi e interrompere tutto il resto.
+            return ScanResult(path=str(target), status="ERROR", signature=str(exc))
 
         if not raw:
             if max_stream_size is not None:
@@ -710,6 +734,15 @@ class _ClamdSession:
                     self.dead = True
                     raise ClamdError("clamd ha chiuso la connessione durante la sessione IDSESSION")
                 self._buffer += data
+                if len(self._buffer) > MAX_REPLY_BYTES:
+                    # Nessun terminatore entro il tetto: la sessione non è
+                    # più sincronizzata, va buttata (vedi MAX_REPLY_BYTES).
+                    self.dead = True
+                    self._buffer = b""
+                    raise ClamdError(
+                        f"risposta di clamd oltre {MAX_REPLY_BYTES} byte "
+                        "senza terminatore: sessione interrotta"
+                    )
         finally:
             self._sock.settimeout(previous)
         reply, _, self._buffer = self._buffer.partition(b"\0")
