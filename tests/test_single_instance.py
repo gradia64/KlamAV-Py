@@ -29,9 +29,12 @@ def _server(path: str):
     srv.bind(path)
     srv.listen(1)
     received: list[bytes] = []
+    # settimeout PRIMA di avviare il thread: se il test chiude srv mentre
+    # il thread non è ancora partito, la chiamata fallirebbe con EBADF e
+    # pytest segnalerebbe un'eccezione non gestita nel thread.
+    srv.settimeout(2)
 
     def serve() -> None:
-        srv.settimeout(2)
         try:
             conn, _ = srv.accept()
         except OSError:

@@ -186,3 +186,41 @@ def test_cronologia_e_log_programmati_usano_file_privati():
 def test_cli_log_errori_usa_file_privato():
     tree = ast.parse((RADICE / "klamav_py/cli.py").read_text(encoding="utf-8"))
     assert not _chiamate_scrittura_insicure(tree)
+
+
+# --- file scritti da codice non nostro (QSettings) ---------------------
+
+def test_ensure_private_file_restringe_senza_troncare(tmp_path):
+    from klamav_py.private_files import ensure_private_file
+    f = tmp_path / "KlamAV-Py.conf"
+    f.write_text("[General]\nsocket=/run/clamav/clamd.ctl\n")
+    os.chmod(f, 0o644)
+    assert ensure_private_file(f) is True
+    assert _mode(f) == 0o600
+    assert "clamd.ctl" in f.read_text(), "il contenuto non va toccato"
+
+
+def test_ensure_private_file_crea_vuoto_a_0600(tmp_path):
+    from klamav_py.private_files import ensure_private_file
+    f = tmp_path / "KlamAV-Py.conf"
+    assert ensure_private_file(f) is True
+    assert _mode(f) == 0o600 and f.read_text() == ""
+
+
+def test_ensure_private_file_senza_create_non_crea_nulla(tmp_path):
+    from klamav_py.private_files import ensure_private_file
+    f = tmp_path / "KlamAV.conf"
+    assert ensure_private_file(f, create=False) is False
+    assert not f.exists()
+
+
+def test_ensure_private_file_rifiuta_symlink(tmp_path):
+    from klamav_py.private_files import ensure_private_file, PrivateFileError
+    bersaglio = tmp_path / "bersaglio"
+    bersaglio.write_text("intatto")
+    os.chmod(bersaglio, 0o644)
+    link = tmp_path / "KlamAV-Py.conf"
+    link.symlink_to(bersaglio)
+    with pytest.raises(PrivateFileError):
+        ensure_private_file(link)
+    assert _mode(bersaglio) == 0o644

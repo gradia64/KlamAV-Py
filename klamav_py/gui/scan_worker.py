@@ -177,7 +177,18 @@ class ScanWorker(QThread):
             # file successivo. Con un for il check cadrebbe dopo aver
             # ricevuto il risultato, troppo tardi: il file successivo
             # sarebbe comunque stato scansionato durante la pausa.
-            iterator = client.scan_stream(self.target, on_file_start=on_file_start)
+            # exclude_dirs: la quarantena va esclusa PRIMA di leggere i
+            # file, come già fa la CLI. Il filtro inside_quarantine() qui
+            # sotto resta come rete di sicurezza sui risultati, ma da solo
+            # significava rileggere e re-inviare a clamd ogni file già
+            # quarantenato a ogni scansione che copre la quarantena (es.
+            # tutta la home), per poi scartarne il risultato.
+            exclude_dirs = [quarantine_root] if quarantine_root else []
+            iterator = client.scan_stream(
+                self.target,
+                on_file_start=on_file_start,
+                exclude_dirs=exclude_dirs,
+            )
             while True:
                 paused_for = self._wait_while_paused()
                 if paused_for > CLAMD_IDLE_SAFETY_SECONDS:

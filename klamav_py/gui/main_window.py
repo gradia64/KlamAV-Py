@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..clamd_client import ScanResult
 from ..quarantine import Quarantine
-from ..private_files import ensure_private_dir, write_private_text
+from ..private_files import ensure_private_dir, ensure_private_file, write_private_text
 from .scan_worker import ScanWorker
 from .update_worker import UpdateWorker
 from .ping_worker import PingWorker
@@ -230,6 +230,24 @@ def _default_tray_tooltip() -> str:
     return f"{APP_NAME} {__version__} — Protezione attiva"
 
 
+def _harden_settings_file(settings: QSettings, create: bool) -> None:
+    """0600 sul file di un QSettings; un fallimento non blocca l'avvio."""
+    path = Path(settings.fileName())
+    try:
+        if create:
+            # Al primo avvio ~/.config/KlamAV-Py/ non esiste ancora:
+            # senza questa riga O_CREAT fallisce con ENOENT e il file
+            # verrebbe poi creato da Qt con i permessi di default.
+            ensure_private_dir(path.parent)
+        ensure_private_file(path, create=create)
+    except OSError as exc:
+        print(
+            f"{APP_NAME}: impossibile restringere i permessi di "
+            f"{settings.fileName()}: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _migrate_legacy_settings() -> None:
     """
     Migrazione one-shot del file delle impostazioni dopo il rebranding.
@@ -245,9 +263,21 @@ def _migrate_legacy_settings() -> None:
     delle pagine (che costruiscono i loro QSettings espliciti).
     """
     new = QSettings(APP_NAME, APP_NAME)
+    # Permessi del file di configurazione: Qt lo crea 0644, ma contiene
+    # le cartelle monitorate dal Real-Time, il target delle scansioni
+    # pianificate e il percorso di quarantena. Stringerlo qui, prima di
+    # qualunque scrittura: QSaveFile preserva i permessi di un file
+    # esistente, quindi 0600 resta tale a ogni sync successivo.
+    # Vedi private_files.ensure_private_file.
+    _harden_settings_file(new, create=True)
+
     if new.allKeys():
         return  # già migrato, o già configurato: non toccare nulla
     old = QSettings(_LEGACY_SETTINGS_ORG, _LEGACY_SETTINGS_APP)
+    # Il vecchio file contiene le stesse chiavi e sulle installazioni
+    # aggiornate dalla 0.1.3 è ancora 0644. create=False: se non esiste
+    # non va creato (genererebbe una ~/.config/KlamAV/ vuota).
+    _harden_settings_file(old, create=False)
     if not old.allKeys():
         return  # nessuna installazione precedente: niente da migrare
     for key in old.allKeys():

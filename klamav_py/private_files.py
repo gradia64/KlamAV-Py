@@ -103,6 +103,36 @@ def _open_owned(path: Path, flags: int) -> int:
     return fd
 
 
+def ensure_private_file(path: Path, create: bool = True) -> bool:
+    """
+    Porta a 0600 un file scritto da CODICE NON NOSTRO, senza toccarne il
+    contenuto. Ritorna True se il file esiste (o è stato creato).
+
+    Serve per ~/.config/KlamAV-Py/KlamAV-Py.conf, scritto da QSettings e
+    quindi fuori dalla portata di write_private_text(): Qt lo crea con
+    0666 & ~umask (0644 con umask 022) e contiene le cartelle monitorate
+    dal Real-Time, il target delle scansioni pianificate e il percorso di
+    quarantena — gli stessi dati che altrove teniamo a 0600. Verificato
+    con PySide6 6.11.2: QSettings usa QSaveFile, che PRESERVA i permessi
+    di un file esistente, quindi basta stringerli una volta all'avvio e
+    restano tali a ogni sync() successivo.
+
+    create=False per il file legacy (~/.config/KlamAV/KlamAV.conf): va
+    ristretto se c'è, ma crearlo vuoto genererebbe una directory legacy
+    su ogni installazione nuova che non ne ha mai avuta una.
+    """
+    flags = os.O_WRONLY | (os.O_CREAT if create else 0)
+    try:
+        # Niente O_TRUNC: il file ci interessa solo per i permessi.
+        fd = _open_owned(Path(path), flags)
+    except PrivateFileError as exc:
+        if not create and isinstance(exc.__cause__, FileNotFoundError):
+            return False
+        raise
+    os.close(fd)
+    return True
+
+
 def write_private_text(path: Path, text: str, encoding: str = "utf-8") -> None:
     """
     Scrittura ATOMICA di un file privato: file temporaneo 0600 nella
