@@ -6,6 +6,43 @@ sono in `docs/CHANGELOG-archive.md`.
 
 ---
 
+## 0.1.8 — 2026-09-22
+
+### Sicurezza
+- Cronologia delle scansioni e log delle scansioni programmate erano
+  creati con i permessi di default dello umask (directory 0755, file
+  0644): su un sistema con home leggibile da altri, un altro utente
+  locale poteva leggere percorsi dei file scansionati, nomi delle firme
+  e file infetti. Ora la directory dei dati è 0700 e i file 0600, anche
+  per i file creati dalle versioni precedenti.
+- Il log di `--log-errors` della CLI era aperto senza protezioni. In una
+  directory condivisa come /tmp un altro utente poteva creare il file
+  per primo e leggere tutto ciò che vi veniva scritto. Ora il file è
+  0600; symlink, FIFO e file già esistenti di un altro utente vengono
+  rifiutati con un errore esplicito.
+- Il file di configurazione (`~/.config/KlamAV-Py/KlamAV-Py.conf`), che
+  elenca le cartelle monitorate dal Real-Time e i percorsi di scansione
+  e quarantena, nasceva 0644 perché scritto da Qt. Viene portato a 0600
+  all'avvio, insieme al file di configurazione legacy se ancora presente.
+- Le risposte di clamd venivano accumulate in memoria senza limite: un
+  clamd remoto via TCP, o un socket in un percorso configurabile,
+  poteva far crescere il buffer fino a esaurire la RAM. Ora la lettura
+  si ferma a 1 MiB.
+
+### Modificato
+- Il controllo aggiornamenti automatico all'avvio parte al massimo una
+  volta ogni sei ore; il pulsante in Impostazioni resta immediato.
+- Le scansioni dalla GUI escludono la directory di quarantena prima di
+  leggere i file, come già faceva la CLI, invece di scartarne i
+  risultati dopo averli inviati a clamd.
+
+### Aggiunto
+- Controlli automatici prima della pubblicazione su AUR: `.SRCINFO`
+  allineato al `PKGBUILD` e checksum reale una volta creato il tag.
+  Entrambi gli errori erano capitati con la 0.1.7.
+- `conftest.py` nella radice: i test importano sempre il sorgente e non
+  il pacchetto installato nel sistema. Totale: 125 test.
+
 ## 0.1.7 — 2026-09-21
 
 ### Sicurezza

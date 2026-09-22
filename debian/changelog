@@ -1,3 +1,26 @@
+klamav-py (0.1.8-1) unstable; urgency=medium
+
+  * Sicurezza: cronologia, log delle scansioni programmate e log degli
+    errori della CLI erano creati con i permessi di default dello umask
+    (0755/0644) e su un sistema con home leggibile da altri esponevano
+    percorsi dei file scansionati e firme rilevate. Ora directory 0700 e
+    file 0600, compresi quelli creati dalle versioni precedenti.
+  * Sicurezza: il log di --log-errors poteva essere pre-creato da un
+    altro utente in una directory condivisa (es. /tmp) per leggerne il
+    contenuto; symlink, FIFO e file altrui sono ora rifiutati.
+  * Sicurezza: il file di configurazione, scritto da Qt con permessi
+    0644, viene portato a 0600 all'avvio insieme a quello legacy.
+  * Sicurezza: tetto di 1 MiB alle risposte lette da clamd, prima
+    accumulate in memoria senza limite.
+  * Il controllo aggiornamenti automatico all'avvio parte al massimo una
+    volta ogni sei ore; il pulsante resta immediato.
+  * Le scansioni dalla GUI escludono la quarantena prima della lettura,
+    come gia' faceva la CLI.
+  * Test da 110 a 125, piu' i controlli su .SRCINFO e sul checksum
+    prima della pubblicazione su AUR.
+
+ -- gradia <gradia@disroot.org>  Tue, 22 Sep 2026 22:10:00 +0200
+
 klamav-py (0.1.7-1) unstable; urgency=medium
 
   * Sicurezza: chiuso un aggiramento della quarantena via hardlink +

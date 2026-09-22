@@ -216,9 +216,11 @@ Dal pannello Impostazioni si può installare la voce "Scansiona con KlamAV-Py" n
 
 Se abilitato, scrive un file .desktop in ~/.config/autostart/ che lancia la GUI con l'interprete Python correntemente in uso; se disabilitato, rimuove il file.
 
-## Controllo aggiornamenti dell'applicazione (0.1.7)
+## Controllo aggiornamenti dell'applicazione
 
 Il pulsante "Controlla aggiornamenti" in Impostazioni interroga l'API delle release GitHub del progetto e confronta l'ultima versione pubblicata con quella in uso. L'opzione "Controlla aggiornamenti all'avvio" è disattivata di default: senza di essa l'applicazione non contatta GitHub se non su richiesta esplicita. Se c'è una versione nuova compare un link alla pagina della release (e una notifica in tray, per il controllo all'avvio); l'installazione resta manuale, tramite .deb o AUR.
+
+Il controllo all'avvio parte al massimo una volta ogni sei ore: l'API GitHub non autenticata concede 60 richieste l'ora per indirizzo IP, e riavviare spesso l'applicazione non deve consumarle. Il pulsante in Impostazioni non è soggetto al limite.
 
 La risposta di GitHub è trattata come dato non fidato: viene letta fino a un massimo di 256 KB, versione e note sono escapate prima di essere mostrate, e il link è reso cliccabile solo se punta alle release del repository ufficiale.
 
@@ -248,6 +250,14 @@ Su una scansione home-wide di una macchina di sviluppo reale (330k+ file) gli er
 
 - **Errori a raffica di un solo tipo (migliaia)** — quasi certamente clamd morto o riavviato a metà scansione:
   `journalctl -u clamav-daemon.service` nell'intervallo della scansione, e `dmesg | grep -i oom` per il caso OOM. Il riepilogo per tipo della CLI (o il log persistente della programmata) rende questo caso immediatamente distinguibile dal rumore fisiologico.
+
+## Fix di sicurezza nella 0.1.8
+
+- **Dati dell'applicazione leggibili da altri utenti locali.** Cronologia, log delle scansioni programmate e log degli errori della CLI erano creati con i permessi di default dello umask (directory 0755, file 0644): elencano percorsi dei file scansionati, nomi delle firme e file infetti. Su un sistema con home 0755 — default storico, ancora frequente su installazioni aggiornate — erano leggibili da un altro utente locale. Ora la directory dei dati è 0700 (ristretta all'avvio, quindi anche i file delle versioni precedenti diventano inaccessibili) e i file 0600. Il log di `--log-errors` era il caso peggiore, perché il README ne suggeriva l'uso in /tmp, dove un altro utente poteva pre-crearlo per leggerne il contenuto.
+
+- **File di configurazione a 0644.** `~/.config/KlamAV-Py/KlamAV-Py.conf` elenca le cartelle monitorate dal Real-Time e i percorsi di scansione e quarantena, ma è scritto da Qt e sfuggiva al trattamento degli altri dati. Viene portato a 0600 all'avvio, insieme al file di configurazione legacy della 0.1.3 se ancora presente.
+
+- **Risposte di clamd senza tetto.** Le risposte venivano accumulate in memoria finché il socket ne forniva: un clamd remoto via TCP, o un socket in un percorso configurabile dall'utente, poteva esaurire la RAM. La lettura ora si ferma a 1 MiB. Non riguarda il clamd di sistema, che è di root.
 
 ## Fix di sicurezza nella 0.1.7
 
