@@ -123,6 +123,35 @@ _in_ritiro: set[QThread] = set()
 # sei worker bloccati terrebbero l'app appesa sei volte tanto.
 _SHUTDOWN_DEADLINE_SECONDS = 3.0
 
+# Intervallo minimo fra due controlli aggiornamenti AUTOMATICI (quelli
+# all'avvio). Il pulsante in Impostazioni non è soggetto al limite: se
+# l'utente lo preme vuole una risposta subito. L'API GitHub non
+# autenticata concede 60 richieste l'ora per indirizzo IP: sei ore
+# tengono il traffico a una richiesta per sessione di lavoro anche
+# riavviando spesso l'applicazione, senza ritardare in modo sensibile la
+# notifica di una versione nuova (il progetto pubblica poche release
+# l'anno).
+_UPDATE_CHECK_MIN_INTERVAL_SECONDS = 6 * 3600
+_LAST_UPDATE_CHECK_KEY = "last_update_check"
+
+
+def _controllo_aggiornamenti_dovuto(ultimo: float, adesso: float) -> bool:
+    """
+    True se il controllo automatico va eseguito.
+
+    ultimo <= 0: nessun controllo registrato (prima esecuzione, o chiave
+    assente perché la versione precedente non la scriveva).
+    Un `ultimo` NEL FUTURO non deve bloccare i controlli per sempre:
+    succede se l'orologio di sistema viene spostato indietro, o con un
+    file di impostazioni copiato da un'altra macchina.
+    """
+    if ultimo <= 0:
+        return True
+    trascorso = adesso - ultimo
+    if trascorso < 0:
+        return True
+    return trascorso >= _UPDATE_CHECK_MIN_INTERVAL_SECONDS
+
 
 def _retire_qthread(worker: QThread) -> None:
     """
@@ -1653,6 +1682,17 @@ class SettingsPage(QWidget):
                 APP_NAME, "Impostazioni salvate con successo.", _icon("emblem-checked"), 3000
             )
 
+    def _check_updates_automatico(self) -> None:
+        """
+        Controllo all'avvio: salta se ne è stato fatto uno da poco (vedi
+        _UPDATE_CHECK_MIN_INTERVAL_SECONDS). Punto di ingresso separato
+        dal pulsante proprio perché il limite non deve valere per quello.
+        """
+        ultimo = self.settings.value(_LAST_UPDATE_CHECK_KEY, 0.0, type=float)
+        if not _controllo_aggiornamenti_dovuto(ultimo, time.time()):
+            return
+        self._check_updates()
+
     def _check_updates(self) -> None:
         # Due punti di ingresso (pulsante + QTimer all'avvio): senza questa
         # guardia un secondo worker sovrascriverebbe il riferimento al primo
@@ -1682,6 +1722,9 @@ class SettingsPage(QWidget):
 
     def _on_update_check_finished(self, info: UpdateInfo) -> None:
         self._release_update_check_worker()
+        # Registrato solo sul buon esito: un controllo fallito (rete
+        # assente) non deve consumare la finestra delle sei ore.
+        self.settings.setValue(_LAST_UPDATE_CHECK_KEY, time.time())
         self.check_update_btn.setEnabled(True)
         self.check_update_btn.setText("Controlla aggiornamenti")
 
@@ -1974,7 +2017,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, self.update_page._start_update)
 
         if self.settings.value("auto_check_updates", False, type=bool):
-            QTimer.singleShot(3000, self.settings_page._check_updates)
+            QTimer.singleShot(3000, self.settings_page._check_updates_automatico)
 
         # Se avviata con un target (es. da Dolphin in prima istanza), avvia la scansione
         if scan_target:
