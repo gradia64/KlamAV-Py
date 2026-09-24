@@ -1,3 +1,17 @@
+klamav-py (0.1.9-1) unstable; urgency=medium
+
+  * Aggiornamento firme delegato a clamav-freshclam.service (niente più
+    freshclam come root).
+  * Quarantena: file di servizio privati, recupero da indice corrotto,
+    EXDEV, regola solo segnalazione.
+  * Unit utente con sandbox e notifica OnFailure (nuova unit klamav-
+    scan-notify).
+  * Salute di clamd, freschezza del DB, scansione programmata su
+    scadenza, %F per Dolphin.
+  * Recommends: libnotify-bin.
+
+ -- gradia <gradia@disroot.org>  Thu, 24 Sep 2026 14:35:04 +0200
+
 klamav-py (0.1.8-1) unstable; urgency=medium
 
   * Sicurezza: cronologia, log delle scansioni programmate e log degli

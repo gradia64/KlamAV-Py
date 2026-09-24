@@ -5,6 +5,45 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## 0.1.9 — 2026-09-24
+
+### Sicurezza
+- Aggiornamento firme delegato a `clamav-freshclam.service`: pkexec esegue solo
+  `systemctl restart` con argv fisso e binari root-owned. Rimosso
+  `freshclam-update.sh`: freshclam non gira più come root.
+- Quarantena: directory, indice e lock creati con le primitive private
+  (il lock era 0664 con l'umask 0002 di Debian).
+- Unit utente della scansione con sandbox (PrivateNetwork, seccomp,
+  ProtectSystem=strict). Rimossa la vecchia unit di sistema inutilizzata.
+
+### Corretto
+- Scansione programmata della GUI: non partiva mai se la GUI restava aperta
+  meno dell'intervallo e slittava dopo ogni sospensione. Ora la scadenza usa
+  l'orologio reale, con recupero delle esecuzioni mancate.
+- Quarantena: un salvataggio concorrente non cancella più la versione appena
+  salvata; file su altri filesystem gestiti per copia; un indice corrotto
+  viene messo da parte invece di bloccare la pagina.
+- Real-Time: notifica e log dicevano "messo in quarantena" anche quando non
+  lo era; i file con errore risultavano "Analizzato".
+- Scansione notturna: riepilogo visibile nel journal della unit (stdout non
+  bufferizzato) e niente più page cache piena (fadvise).
+
+### Aggiunto
+- Versione e data del database firme visibili; aggiornamento all'avvio solo
+  con firme più vecchie di 36 ore.
+- Controllo di clamd ogni minuto: avviso persistente, Real-Time sospeso e
+  ripreso.
+- Firme euristiche e archivi di posta solo segnalati (CLI: `--report-only`,
+  `--quarantine-all`).
+- Selezione multipla da Dolphin (`%F`): una sola scansione.
+- Notifica desktop se la scansione programmata trova infezioni.
+
+### Modificato
+- Tetti sulla coda del Real-Time, sulla lista dei risultati e sul log della
+  scansione programmata.
+- CI su Python 3.10–3.14.
+
+Aggiornamento: reinstallare l'integrazione Dolphin da Impostazioni.
 
 ## 0.1.8 — 2026-09-22
 
