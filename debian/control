@@ -20,7 +20,7 @@ Depends: ${python3:Depends},
          python3-pyside6.qtgui,
          python3-pyside6.qtwidgets,
          python3-pyside6.qtnetwork
-Recommends: clamav-daemon, policykit-1
+Recommends: clamav-daemon, policykit-1, libnotify-bin
 Description: frontend Python per ClamAV via clamd (CLI + GUI)
  klamav-py e' un client minimale per il demone clamd di ClamAV,
  pensato come sostituto moderno e sicuro di klamav 0.22: niente

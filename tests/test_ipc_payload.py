@@ -53,7 +53,14 @@ def test_payload_troncato_a_meta_carattere_multibyte_ritorna_none():
 
 
 def test_limite_dimensione_e_generoso_ma_non_illimitato():
-    # PATH_MAX su Linux è 4096: il limite deve essere pensato per
-    # percorsi legittimi (anche con margine UTF-8), non per payload da
-    # megabyte pensati per un attacco DoS.
-    assert 4096 <= _IPC_MAX_PAYLOAD_BYTES <= 8192
+    # Il payload contiene una selezione multipla (%F da Dolphin): deve
+    # starci qualche migliaio di percorsi, ma non payload da megabyte
+    # pensati per un attacco DoS.
+    assert 64 * 1024 <= _IPC_MAX_PAYLOAD_BYTES <= 1024 * 1024
+
+
+def test_ogni_percorso_resta_limitato_a_path_max():
+    # PATH_MAX su Linux è 4096: il vincolo del vecchio formato (un solo
+    # percorso) resta valido per ogni singola parte del payload.
+    from klamav_py.gui.main_window import _IPC_MAX_PATH_BYTES
+    assert 4096 <= _IPC_MAX_PATH_BYTES <= 8192

@@ -9,6 +9,11 @@ La directory di quarantena (--quarantine) è sempre esclusa
 automaticamente dall'attraversamento: i file già gestiti non devono
 essere ri-rilevati (e ri-quarantenati) a ogni scansione che la copre.
 
+Con --quarantine, le firme euristiche (Heuristics.*) e i file negli
+archivi di posta (KMail/Akonadi, Thunderbird, Evolution, Maildir) sono
+solo segnalati, non spostati: vedi quarantine_policy.py. --report-only
+aggiunge directory, --quarantine-all disattiva la regola.
+
 Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore di
 esecuzione (clamd irraggiungibile, path inesistente, ecc.) — utile per
 `OnFailure=` in systemd o per script di monitoraggio.
@@ -26,6 +31,7 @@ from . import __version__
 from .clamd_client import DEFAULT_MAX_STREAM_SIZE, ClamdClient, ClamdError
 from .private_files import open_private_for_write
 from .quarantine import Quarantine
+from .quarantine_policy import QuarantinePolicy, default_report_only_dirs
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,6 +72,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     scan.add_argument(
+        "--report-only",
+        metavar="DIR",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Con --quarantine: i file infetti sotto questa directory sono solo "
+            "segnalati, non spostati (ripetibile). Si aggiunge agli archivi di "
+            "posta già protetti di default."
+        ),
+    )
+    scan.add_argument(
+        "--quarantine-all",
+        action="store_true",
+        help=(
+            "Con --quarantine: sposta anche le firme euristiche e i file negli "
+            "archivi di posta, che di default sono solo segnalati"
+        ),
+    )
+    scan.add_argument(
         "--max-stream-size",
         metavar="BYTES",
         type=int,
@@ -78,7 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
             "0 disattiva il pre-check."
         ),
     )
-    scan.add_argument("--quiet", action="store_true", help="Stampa solo le infezioni trovate")
+    scan.add_argument("--quiet", action="store_true",
+        help="Nasconde i file puliti; stampa infezioni, errori e riepilogo")
     scan.add_argument(
         "--no-persistent",
         action="store_true",
@@ -159,11 +186,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     client = ClamdClient(unix_socket=str(args.socket))
     quarantine = Quarantine(quarantine_dir) if quarantine_dir else None
+    policy = QuarantinePolicy(
+        default_report_only_dirs() + [p.expanduser() for p in args.report_only],
+        enabled=not args.quarantine_all,
+    )
 
     scanned = 0
     infections = 0
     errors = 0
     too_large = 0
+    report_only = 0
     error_categories: Counter[str] = Counter()
     # Il log degli errori elenca percorsi di file dell'utente: 0600, niente
     # symlink, niente file preesistenti di altri utenti (es. pre-creato in
@@ -189,11 +221,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 infections += 1
                 print(f"INFETTO: {result.path} ({result.signature})")
                 if quarantine:
-                    try:
-                        entry = quarantine.quarantine_file(Path(result.path), result.signature)
-                        print(f"  -> messo in quarantena: {entry.quarantined_path}")
-                    except Exception as exc:  # noqa: BLE001 - vogliamo continuare comunque
-                        print(f"  -> quarantena fallita: {exc}", file=sys.stderr)
+                    decision = policy.decide(Path(result.path), result.signature)
+                    if not decision.quarantine:
+                        report_only += 1
+                        print(f"  -> NON messo in quarantena ({decision.reason})")
+                    else:
+                        try:
+                            entry = quarantine.quarantine_file(Path(result.path), result.signature)
+                            print(f"  -> messo in quarantena: {entry.quarantined_path}")
+                        except Exception as exc:  # noqa: BLE001 - vogliamo continuare comunque
+                            print(f"  -> quarantena fallita: {exc}", file=sys.stderr)
             elif result.too_large:
                 # Non è un malfunzionamento: il file supera semplicemente
                 # StreamMaxLength (clamd.conf) e non è stato verificato,
@@ -222,6 +259,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
     print(f"\n{scanned} file scansionati, {infections} infetti, {errors} errori.")
     if too_large:
         print(f"{too_large} file oltre StreamMaxLength, non verificati (vedi clamd.conf).")
+    if report_only:
+        print(f"{report_only} infetti solo segnalati e non spostati: verificali manualmente.")
 
     # Entry saltate: non sono né scansionate né "non verificate" (un
     # symlink o un socket non ha contenuto proprio), quindi restano

@@ -9,6 +9,7 @@ widget da un altro thread.
 
 from __future__ import annotations
 
+import itertools
 import threading
 import time
 from pathlib import Path
@@ -18,6 +19,7 @@ from PySide6.QtCore import QThread, Signal
 
 from ..clamd_client import ClamdClient, ClamdError
 from ..quarantine import Quarantine
+from ..quarantine_policy import QuarantinePolicy
 
 # Intervallo minimo (secondi) tra due aggiornamenti di stato inviati alla
 # UI. Su scansioni veloci (centinaia/migliaia di file al secondo) emettere
@@ -47,6 +49,14 @@ class ScanWorker(QThread):
     scanning = Signal(str)  # path del file che si sta iniziando a scansionare (throttled)
     progress = Signal(int, int, int, int)  # (scansionati, infezioni, errori, troppo_grandi), throttled
     quarantined = Signal(str)  # path originale del file appena messo in quarantena
+    # Esito della quarantena automatica per ogni infetto, emesso SUBITO
+    # DOPO il suo result_ready: (path, esito, dettaglio) con esito
+    # "quarantined" (dettaglio = percorso in quarantena), "report_only"
+    # (dettaglio = motivo, vedi quarantine_policy) o "failed" (dettaglio =
+    # errore). Serve a chi deve dire all'utente cosa è successo DAVVERO al
+    # file: prima la notifica del Real-Time diceva "messo in quarantena"
+    # anche quando la quarantena era fallita.
+    quarantine_outcome = Signal(str, str, str)
     error = Signal(str)
     finished_scan = Signal(int, int, int, int)  # (scansionati, infezioni, errori, troppo_grandi)
     # Segnali di pausa: emessi dal worker quando entra/esce EFFETTIVAMENTE
@@ -60,15 +70,19 @@ class ScanWorker(QThread):
     def __init__(
         self,
         socket_path: str,
-        target: Path,
+        target: "Path | list[Path]",
         quarantine_dir: Optional[Path] = None,
         auto_quarantine: bool = False,
         client_factory: Optional[Callable[..., Any]] = None,
+        policy: Optional[QuarantinePolicy] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.socket_path = socket_path
-        self.target = target
+        # Una o più destinazioni (selezione multipla da Dolphin): una sola
+        # scansione, contatori e report unici.
+        self.targets = list(target) if isinstance(target, (list, tuple)) else [target]
+        self.target = self.targets[0]
         self.quarantine_dir = quarantine_dir
         self.auto_quarantine = auto_quarantine
         # Factory iniettabile per i test (finto client senza clamd reale):
@@ -76,6 +90,9 @@ class ScanWorker(QThread):
         # bisogno di un client che produca risultati a ritmo controllato,
         # altrimenti sarebbero dipendenti da un demone esterno.
         self._client_factory = client_factory
+        # Regola "solo segnalazione" (firme euristiche, archivi di posta):
+        # la stessa della CLI. Iniettabile per i test.
+        self.policy = policy if policy is not None else QuarantinePolicy()
         self._stop_requested = False
         # Stato di pausa. Letti/scritti da thread diversi (UI e worker):
         # l'assegnazione di un bool è atomica sotto GIL e threading.Event
@@ -184,10 +201,13 @@ class ScanWorker(QThread):
             # quarantenato a ogni scansione che copre la quarantena (es.
             # tutta la home), per poi scartarne il risultato.
             exclude_dirs = [quarantine_root] if quarantine_root else []
-            iterator = client.scan_stream(
-                self.target,
-                on_file_start=on_file_start,
-                exclude_dirs=exclude_dirs,
+            iterator = itertools.chain.from_iterable(
+                client.scan_stream(
+                    t,
+                    on_file_start=on_file_start,
+                    exclude_dirs=exclude_dirs,
+                )
+                for t in self.targets
             )
             while True:
                 paused_for = self._wait_while_paused()
@@ -230,16 +250,22 @@ class ScanWorker(QThread):
                 elif result.status == "ERROR":
                     errors += 1
 
+                outcome = None
                 if result.infected and self.auto_quarantine and quarantine is not None:
-                    try:
-                        # Sposta il file in quarantena
-                        quarantine.quarantine_file(Path(result.path), result.signature)
-                        # NON SOVRASCRIVIAMO result.path!
-                        # L'utente nella GUI deve vedere dov'era il file originale,
-                        # non il percorso nascosto della quarantena.
-                        self.quarantined.emit(result.path)
-                    except Exception as exc:  # noqa: BLE001
-                        self.error.emit(f"Quarantena fallita per {result.path}: {exc}")
+                    decision = self.policy.decide(Path(result.path), result.signature)
+                    if not decision.quarantine:
+                        outcome = ("report_only", decision.reason or "")
+                    else:
+                        try:
+                            entry = quarantine.quarantine_file(Path(result.path), result.signature)
+                            # NON sovrascriviamo result.path: l'utente nella GUI
+                            # deve vedere dov'era il file originale, non il
+                            # percorso nascosto della quarantena.
+                            self.quarantined.emit(result.path)
+                            outcome = ("quarantined", entry.quarantined_path)
+                        except Exception as exc:  # noqa: BLE001
+                            self.error.emit(f"Quarantena fallita per {result.path}: {exc}")
+                            outcome = ("failed", str(exc))
 
                 if result.infected:
                     infections += 1
@@ -251,6 +277,12 @@ class ScanWorker(QThread):
                     # overhead puro, oltre che una delle cause dello
                     # sfarfallio della finestra durante scansioni grandi.
                     self.result_ready.emit(result)
+
+                if outcome is not None:
+                    # Dopo result_ready: le connessioni queued preservano
+                    # l'ordine, quindi la riga "INFETTO" è già in lista
+                    # quando arriva l'esito che la completa.
+                    self.quarantine_outcome.emit(result.path, *outcome)
 
                 now = time.monotonic()
                 if now - last_emit >= PROGRESS_THROTTLE_SECONDS:

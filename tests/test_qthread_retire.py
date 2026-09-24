@@ -162,7 +162,7 @@ class Worker(QThread):
     fine = Signal()
 
     def run(self):
-        # come ScanWorker/UpdateWorker: il segnale di fine e' emesso
+        # come ScanWorker/FreshclamRestartWorker: il segnale di fine e' emesso
         # dentro run(), non dopo
         self.fine.emit()
 

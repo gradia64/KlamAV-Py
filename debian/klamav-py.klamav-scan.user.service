@@ -1,25 +1,62 @@
 [Unit]
 Description=Scansione ClamAV via klamav-py (sessione utente)
+Documentation=https://github.com/gradia64/KlamAV-Py
+# Notifica desktop su infezioni (uscita 1) o errori bloccanti (uscita 2):
+# vedi klamav-scan-notify.service.
+OnFailure=klamav-scan-notify.service
+
+# Nessun After=/Requires= verso clamav-daemon.service: una unit utente non
+# può ordinarsi rispetto a una unit del manager di sistema. clamav-daemon
+# parte comunque molto prima del login; se clamd non risponde, klamav-py
+# esce con codice 2 e un messaggio leggibile, non con un crash.
 
 [Service]
 Type=oneshot
-# %h si espande alla home dell'utente sotto il cui manager --user gira
-# questa unit: stessa home leggibile dalla GUI, stessa directory di
-# quarantena di default (~/.local/share/klamav-py/quarantine).
+# Unit utente, niente DynamicUser: gira come il proprietario della sessione
+# e legge la sua home senza problemi di permessi su home 0700/0750. Esiste
+# solo questa unit: la vecchia unit di sistema (utente dedicato, venv in
+# /opt, scansione di /home) è stata rimossa perché non poteva leggere home
+# private senza allargarne i permessi.
+#
+# Codici di uscita: 0 nessuna infezione (anche con errori di lettura),
+# 1 infezioni trovate, 2 errore bloccante. La directory di quarantena è
+# esclusa automaticamente dalla scansione.
 ExecStart=/usr/bin/klamav-py scan %h --quarantine %h/.local/share/klamav-py/quarantine --quiet
 
-# NIENTE DynamicUser qui: gira come l'utente proprietario della sessione,
-# quindi legge la sua home senza i problemi di permessi che un utente
-# di sistema effimero avrebbe su home 0700/0750 (vedi anche il perché
-# non c'è più una unit di sistema, in fondo a questo file).
-#
-# NOTA SU After=/Requires=: una unit utente NON può ordinarsi in modo
-# affidabile rispetto a una unit di SISTEMA come clamav-daemon.service
-# — sono gestite da istanze separate di systemd (manager di sistema vs
-# manager --user), e le dipendenze across-manager non sono supportate.
-# In pratica non è un problema: clamav-daemon parte già molto prima
-# del login utente. Se clamd non fosse ancora pronto, klamav-py fallisce
-# con un errore leggibile ("clamd non raggiungibile"), non con un crash.
+# stdout non bufferizzato: le righe arrivano al journal mentre il processo
+# è vivo e restano attribuite alla unit. Con il buffering di default
+# vengono scritte all'uscita e `journalctl -u` non le mostra.
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
 
 NoNewPrivileges=true
 PrivateTmp=true
+
+# Rete: solo socket Unix con percorso (clamd). PrivateNetwork non li
+# blocca: attraversano i namespace di rete. Se si espone clamd via TCP,
+# questi due vanno rimossi.
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+
+# Syscall (seccomp, ammesso senza privilegi grazie a NoNewPrivileges).
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+
+# Filesystem: tutto in sola lettura tranne la home, che deve restare
+# scrivibile perché la quarantena fa rename() dalla directory del file.
+ProtectSystem=strict
+ReadWritePaths=%h
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+
+# Una scansione di tutta la home non deve rallentare il desktop.
+Nice=19
+IOSchedulingClass=idle

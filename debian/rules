@@ -14,3 +14,4 @@ export PYBUILD_NAME=klamav_py
 # solo debian/klamav-py.user.service.
 override_dh_installsystemduser:
 	dh_installsystemduser --name=klamav-scan
+	dh_installsystemduser --name=klamav-scan-notify --no-enable

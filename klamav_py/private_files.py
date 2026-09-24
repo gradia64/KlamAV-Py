@@ -107,6 +107,19 @@ def _open_owned(path: Path, flags: int) -> int:
     return fd
 
 
+def open_private_fd(path: Path, flags: int) -> int:
+    """
+    Descrittore grezzo su un file privato: 0600 alla creazione, niente
+    symlink, niente FIFO, proprietario verificato, permessi ristretti se
+    più larghi. Nessun troncamento implicito: il chiamante decide.
+
+    Serve ai file che non sono "testo da scrivere" ma vanno comunque
+    creati in modo sicuro, come il lock della quarantena (usato solo per
+    flock, non va mai troncato né riscritto).
+    """
+    return _open_owned(Path(path), flags)
+
+
 def ensure_private_file(path: Path, create: bool = True) -> bool:
     """
     Porta a 0600 un file scritto da CODICE NON NOSTRO, senza toccarne il

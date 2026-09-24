@@ -19,10 +19,12 @@ import sys
 import time
 import json
 import html
+from collections import deque
+from typing import Callable
 
 from PySide6.QtCore import Qt, QSize, QSettings, Signal, QTimer, QFileSystemWatcher, QThread
 from PySide6.QtGui import QIcon, QColor, QAction, QFont, QPalette
-from PySide6.QtNetwork import QLocalServer
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -58,10 +60,18 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..clamd_client import ScanResult
 from ..quarantine import Quarantine
-from ..private_files import ensure_private_dir, ensure_private_file, write_private_text
+from ..private_files import (
+    ensure_private_dir, ensure_private_file, open_private_for_write, write_private_text,
+)
 from .scan_worker import ScanWorker
-from .update_worker import UpdateWorker
+from ..db_freshness import DbInfo, describe, should_update_on_startup
+from ..clamd_health import ClamdHealth, Throttle, Transition
+from .. import schedule as sched
+from ..freshclam_service import Outcome, RestartResult
+from .freshclam_restart_worker import FreshclamRestartWorker
+from .db_info_worker import DbInfoWorker, probe_db_info
 from .ping_worker import PingWorker
+from .single_instance import IPC_MAX_PAYLOAD_BYTES, IPC_SEPARATOR
 from .update_check_worker import UpdateCheckWorker, UpdateInfo
 
 DEFAULT_SOCKET = "/run/clamav/clamd.ctl"
@@ -73,6 +83,22 @@ DEFAULT_LOGS_DIR = Path.home() / ".local/share/klamav-py/logs"
 # a cancellare i più vecchi: una scansione oraria produce 24 file/giorno,
 # senza rotazione il directory cresce indefinitamente.
 MAX_BG_LOG_FILES = 10
+# Scansione programmata della GUI: controllo della scadenza ogni minuto
+# (orologio reale, vedi schedule.py) e attesa dopo l'avvio prima di
+# recuperare una scadenza mancata, per non partire con una scansione di
+# tutta la home proprio mentre la sessione si sta caricando.
+SCHEDULE_CHECK_MS = 60_000
+SCHEDULE_STARTUP_GRACE_S = 300
+# Tetti di volume (punto "robustezza sotto carico"): un git clone o
+# l'estrazione di un archivio grande generano decine di migliaia di
+# eventi in pochi secondi, e una scansione della home con migliaia di
+# errori di permessi produceva altrettante righe Qt.
+MAX_REALTIME_QUEUE = 5000
+REALTIME_DEBOUNCE_S = 3.0
+REALTIME_DEBOUNCE_TICK_MS = 500
+# Righe non-infette (errori, file troppo grandi) nella lista della pagina
+# Scansione. Gli infetti si mostrano SEMPRE, a prescindere dal tetto.
+MAX_RESULT_ROWS = 2000
 
 # Nome dell'applicazione, usato OVUNQUE come nome visualizzato (titolo
 # finestra, tooltip e notifiche tray, menu, file .desktop generati):
@@ -164,7 +190,7 @@ def _retire_qthread(worker: QThread) -> None:
     al wrapper cade PRIMA che QThread::finished sia stato consegnato:
     shiboken distrugge l'oggetto C++ mentre il thread è ancora in
     teardown. La finestra di gara è reale perché il segnale custom del
-    worker (finished_scan/finished_update) è emesso DENTRO run(), prima
+    worker (finished_scan/finished_with) è emesso DENTRO run(), prima
     che run() restituisca il controllo.
 
     Due casi distinti, con rimedi diversi:
@@ -207,7 +233,17 @@ def _retire_qthread(worker: QThread) -> None:
 # tentativo di far leggere/processare all'app dati arbitrariamente grandi
 # (DoS). Il limite è generoso di proposito (margine per UTF-8 multi-byte)
 # senza aprire la porta a payload da megabyte.
-_IPC_MAX_PAYLOAD_BYTES = 4096
+# Condiviso con il client (single_instance.encode_targets), che garantisce
+# payload strettamente sotto il limite: raggiungerlo significa payload non
+# nostro o troncato.
+_IPC_MAX_PAYLOAD_BYTES = IPC_MAX_PAYLOAD_BYTES
+# PATH_MAX su Linux: nessun percorso legittimo è più lungo. Il payload
+# intero è più grande (selezione multipla), ma ogni singola parte resta
+# vincolata come quando il payload conteneva un solo percorso.
+_IPC_MAX_PATH_BYTES = 4096
+# Tempo massimo per ricevere un payload completo: la connessione è locale,
+# ma con qualche migliaio di percorsi può arrivare in più letture.
+_IPC_READ_DEADLINE_S = 2.0
 
 
 def _decode_ipc_payload(raw: bytes) -> str | None:
@@ -231,6 +267,24 @@ def _decode_ipc_payload(raw: bytes) -> str | None:
     return data or None
 
 
+def _decode_ipc_targets(raw: bytes, truncated: bool = False) -> list[str]:
+    """
+    Percorsi dal payload IPC: uno o più percorsi separati da NUL (formato
+    di single_instance.encode_targets). Un payload senza NUL è il formato
+    precedente, con un solo percorso. Ogni parte passa da
+    _decode_ipc_payload: le parti malformate si scartano singolarmente.
+
+    truncated=True (letto fino al limite): l'ultima parte può essere un
+    percorso tagliato a metà, e un percorso tagliato è un ALTRO percorso
+    esistente o no: la si scarta invece di scansionare la cosa sbagliata.
+    """
+    parts = raw.split(IPC_SEPARATOR)
+    if truncated:
+        parts = parts[:-1]
+    parts = [part for part in parts if len(part) <= _IPC_MAX_PATH_BYTES]
+    return [p for p in (_decode_ipc_payload(part) for part in parts) if p]
+
+
 def _rebuild_kde_service_cache() -> None:
     """Rigenera la cache dei servizi KDE dopo aver installato/rimosso la
     voce di menu Dolphin.
@@ -250,6 +304,26 @@ def _rebuild_kde_service_cache() -> None:
             subprocess.run([binary], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (FileNotFoundError, OSError):
             pass
+
+
+# Controllo periodico di clamd: intervallo e timeout del singolo ping.
+# Il timeout resta ben sotto l'intervallo, così un clamd appeso non tiene
+# occupato il worker fino al controllo successivo.
+CLAMD_HEALTH_INTERVAL_MS = 60_000
+CLAMD_PING_TIMEOUT_S = 10.0
+# Distanza minima tra due ping forzati da errori del Real-Time.
+CLAMD_FORCED_PING_MIN_INTERVAL_S = 10.0
+
+
+def _outcome_line(outcome: str, detail: str) -> str | None:
+    """Riga di log che completa "INFETTO — ..." con l'esito della
+    quarantena automatica. None se non serve una riga in più (quarantena
+    riuscita: il file compare già nella pagina Quarantena)."""
+    if outcome == "report_only":
+        return f"    ↳ NON messo in quarantena — {detail}"
+    if outcome == "failed":
+        return f"    ↳ quarantena FALLITA — {detail}"
+    return None
 
 
 def _default_tray_tooltip() -> str:
@@ -521,6 +595,9 @@ class ScanPage(QWidget):
         self._scan_start_time: float | None = None
 
         self.path_edit = QLineEdit(str(Path.home()))
+        self._external_targets: list[Path] | None = None
+        # textEdited scatta solo per modifiche dell'utente, non per setText.
+        self.path_edit.textEdited.connect(self._on_path_edited)
         self.path_edit.setFixedHeight(36)
 
         browse_button = QPushButton("Sfoglia…")
@@ -625,22 +702,47 @@ class ScanPage(QWidget):
         layout.addWidget(self.results_list, 1)
         layout.addLayout(results_buttons_row)
 
-    def start_external_scan(self, target: Path):
-        """Metodo richiamato quando l'app riceve un file da scansionare esternamente (es. Dolphin)."""
-        if target and target.exists():
-            self.path_edit.setText(str(target))
-            QTimer.singleShot(500, self._start_scan)
+    def start_external_scan(self, target) -> None:
+        """Metodo richiamato quando l'app riceve file da scansionare
+        esternamente (es. Dolphin): un percorso o una lista, la selezione
+        multipla passata con %F. Una sola scansione per tutta la selezione."""
+        targets = list(target) if isinstance(target, (list, tuple)) else [target]
+        targets = [Path(t) for t in targets if t and Path(t).exists()]
+        if not targets:
+            return
+        if len(targets) == 1:
+            self._external_targets = None
+            self.path_edit.setText(str(targets[0]))
+        else:
+            self._external_targets = targets
+            # Solo descrittivo (cronologia e report lo mostrano così): la
+            # lista vera è _external_targets. Una modifica a mano del campo
+            # la annulla, vedi _on_path_edited.
+            self.path_edit.setText(f"{targets[0]} (+{len(targets) - 1} altri)")
+        QTimer.singleShot(500, self._start_scan)
+
+    def _on_path_edited(self, _text: str) -> None:
+        self._external_targets = None
 
     def _browse(self) -> None:
         chosen = QFileDialog.getExistingDirectory(self, "Scegli directory da scansionare", self.path_edit.text())
         if chosen:
+            self._external_targets = None
             self.path_edit.setText(chosen)
 
     def _start_scan(self) -> None:
-        target = Path(self.path_edit.text())
-        if not target.exists():
-            QMessageBox.warning(self, "Percorso non valido", f"{target} non esiste.")
-            return
+        external = getattr(self, "_external_targets", None)
+        if external:
+            targets = [t for t in external if t.exists()]
+            if not targets:
+                QMessageBox.warning(self, "Percorso non valido", "Nessuno dei file selezionati esiste più.")
+                return
+            target = targets
+        else:
+            target = Path(self.path_edit.text())
+            if not target.exists():
+                QMessageBox.warning(self, "Percorso non valido", f"{target} non esiste.")
+                return
 
         # Guard "una scansione alla volta": una scansione manuale non
         # parte se una programmata è già in corso (e viceversa la
@@ -669,6 +771,8 @@ class ScanPage(QWidget):
             return
 
         self.results_list.clear()
+        self._omitted_errors = self._omitted_too_large = 0
+        self._non_infected_rows = 0
         self.progress.setVisible(True)
         self._set_status_text("Scansione in corso…")
         self._scanned = self._infections = self._errors = self._too_large = 0
@@ -700,6 +804,7 @@ class ScanPage(QWidget):
         self.worker.progress.connect(self._on_progress)
         self.worker.result_ready.connect(self._on_result)
         self.worker.quarantined.connect(self._on_quarantined)
+        self.worker.quarantine_outcome.connect(self._on_quarantine_outcome)
         self.worker.error.connect(self._on_error)
         self.worker.finished_scan.connect(self._on_finished)
         # I segnali paused/resumed (non le richieste pause()/resume())
@@ -796,6 +901,18 @@ class ScanPage(QWidget):
         # Il worker filtra già i risultati "puliti": qui arrivano solo
         # infetti, errori e file troppo grandi, quindi ogni result
         # produce sempre una riga.
+        if not result.infected:
+            # Tetto sulle righe non infette: una scansione della home con
+            # decine di migliaia di errori di permessi creava altrettanti
+            # item Qt. Gli infetti non sono mai soggetti al tetto.
+            if getattr(self, "_non_infected_rows", 0) >= MAX_RESULT_ROWS:
+                if result.too_large:
+                    self._omitted_too_large += 1
+                elif result.status == "ERROR":
+                    self._omitted_errors += 1
+                return
+            self._non_infected_rows = getattr(self, "_non_infected_rows", 0) + 1
+
         if result.infected:
             item = QListWidgetItem(f"INFETTO — {result.path} ({result.signature})")
             item.setIcon(QIcon.fromTheme("emblem-virus"))
@@ -827,6 +944,15 @@ class ScanPage(QWidget):
         main_window = self.window()
         if hasattr(main_window, "quarantine_page"):
             main_window.quarantine_page.refresh()
+
+    def _on_quarantine_outcome(self, path: str, outcome: str, detail: str) -> None:
+        line = _outcome_line(outcome, detail)
+        if line is None:
+            return
+        item = QListWidgetItem(line)
+        item.setIcon(QIcon.fromTheme("dialog-warning"))
+        self.results_list.addItem(item)
+        self.results_list.scrollToBottom()
 
     def _on_error(self, message: str) -> None:
         item = QListWidgetItem(f"ERRORE SISTEMA — {message}")
@@ -917,6 +1043,23 @@ class ScanPage(QWidget):
         if too_large:
             status_text += f" {too_large} non verificati (troppo grandi)."
         self._set_status_text(status_text)
+
+        omessi_err = getattr(self, "_omitted_errors", 0)
+        omessi_big = getattr(self, "_omitted_too_large", 0)
+        if omessi_err or omessi_big:
+            parti = []
+            if omessi_err:
+                parti.append(f"{omessi_err} errori")
+            if omessi_big:
+                parti.append(f"{omessi_big} file non verificati (troppo grandi)")
+            item = QListWidgetItem(
+                f"… altri {' e '.join(parti)} non mostrati (oltre {MAX_RESULT_ROWS} righe; "
+                "i totali sopra sono completi, gli infetti sono sempre tutti elencati)"
+            )
+            item.setIcon(QIcon.fromTheme("dialog-information"))
+            item.setForeground(_mid_color(self))
+            self.results_list.addItem(item)
+            self.results_list.scrollToBottom()
 
         if infections > 0:
             esito = "Infezioni rilevate"
@@ -1011,13 +1154,60 @@ class QuarantinePage(QWidget):
         layout.addWidget(title)
         layout.addSpacing(10)
 
+        # Visibile solo dopo un recupero da indice corrotto o con file non
+        # indicizzati nella cartella: vedi Quarantine.corrupt_backups() e
+        # Quarantine.orphans(). Mai nascosto automaticamente, finché la
+        # situazione su disco non cambia.
+        self.health_label = QLabel("")
+        self.health_label.setTextFormat(Qt.PlainText)
+        self.health_label.setWordWrap(True)
+        self.health_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.health_label.setStyleSheet("font-size: 12px; color: #d32f2f;")
+        self.health_label.setVisible(False)
+
         layout.addWidget(self.table, 1)
+        layout.addWidget(self.health_label)
         layout.addLayout(buttons_row)
 
         self.refresh()
 
+    def _update_health_label(self) -> None:
+        try:
+            backups = self.quarantine.corrupt_backups()
+            orphans = self.quarantine.orphans()
+        except OSError:
+            backups, orphans = [], []
+        parti = []
+        if backups:
+            nomi = ", ".join(p.name for p in backups[-3:])
+            parti.append(
+                f"L'indice della quarantena era danneggiato ed è stato messo da parte "
+                f"({nomi}), non cancellato."
+            )
+        if orphans:
+            parti.append(
+                (f"{len(orphans)} file nella cartella {self.quarantine.dir} "
+                 + ("non compare" if len(orphans) == 1 else "non compaiono")
+                 + " nell'elenco: resta isolato in sola lettura"
+                 + (" e il percorso originale è registrato nell'indice messo da parte."
+                    if backups else "."))
+            )
+        self.health_label.setText(" ".join(parti))
+        self.health_label.setVisible(bool(parti))
+
     def refresh(self) -> None:
-        entries = self.quarantine.list_entries()
+        # list_entries() recupera da solo un indice corrotto: questa slot
+        # non può più propagare JSONDecodeError e lasciare la pagina vuota
+        # con un traceback su stderr. Resta il caso di un errore di I/O
+        # vero (disco, permessi), mostrato invece di sollevato.
+        try:
+            entries = self.quarantine.list_entries()
+        except OSError as exc:
+            self.table.setRowCount(0)
+            self.health_label.setText(f"Impossibile leggere la quarantena: {exc}")
+            self.health_label.setVisible(True)
+            return
+        self._update_health_label()
         self.table.setRowCount(len(entries))
         for row, entry in enumerate(entries):
             when = datetime.fromtimestamp(entry.timestamp).strftime("%Y-%m-%d %H:%M")
@@ -1062,9 +1252,18 @@ class QuarantinePage(QWidget):
 
 
 class UpdatePage(QWidget):
-    def __init__(self, parent=None) -> None:
+    """
+    Aggiornamento delle firme delegato all'unità systemd pacchettizzata di
+    freshclam (vedi freshclam_service): nessuno script passa per pkexec e
+    freshclam gira come utente clamav con il sandboxing della distribuzione.
+    """
+
+    db_info_changed = Signal(object)  # DbInfo | None
+
+    def __init__(self, socket_getter: Callable[[], str], parent=None) -> None:
         super().__init__(parent)
-        self.worker: UpdateWorker | None = None
+        self._socket_getter = socket_getter
+        self.worker: FreshclamRestartWorker | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
@@ -1074,10 +1273,19 @@ class UpdatePage(QWidget):
         title.setStyleSheet("font-size: 22px; font-weight: bold;")
         layout.addWidget(title)
 
-        desc = QLabel("Scarica le ultime definizioni dei virus tramite 'freshclam'.\nPotrebbe essere richiesta la password di amministratore.")
+        desc = QLabel(
+            "Aggiorna le definizioni dei virus riavviando il servizio di sistema "
+            "freshclam, che le scarica con i propri permessi limitati.\n"
+            "Potrebbe essere richiesta la password di amministratore."
+        )
         desc.setStyleSheet("font-size: 14px; color: palette(mid);")
         desc.setWordWrap(True)
         layout.addWidget(desc)
+
+        self.db_status_label = QLabel("Database firme: verifica in corso…")
+        self.db_status_label.setTextFormat(Qt.PlainText)
+        self.db_status_label.setWordWrap(True)
+        layout.addWidget(self.db_status_label)
         layout.addSpacing(10)
 
         self.update_button = QPushButton("Aggiorna Database")
@@ -1107,6 +1315,9 @@ class UpdatePage(QWidget):
         self.log_console.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.log_console, 1)
 
+    def set_db_info(self, info: DbInfo | None) -> None:
+        self.db_status_label.setText(describe(info))
+
     def _start_update(self) -> None:
         if self.worker is not None:
             return
@@ -1116,24 +1327,31 @@ class UpdatePage(QWidget):
         self.update_button.setEnabled(False)
         self.log_console.appendPlainText("Avvio dell'aggiornamento in corso...\n")
 
-        self.worker = UpdateWorker()
-        self.worker.output_line.connect(self._on_output)
-        self.worker.finished_update.connect(self._on_finished)
+        # Il percorso si legge qui, nel thread GUI: il probe gira nel
+        # worker e non deve toccare QSettings né i widget.
+        socket_path = self._socket_getter()
+        self.worker = FreshclamRestartWorker(lambda: probe_db_info(socket_path))
+        self.worker.progress.connect(self._on_output)
+        self.worker.finished_with.connect(self._on_finished)
         self.worker.start()
 
     def _on_output(self, line: str) -> None:
         self.log_console.appendPlainText(line)
 
-    def _on_finished(self, success: bool, message: str) -> None:
+    def _on_finished(self, result: RestartResult) -> None:
         self.progress.setVisible(False)
         self.update_button.setEnabled(True)
-        self.log_console.appendPlainText(f"\n{message}")
+        self.log_console.appendPlainText(f"\n{result.message}")
+        if result.db_info is not None:
+            self.db_info_changed.emit(result.db_info)
 
         main_window = self.window()
-        if hasattr(main_window, 'tray_icon') and main_window.tray_icon.isVisible():
-            icon_type = "emblem-checked" if success else "data-error"
+        notify = result.outcome not in (Outcome.CANCELLED, Outcome.INTERRUPTED)
+        if notify and hasattr(main_window, 'tray_icon') and main_window.tray_icon.isVisible():
+            ok = result.outcome in (Outcome.UPDATED, Outcome.UNCHANGED)
             main_window.tray_icon.showMessage(
-                f"{APP_NAME} - Aggiornamento", message, _icon(icon_type), 5000
+                f"{APP_NAME} - Aggiornamento", result.message,
+                _icon("emblem-checked" if ok else "data-error"), 5000
             )
 
         # Rilascio differito: self.worker = None qui scaricherebbe il
@@ -1145,6 +1363,17 @@ class UpdatePage(QWidget):
 
 
 class RealTimePage(QWidget):
+    def set_clamd_down(self, down: bool, pending: int = 0) -> None:
+        if not down:
+            self.clamd_banner.setVisible(False)
+            return
+        text = ("clamd non risponde: il Real-Time è SOSPESO e i nuovi file "
+                "non vengono verificati.")
+        if pending:
+            text += f" {pending} file in attesa verranno analizzati al ritorno di clamd."
+        self.clamd_banner.setText(text)
+        self.clamd_banner.setVisible(True)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
@@ -1160,6 +1389,16 @@ class RealTimePage(QWidget):
         desc.setStyleSheet("font-size: 14px; color: palette(mid);")
         desc.setWordWrap(True)
         layout.addWidget(desc)
+
+        # Visibile solo con clamd fermo: vedi MainWindow._apply_clamd_state.
+        self.clamd_banner = QLabel("")
+        self.clamd_banner.setTextFormat(Qt.PlainText)
+        self.clamd_banner.setWordWrap(True)
+        self.clamd_banner.setStyleSheet(
+            "font-size: 13px; font-weight: bold; color: #d32f2f;"
+        )
+        self.clamd_banner.setVisible(False)
+        layout.addWidget(self.clamd_banner)
         layout.addSpacing(10)
 
         self.log_list = QListWidget()
@@ -1184,7 +1423,9 @@ class RealTimePage(QWidget):
     def add_log_entry(self, file_name: str, infected: bool, signature: str = "", status: str = "Analizzato") -> None:
         time_str = datetime.now().strftime("%H:%M:%S")
         if infected:
-            text = f"[{time_str}] MINACCIA RILEVATA: {file_name} ({signature}) -> In Quarantena"
+            # L'esito della quarantena arriva in una riga separata
+            # (add_outcome_entry): qui non si può sapere se è riuscita.
+            text = f"[{time_str}] MINACCIA RILEVATA: {file_name} ({signature})"
             item = QListWidgetItem(text)
             item.setIcon(QIcon.fromTheme("emblem-virus"))
             item.setForeground(QColor("#e4311b"))
@@ -1203,6 +1444,19 @@ class RealTimePage(QWidget):
                 item.setIcon(QIcon.fromTheme("emblem-checked"))
                 item.setForeground(QColor("gray"))
 
+        self._insert(item)
+
+    def add_outcome_entry(self, text: str, warning: bool) -> None:
+        item = QListWidgetItem(f"[{datetime.now():%H:%M:%S}]     ↳ {text}")
+        if warning:
+            item.setIcon(QIcon.fromTheme("dialog-warning"))
+            item.setForeground(QColor("#e4311b"))
+        else:
+            item.setIcon(QIcon.fromTheme("emblem-checked"))
+            item.setForeground(QColor("gray"))
+        self._insert(item)
+
+    def _insert(self, item: QListWidgetItem) -> None:
         self.log_list.insertItem(0, item)
         if self.log_list.count() > 500:
             self.log_list.takeItem(self.log_list.count() - 1)
@@ -1381,10 +1635,18 @@ class SchedulerPage(QWidget):
         self.execution_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
         layout.addWidget(self.execution_status_label)
 
+        self.next_run_label = QLabel("")
+        self.next_run_label.setWordWrap(True)
+        self.next_run_label.setStyleSheet("font-size: 12px;")
+        layout.addWidget(self.next_run_label)
+
         self._load_settings()
 
     def update_progress(self, text: str) -> None:
         self.execution_status_label.setText(text)
+
+    def set_next_run(self, text: str) -> None:
+        self.next_run_label.setText(text)
 
     def _browse_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Seleziona cartella da scansionare", self.target_edit.text())
@@ -1508,7 +1770,7 @@ class SettingsPage(QWidget):
         self.auto_quar_check = QCheckBox("Metti in quarantena automaticamente i file infetti (default: disattivato)")
         general_layout.addWidget(self.auto_quar_check)
 
-        self.startup_update_check = QCheckBox("Aggiorna il database dei virus all'avvio dell'applicazione")
+        self.startup_update_check = QCheckBox("Aggiorna il database dei virus all'avvio se le firme hanno più di 36 ore")
         general_layout.addWidget(self.startup_update_check)
 
         self.auto_check_updates = QCheckBox("Controlla aggiornamenti all'avvio")
@@ -1587,6 +1849,12 @@ class SettingsPage(QWidget):
         self.version_label.setStyleSheet("font-size: 12px; color: palette(mid);")
         about_layout.addWidget(self.version_label)
 
+        self.db_status_label = QLabel("Database firme: verifica in corso…")
+        self.db_status_label.setTextFormat(Qt.PlainText)
+        self.db_status_label.setWordWrap(True)
+        self.db_status_label.setStyleSheet("font-size: 12px;")
+        about_layout.addWidget(self.db_status_label)
+
         self.update_status_label = QLabel("")
         self.update_status_label.setTextFormat(Qt.PlainText)
         self.update_status_label.setWordWrap(True)
@@ -1638,6 +1906,9 @@ class SettingsPage(QWidget):
 
     def _remove_rt_dir(self) -> None:
         for item in self.rt_dirs_list.selectedItems(): self.rt_dirs_list.takeItem(self.rt_dirs_list.row(item))
+
+    def set_db_info(self, info: DbInfo | None) -> None:
+        self.db_status_label.setText(describe(info))
 
     def _load_settings(self) -> None:
         self.autostart_check.setChecked(self.settings.value("autostart_system", False, type=bool))
@@ -1807,7 +2078,7 @@ X-KDE-Priority=TopLevel
 [Desktop Action scanWithKlamAV]
 Name=Scansiona con KlamAV-Py
 Icon=edit-find
-Exec={exec_cmd} --scan-target %f
+Exec={exec_cmd} --scan-target %F
 """
             for d in dirs:
                 d.mkdir(parents=True, exist_ok=True)
@@ -1944,12 +2215,13 @@ class MainWindow(QMainWindow):
         self.scan_page = ScanPage(saved_socket, quarantine, self.history_manager)
         self.history_page = HistoryPage(self.history_manager)
         self.quarantine_page = QuarantinePage(quarantine)
-        self.update_page = UpdatePage()
+        self.update_page = UpdatePage(lambda: self.scan_page.socket_path)
         self.realtime_page = RealTimePage()
         self.scheduler_page = SchedulerPage()
         self.settings_page = SettingsPage()
 
         self.settings_page.settings_saved.connect(self._on_settings_saved)
+        self.update_page.db_info_changed.connect(self._apply_db_info)
         self.scheduler_page.schedule_saved.connect(self._on_schedule_saved)
 
         self.content_stack.addWidget(self.scan_page)
@@ -1969,17 +2241,37 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(splitter)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+        # Non più un timer a intervallo: un controllo ogni minuto della
+        # scadenza "ultima esecuzione + intervallo" (vedi schedule.py).
         self.schedule_timer = QTimer(self)
-        self.schedule_timer.timeout.connect(self._run_scheduled_scan)
+        self.schedule_timer.setInterval(SCHEDULE_CHECK_MS)
+        self.schedule_timer.timeout.connect(self._check_schedule)
+        self._schedule_grace_until = time.monotonic() + SCHEDULE_STARTUP_GRACE_S
+        self._schedule_late_noted = False
+        self._schedule_skip_noted = False
+        self._schedule_missing_noted = False
         self.bg_worker = None
-        self._bg_result_lines: list[str] = []
+        # Log della scansione programmata scritto man mano (vedi
+        # _bg_log_write): memoria costante e niente log perso se la GUI
+        # si chiude a metà scansione.
+        self._bg_log_fh = None
+        self._bg_log_path: Path | None = None
         self._load_schedule()
 
         self.fs_watcher = QFileSystemWatcher()
         self.fs_watcher.directoryChanged.connect(self._on_dir_changed)
-        self._pending_realtime_scans = {}
+        # Debounce con UN solo timer: prima ogni file modificato creava il
+        # proprio QTimer (decine di migliaia durante un git clone).
+        # percorso -> istante (monotono) in cui accodarlo.
+        self._pending_realtime_scans: dict[str, float] = {}
+        self._realtime_debounce_timer = QTimer(self)
+        self._realtime_debounce_timer.setInterval(REALTIME_DEBOUNCE_TICK_MS)
+        self._realtime_debounce_timer.timeout.connect(self._flush_pending_realtime)
         self._dir_snapshots = {}
-        self._realtime_queue = []
+        self._realtime_queue: deque[str] = deque()
+        self._realtime_queued: set[str] = set()
+        self._realtime_dropped = 0
+        self._realtime_overflow_notified = False
         # Distinzione importante: _realtime_roots sono le cartelle che
         # l'utente ha configurato, _realtime_configured_paths è la loro
         # espansione ricorsiva (le sottocartelle effettivamente passate
@@ -2011,10 +2303,21 @@ class MainWindow(QMainWindow):
         self._quit_after_update = False
         QApplication.instance().aboutToQuit.connect(self._shutdown_workers)
 
+        # startup_update è condizionato alla freschezza del DB: la decisione
+        # arriva in _on_db_info, dopo ping e VERSION. Con clamd giù non si
+        # propone nessun prompt pkexec (vedi should_update_on_startup).
+        self._startup_update_pending = self.settings.value("startup_update", True, type=bool)
+        self._ping_worker: PingWorker | None = None
+        self.clamd_health = ClamdHealth()
+        self._forced_ping = Throttle(CLAMD_FORCED_PING_MIN_INTERVAL_S)
+        # Controllo periodico: senza, clamd che muore a sessione aperta
+        # farebbe fallire il Real-Time file per file senza mai dire che
+        # l'antivirus è fermo.
+        self.clamd_health_timer = QTimer(self)
+        self.clamd_health_timer.timeout.connect(self._periodic_clamd_check)
+        self.clamd_health_timer.start(CLAMD_HEALTH_INTERVAL_MS)
+        self._db_info_worker: DbInfoWorker | None = None
         self._check_clamd(saved_socket)
-
-        if self.settings.value("startup_update", True, type=bool):
-            QTimer.singleShot(1500, self.update_page._start_update)
 
         if self.settings.value("auto_check_updates", False, type=bool):
             QTimer.singleShot(3000, self.settings_page._check_updates_automatico)
@@ -2026,7 +2329,15 @@ class MainWindow(QMainWindow):
     def _reset_tray_tooltip(self) -> None:
         """Riporta il tooltip della tray al riposo: chiamato a fine di
         ogni attività che lo ha modificato (scansione manuale,
-        programmata, pausa)."""
+        programmata, pausa).
+
+        Con clamd fermo il riposo NON è "Protezione attiva": il tooltip
+        dichiara lo stato reale."""
+        if getattr(self, "clamd_health", None) is not None and self.clamd_health.is_down:
+            self.tray_icon.setToolTip(
+                f"{APP_NAME} {__version__} — clamd non risponde: protezione NON attiva"
+            )
+            return
         self.tray_icon.setToolTip(_default_tray_tooltip())
 
     def _request_quit(self) -> None:
@@ -2034,14 +2345,11 @@ class MainWindow(QMainWindow):
         Uscita dal menu della tray.
 
         Se è in corso l'aggiornamento del database l'uscita viene
-        RINVIATA alla sua fine invece di interromperlo. Lo stdout di
-        freshclam-update.sh è una pipe letta da questo processo: appena il
-        processo non c'è più, le scritture di freshclam su quella pipe
-        falliscono. Lo script ignora SIGPIPE e ripristina comunque il
-        demone di sistema (trap su EXIT, vedi il file), ma come si
-        comporta freshclam quando le sue scritture falliscono (EPIPE) non
-        dipende da noi: aspettare la fine è la garanzia più semplice che
-        l'aggiornamento si completi, e l'utente ne vede anche l'esito.
+        RINVIATA alla sua fine. Non è più una questione di integrità: il
+        download lo fa l'unità systemd di freshclam, indipendente da questo
+        processo, e il worker rispetta requestInterruption(). Il rinvio
+        serve a non chiudere il dialogo pkexec sotto le mani dell'utente e
+        a mostrargli l'esito.
         """
         worker = self.update_page.worker
         if worker is not None and worker.isRunning():
@@ -2050,7 +2358,7 @@ class MainWindow(QMainWindow):
                 # Connessa dopo UpdatePage._on_finished, quindi eseguita
                 # dopo di lei (connessioni queued, ordine preservato):
                 # quando gira, il worker è già stato ritirato.
-                worker.finished_update.connect(self._quit_when_update_done)
+                worker.finished_with.connect(self._quit_when_update_done)
             if self.tray_icon.isVisible():
                 self.tray_icon.showMessage(
                     APP_NAME,
@@ -2088,6 +2396,9 @@ class MainWindow(QMainWindow):
         compresi) ma os._exit(), dopo aver salvato le impostazioni: il
         processo esce senza passare dai distruttori, quindi senza abort.
         """
+        if getattr(self, "clamd_health_timer", None) is not None:
+            self.clamd_health_timer.stop()
+
         workers: dict[int, QThread] = {}
 
         for w in (
@@ -2105,6 +2416,7 @@ class MainWindow(QMainWindow):
             self.update_page.worker,
             self.settings_page._update_check_worker,
             getattr(self, "_ping_worker", None),
+            getattr(self, "_db_info_worker", None),
             *list(_in_ritiro),
         ):
             if w is not None:
@@ -2142,19 +2454,49 @@ class MainWindow(QMainWindow):
         """Chiamato quando una seconda istanza invia un file da scansionare."""
         client = self.ipc_server.nextPendingConnection()
         if client:
-            client.waitForReadyRead(1000)
-            # read(), non readAll(): impone il limite in _decode_ipc_payload
-            # invece di accettare e poi eventualmente scartare un payload
-            # già ricevuto per intero in memoria.
-            raw = bytes(client.read(_IPC_MAX_PAYLOAD_BYTES))
+            raw, truncated = self._read_ipc_payload(client)
             client.disconnectFromServer()
 
-            data = _decode_ipc_payload(raw)
-            if data:
-                target_path = Path(data)
+            targets = _decode_ipc_targets(raw, truncated=truncated)
+            if targets:
                 self._restore_from_tray() # Mostra la finestra se in tray
                 self.sidebar.setCurrentRow(0) # Vai alla pagina di scansione
-                self.scan_page.start_external_scan(target_path)
+                self.scan_page.start_external_scan([Path(t) for t in targets])
+
+    @staticmethod
+    def _read_ipc_payload(client) -> tuple[bytes, bool]:
+        """
+        Legge il payload finché il client non chiude, entro un tetto di
+        byte e di tempo. Con più percorsi il payload può arrivare in più
+        letture: un solo read() dopo waitForReadyRead ne prendeva solo il
+        primo pezzo. read(n), non readAll(): il tetto si applica mentre si
+        legge, non dopo aver accettato tutto in memoria.
+
+        Ritorna (dati, troncato): troncato se si è arrivati al tetto.
+
+        Nota: in PySide waitForReadyRead non rilascia il GIL, quindi
+        durante l'attesa i worker Python (scansioni, Real-Time) sono
+        fermi. Il client è un processo locale che scrive tutto e chiude
+        in pochi millisecondi; la scadenza di _IPC_READ_DEADLINE_S limita
+        il caso patologico di un client che si connette e non scrive.
+        """
+        chunks: list[bytes] = []
+        total = 0
+        deadline = time.monotonic() + _IPC_READ_DEADLINE_S
+        while total < _IPC_MAX_PAYLOAD_BYTES:
+            if client.bytesAvailable() == 0:
+                if client.state() != QLocalSocket.ConnectedState:
+                    break
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0 or not client.waitForReadyRead(remaining_ms):
+                    if client.bytesAvailable() == 0:
+                        break
+            data = bytes(client.read(_IPC_MAX_PAYLOAD_BYTES - total))
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+        return b"".join(chunks), total >= _IPC_MAX_PAYLOAD_BYTES
 
     def _add_sidebar_item(self, text: str, *icon_names: str) -> None:
         item = QListWidgetItem(text)
@@ -2186,6 +2528,7 @@ class MainWindow(QMainWindow):
     def _on_settings_saved(self) -> None:
         new_socket = self.settings.value("socket_path", DEFAULT_SOCKET)
         self.scan_page.socket_path = new_socket
+        self._start_ping(new_socket)
         self._load_realtime()
         self._load_schedule()
 
@@ -2237,27 +2580,68 @@ X-GNOME-Autostart-enabled=true
         self._load_schedule()
         QMessageBox.information(self, "Pianificazione Aggiornata", "La pianificazione è stata aggiornata.")
 
+    def _schedule_interval_s(self) -> float:
+        return sched.interval_seconds(
+            self.settings.value("schedule_interval", 24, type=int),
+            self.settings.value("schedule_unit", "Ore"),
+        )
+
+    def _schedule_last_run(self) -> float | None:
+        value = self.settings.value("schedule_last_run", None)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     def _load_schedule(self) -> None:
         enabled = self.settings.value("schedule_enabled", False, type=bool)
         if not enabled:
             self.schedule_timer.stop()
+            self.scheduler_page.set_next_run("")
             return
 
-        interval = self.settings.value("schedule_interval", 24, type=int)
-        unit = self.settings.value("schedule_unit", "Ore")
+        # Prima attivazione: si fissa la base a "adesso" invece di
+        # scansionare subito (l'utente ha appena scelto un intervallo, non
+        # chiesto una scansione immediata).
+        if self._schedule_last_run() is None:
+            self.settings.setValue("schedule_last_run", time.time())
+            self.settings.sync()
 
-        if unit == "Giorni":
-            ms = interval * 24 * 60 * 60 * 1000
-        else:
-            ms = interval * 60 * 60 * 1000
+        self._update_next_run_label()
+        if not self.schedule_timer.isActive():
+            self.schedule_timer.start()
+        # Controllo immediato: una scadenza già passata (PC spento, GUI
+        # chiusa) si vede subito, non fra un minuto.
+        QTimer.singleShot(0, self._check_schedule)
 
-        # QTimer accetta al massimo INT_MAX ms (~24,8 giorni): oltre,
-        # l'intervallo verrebbe troncato e la pianificazione risulterebbe
-        # più frequente di quella richiesta.
-        ms = min(ms, 2**31 - 1)
+    def _update_next_run_label(self) -> None:
+        self.scheduler_page.set_next_run(
+            sched.describe_next(time.time(), self._schedule_last_run(), self._schedule_interval_s())
+        )
 
-        self.schedule_timer.setInterval(ms)
-        self.schedule_timer.start()
+    def _check_schedule(self) -> None:
+        if not self.settings.value("schedule_enabled", False, type=bool):
+            return
+        if not sched.is_due(time.time(), self._schedule_last_run(), self._schedule_interval_s()):
+            return
+
+        remaining = self._schedule_grace_until - time.monotonic()
+        if remaining > 0:
+            # Scadenza mancata scoperta all'avvio: si recupera, ma dopo
+            # qualche minuto e dicendolo, non in silenzio.
+            if not self._schedule_late_noted:
+                self._schedule_late_noted = True
+                self._update_next_run_label()
+                self.tray_icon.showMessage(
+                    APP_NAME,
+                    "La scansione programmata è in ritardo: verrà recuperata "
+                    f"tra circa {max(1, round(remaining / 60))} minuti.",
+                    _icon("dialog-information"),
+                    6000,
+                )
+            return
+
+        self._run_scheduled_scan()
 
     def _run_scheduled_scan(self) -> None:
         # Guard "una scansione alla volta": la programmata SALTA (non si
@@ -2269,27 +2653,50 @@ X-GNOME-Autostart-enabled=true
         if self.bg_worker is not None:
             return
         if self.scan_page.worker is not None:
-            target_str = self.settings.value("schedule_target", str(Path.home()))
-            self.history_manager.add_entry("Programmata (saltata)", target_str, 0, 0, 0)
-            if hasattr(self, "history_page"):
-                self.history_page.refresh()
-            self.tray_icon.showMessage(
-                APP_NAME,
-                "Scansione programmata saltata: un'altra scansione è già in corso.",
-                _icon("dialog-information"),
-                4000,
-            )
+            # La scadenza resta valida: il controllo al minuto la riproverà
+            # appena la manuale finisce. Cronologia e notifica una volta per
+            # scadenza, non a ogni controllo.
+            if not self._schedule_skip_noted:
+                self._schedule_skip_noted = True
+                target_str = self.settings.value("schedule_target", str(Path.home()))
+                self.history_manager.add_entry("Programmata (rinviata)", target_str, 0, 0, 0)
+                if hasattr(self, "history_page"):
+                    self.history_page.refresh()
+                self.tray_icon.showMessage(
+                    APP_NAME,
+                    "Scansione programmata rinviata: un'altra scansione è in corso. "
+                    "Partirà appena termina.",
+                    _icon("dialog-information"),
+                    4000,
+                )
             return
 
         target_str = self.settings.value("schedule_target", str(Path.home()))
         target = Path(target_str)
-        if not target.exists(): return
+        if not target.exists():
+            # Prima: ritorno silenzioso, e la scansione non partiva mai
+            # senza che nessuno lo sapesse.
+            if not self._schedule_missing_noted:
+                self._schedule_missing_noted = True
+                self.tray_icon.showMessage(
+                    APP_NAME,
+                    f"Scansione programmata non eseguita: {target_str} non esiste. "
+                    "Controlla la cartella in Pianificazione.",
+                    _icon("dialog-warning"),
+                    8000,
+                )
+            return
+
+        self._schedule_late_noted = False
+        self._schedule_skip_noted = False
+        self._schedule_missing_noted = False
 
         self.tray_icon.showMessage(
             APP_NAME, "Avvio scansione automatica in background...", _app_icon(), 3000
         )
         self.scheduler_page.update_progress(f"In corso dal {datetime.now():%H:%M} — avvio…")
-        self._bg_result_lines = []
+        self._bg_log_close()
+        self._bg_log_path = None
         self.bg_worker = ScanWorker(
             socket_path=self.settings.value("socket_path", DEFAULT_SOCKET),
             target=target,
@@ -2305,6 +2712,7 @@ X-GNOME-Autostart-enabled=true
         self.bg_worker.progress.connect(self._on_bg_progress)
         self.bg_worker.finished_scan.connect(self._on_bg_finished)
         self.bg_worker.quarantined.connect(self._on_quarantine_changed)
+        self.bg_worker.quarantine_outcome.connect(self._on_bg_quarantine_outcome)
         self.bg_worker.start()
 
     def _on_bg_result(self, result: ScanResult) -> None:
@@ -2312,11 +2720,52 @@ X-GNOME-Autostart-enabled=true
         # "Copia log" dalla GUI e i file di log persistente sono leggibili
         # allo stesso modo.
         if result.infected:
-            self._bg_result_lines.append(f"INFETTO — {result.path} ({result.signature})")
+            self._bg_log_write(f"INFETTO — {result.path} ({result.signature})")
         elif result.too_large:
-            self._bg_result_lines.append(f"NON VERIFICATO (troppo grande) — {result.path}")
+            self._bg_log_write(f"NON VERIFICATO (troppo grande) — {result.path}")
         elif result.status == "ERROR":
-            self._bg_result_lines.append(f"ERRORE — {result.path}: {result.signature}")
+            self._bg_log_write(f"ERRORE — {result.path}: {result.signature}")
+
+    def _bg_log_write(self, line: str) -> None:
+        """Scrive una riga nel log della scansione programmata, aprendolo
+        alla prima riga (una scansione senza nulla da segnalare non lascia
+        file vuoti). File 0600 in directory 0700, vedi private_files.py.
+        line_buffering: ogni riga arriva su disco subito, così un crash
+        della GUI a metà scansione non perde quanto già trovato."""
+        if self._bg_log_fh is None:
+            if self._bg_log_path is not None:
+                return  # apertura già fallita in questa scansione
+            try:
+                logs_dir = ensure_private_dir(DEFAULT_LOGS_DIR)
+                self._bg_log_path = logs_dir / f"scheduled-{datetime.now():%Y%m%d-%H%M%S}.log"
+                self._bg_log_fh = open_private_for_write(self._bg_log_path)
+                self._bg_log_fh.reconfigure(line_buffering=True)
+            except OSError:
+                # Meglio niente log che far fallire il flusso; il path
+                # resta impostato come marcatore "già tentato".
+                self._bg_log_path = self._bg_log_path or DEFAULT_LOGS_DIR
+                self._bg_log_fh = None
+                return
+        try:
+            self._bg_log_fh.write(line + "\n")
+        except OSError:
+            pass
+
+    def _bg_log_close(self) -> Path | None:
+        """Chiude il log corrente; restituisce il suo percorso se esiste."""
+        fh, self._bg_log_fh = self._bg_log_fh, None
+        if fh is None:
+            return None
+        try:
+            fh.close()
+        except OSError:
+            pass
+        return self._bg_log_path
+
+    def _on_bg_quarantine_outcome(self, path: str, outcome: str, detail: str) -> None:
+        line = _outcome_line(outcome, detail)
+        if line is not None:
+            self._bg_log_write(line)
 
     def _on_bg_progress(self, scanned: int, infections: int, errors: int, too_large: int) -> None:
         # Visibilità della scansione background: label in Pianificazione +
@@ -2342,17 +2791,10 @@ X-GNOME-Autostart-enabled=true
         # di una scansione background non vive in nessuna lista UI, quindi
         # va su disco — indicizzato dalla voce di cronologia (campo
         # log_file, visibile come tooltip in Cronologia).
-        log_path = None
-        if self._bg_result_lines:
-            try:
-                # Directory 0700 e file 0600: i log elencano percorsi,
-                # firme e file infetti (vedi private_files.py).
-                logs_dir = ensure_private_dir(DEFAULT_LOGS_DIR)
-                log_path = logs_dir / f"scheduled-{datetime.now():%Y%m%d-%H%M%S}.log"
-                write_private_text(log_path, "\n".join(self._bg_result_lines) + "\n")
-            except OSError:
-                log_path = None  # meglio niente log che far fallire il flusso
-            self._bg_result_lines = []
+        # Il log è stato scritto riga per riga durante la scansione
+        # (_bg_log_write): qui si chiude e basta.
+        log_path = self._bg_log_close()
+        self._bg_log_path = None
 
         # Rotazione: tieni solo i MAX_BG_LOG_FILES più recenti (i nomi
         # sono ordinabili lessicograficamente per via del formato %Y%m%d).
@@ -2384,6 +2826,15 @@ X-GNOME-Autostart-enabled=true
         if log_path:
             summary += f"\nLog: {log_path}"
         self.scheduler_page.update_progress(summary)
+
+        # L'esecuzione conta solo se arriva alla fine (una scansione
+        # interrotta dalla chiusura della GUI viene recuperata al prossimo
+        # avvio) e con clamd attivo: con il demone fermo la scansione
+        # "finisce" subito senza aver verificato nulla, e va ritentata.
+        if not self.clamd_health.is_down:
+            self.settings.setValue("schedule_last_run", time.time())
+            self.settings.sync()
+        self._update_next_run_label()
 
         # Rilascio differito, vedi _retire_qthread: anche qui l'emit di
         # finished_scan è dentro run(), il thread può non essere ancora
@@ -2571,6 +3022,11 @@ X-GNOME-Autostart-enabled=true
                 f"({campione}) — probabile limite di sistema "
                 f"(fs.inotify.max_user_watches/max_user_instances)"
             )
+        if self._realtime_dropped:
+            problemi.append(
+                f"{self._realtime_dropped} file modificati in questa sessione NON verificati "
+                f"perché la coda del Real-Time era piena (limite {MAX_REALTIME_QUEUE})"
+            )
         if self._realtime_watch_truncated:
             problemi.append(
                 f"raggiunto il tetto di {self.MAX_WATCH_DIRS} cartelle sorvegliate: "
@@ -2677,32 +3133,80 @@ X-GNOME-Autostart-enabled=true
                 self._update_realtime_status_label()
 
     def _schedule_realtime_scan(self, file_path: str) -> None:
-        if file_path in self._pending_realtime_scans:
-            self._pending_realtime_scans[file_path].stop()
+        # Una nuova modifica sposta in avanti la scadenza: il file si
+        # scansiona 3s dopo l'ULTIMA scrittura, non a metà download.
+        if (file_path not in self._pending_realtime_scans
+                and len(self._pending_realtime_scans) + len(self._realtime_queue)
+                >= MAX_REALTIME_QUEUE):
+            self._note_realtime_overflow()
+            return
+        self._pending_realtime_scans[file_path] = time.monotonic() + REALTIME_DEBOUNCE_S
+        if not self._realtime_debounce_timer.isActive():
+            self._realtime_debounce_timer.start()
 
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-        timer.timeout.connect(lambda: self._queue_realtime_scan(file_path))
-        timer.start(3000)
-        self._pending_realtime_scans[file_path] = timer
+    def _flush_pending_realtime(self) -> None:
+        now = time.monotonic()
+        due = [p for p, t in self._pending_realtime_scans.items() if t <= now]
+        for p in due:
+            del self._pending_realtime_scans[p]
+            self._queue_realtime_scan(p)
+        if not self._pending_realtime_scans:
+            self._realtime_debounce_timer.stop()
 
     def _queue_realtime_scan(self, file_path: str) -> None:
-        self._pending_realtime_scans.pop(file_path, None)
-
         if not Path(file_path).exists():
             return
-
+        # Già in coda: una seconda copia non aggiunge nulla (la scansione
+        # leggerà comunque il contenuto attuale del file).
+        if file_path in self._realtime_queued:
+            return
+        if len(self._realtime_queue) >= MAX_REALTIME_QUEUE:
+            self._note_realtime_overflow()
+            return
         self._realtime_queue.append(file_path)
+        self._realtime_queued.add(file_path)
         self._process_realtime_queue()
+
+    def _note_realtime_overflow(self) -> None:
+        """Un file scartato perché la coda è piena: mai in silenzio.
+
+        Contatore di sessione nella label di stato del Real-Time, più una
+        notifica e una riga di log per episodio (fino allo svuotamento
+        della coda), non per file."""
+        self._realtime_dropped += 1
+        if not self._realtime_overflow_notified:
+            self._realtime_overflow_notified = True
+            self.realtime_page.add_outcome_entry(
+                f"Coda piena ({MAX_REALTIME_QUEUE} file): i file modificati da ora "
+                "NON vengono verificati finché la coda non si svuota", warning=True)
+            self.tray_icon.showMessage(
+                f"{APP_NAME} - Real-Time sovraccarico",
+                "Troppi file modificati in poco tempo: alcuni non verranno verificati. "
+                "Considera una scansione manuale della cartella al termine.",
+                _icon("dialog-warning"),
+                10000,
+            )
+        self._update_realtime_status_label()
 
     def _process_realtime_queue(self) -> None:
         if self.realtime_worker is not None:
             return
 
-        if not self._realtime_queue:
+        # Con clamd fermo ogni file fallirebbe: la coda si conserva e
+        # riparte da _apply_clamd_state al ritorno del demone. (La coda
+        # non ha ancora un tetto: vedi il punto "tetti di volume".)
+        if self.clamd_health.is_down:
+            self.realtime_page.set_clamd_down(True, len(self._realtime_queue))
             return
 
-        file_path = self._realtime_queue.pop(0)
+        if not self._realtime_queue:
+            # Coda svuotata: un eventuale nuovo sovraccarico è un nuovo
+            # episodio e va notificato di nuovo.
+            self._realtime_overflow_notified = False
+            return
+
+        file_path = self._realtime_queue.popleft()
+        self._realtime_queued.discard(file_path)
         self._current_realtime_target = file_path
 
         self.realtime_page.add_log_entry(Path(file_path).name, False)
@@ -2716,17 +3220,14 @@ X-GNOME-Autostart-enabled=true
         self.realtime_worker.result_ready.connect(self._on_realtime_result)
         self.realtime_worker.finished_scan.connect(self._on_realtime_finished)
         self.realtime_worker.quarantined.connect(self._on_quarantine_changed)
+        self.realtime_worker.quarantine_outcome.connect(self._on_realtime_quarantine_outcome)
         self.realtime_worker.start()
 
     def _on_realtime_result(self, result: ScanResult) -> None:
         if result.infected:
+            # La notifica parte da _on_realtime_quarantine_outcome, che
+            # arriva subito dopo e sa cosa è successo davvero al file.
             self.realtime_page.add_log_entry(Path(result.path).name, True, result.signature)
-            self.tray_icon.showMessage(
-                f"{APP_NAME} - MINACCIA RILEVATA!",
-                f"{Path(result.path).name} è infetto ed è stato messo in quarantena.",
-                _icon("emblem-virus"),
-                5000
-            )
         elif result.too_large:
             # Il file è stato accodato dalla pagina Real-Time (prima riga
             # "Analizzato" al momento dell'osservazione) ma non è stato
@@ -2736,6 +3237,38 @@ X-GNOME-Autostart-enabled=true
             self.realtime_page.add_log_entry(
                 Path(result.path).name, False, status="Non verificato (troppo grande)"
             )
+        elif result.status == "ERROR":
+            # Prima questo caso non era gestito: la riga restava
+            # "Analizzato" per un file che clamd non ha mai visto.
+            self.realtime_page.add_log_entry(
+                Path(result.path).name, False, status="Non verificato (errore)"
+            )
+            # Può essere clamd appena morto: verifica subito invece di
+            # aspettare il controllo periodico (con un tetto di frequenza).
+            if self._forced_ping.ready():
+                self._start_ping(self.settings.value("socket_path", DEFAULT_SOCKET))
+
+    def _on_realtime_quarantine_outcome(self, path: str, outcome: str, detail: str) -> None:
+        name = Path(path).name
+        if outcome == "quarantined":
+            title = f"{APP_NAME} - MINACCIA RILEVATA!"
+            text = f"{name} è infetto ed è stato messo in quarantena."
+            icon = _icon("emblem-virus")
+        elif outcome == "report_only":
+            title = f"{APP_NAME} - File sospetto"
+            text = f"{name}: rilevato ma NON messo in quarantena ({detail}). Verificalo manualmente."
+            icon = _icon("dialog-warning", "emblem-virus")
+        else:
+            title = f"{APP_NAME} - MINACCIA RILEVATA!"
+            text = f"{name} è infetto ma la quarantena è FALLITA: {detail}"
+            icon = _icon("data-error", "emblem-virus")
+        self.tray_icon.showMessage(title, text, icon, 10000 if outcome != "quarantined" else 5000)
+        if outcome == "quarantined":
+            self.realtime_page.add_outcome_entry("messo in quarantena", warning=False)
+        elif outcome == "report_only":
+            self.realtime_page.add_outcome_entry(f"NON messo in quarantena — {detail}", warning=True)
+        else:
+            self.realtime_page.add_outcome_entry(f"quarantena FALLITA — {detail}", warning=True)
 
     def _on_realtime_finished(self, scanned: int, infections: int, errors: int, too_large: int = 0) -> None:
         self.history_manager.add_entry(
@@ -2760,30 +3293,113 @@ X-GNOME-Autostart-enabled=true
         potrebbe restare appeso fino a 30s se il socket esiste ma clamd
         non risponde.
         """
-        self._ping_worker = PingWorker(socket_path, self)
-        self._ping_worker.result_ready.connect(
-            lambda alive: self._on_ping_result(socket_path, alive)
-        )
-        self._ping_worker.start()
+        self._start_ping(socket_path, startup=True)
 
-    def _on_ping_result(self, socket_path: str, alive: bool) -> None:
-        if not alive:
-            QMessageBox.warning(
-                self,
-                "clamd non raggiungibile",
-                f"Non riesco a contattare clamd su {socket_path}.\n"
-                "Verifica che il servizio clamav-daemon sia attivo.",
-            )
+    def _periodic_clamd_check(self) -> None:
+        self._start_ping(self.settings.value("socket_path", DEFAULT_SOCKET))
+
+    def _start_ping(self, socket_path: str, startup: bool = False) -> None:
+        # Un ping alla volta: se il precedente è ancora in corso (clamd
+        # lento o appeso) il suo esito arriverà comunque.
+        if self._ping_worker is not None:
+            return
+        # Il ping di avvio mantiene il timeout di default del client, come
+        # prima; quelli periodici e forzati usano un timeout breve.
+        timeout = None if startup else CLAMD_PING_TIMEOUT_S
+        worker = PingWorker(socket_path, self, timeout=timeout)
+        # Con un ping al minuto i worker con parent si accumulerebbero come
+        # figli della finestra per tutta la sessione: deleteLater a thread
+        # terminato li distrugge. È sicuro perché la ownership è del C++
+        # (parent) e finished arriva dopo la fine di run().
+        worker.finished.connect(worker.deleteLater)
+        worker.result_ready.connect(
+            lambda alive: self._on_ping_result(socket_path, alive, startup)
+        )
+        self._ping_worker = worker
+        worker.start()
+
+    def _on_ping_result(self, socket_path: str, alive: bool, startup: bool = False) -> None:
         # A differenza degli altri worker questo NON passa da
         # _retire_qthread, ed è deliberato: PingWorker è l'unico creato
-        # con un parent Qt (vedi _check_clamd, `PingWorker(socket_path,
-        # self)`). Con un parent la ownership dell'oggetto passa al C++,
-        # quindi la caduta del riferimento Python qui sotto non distrugge
-        # l'oggetto sottostante e il qFatal "Destroyed while thread is
-        # still running" non può scattare.
+        # con un parent Qt (vedi _start_ping, `PingWorker(socket_path,
+        # self, ...)`). Con un parent la ownership dell'oggetto passa al
+        # C++, quindi la caduta del riferimento Python qui sotto non
+        # distrugge l'oggetto sottostante e il qFatal "Destroyed while
+        # thread is still running" non può scattare.
         #
         # Il corollario: se qualcuno togliesse quel `self`, o copiasse
         # questo schema per un worker nuovo senza parent, il crash
         # tornerebbe silenziosamente. tests/test_qthread_retire.py
         # verifica che il parent resti.
+        #
+        # Azzerato PRIMA del QMessageBox: la finestra modale gira un event
+        # loop annidato, e nel frattempo il timer periodico deve poter
+        # ripartire invece di trovare un ping "ancora in corso".
         self._ping_worker = None
+
+        transition = self.clamd_health.observe(alive, immediate=startup)
+        self._apply_clamd_state()
+
+        if startup:
+            if not alive:
+                self._startup_update_pending = False
+                self._apply_db_info(None)
+                QMessageBox.warning(
+                    self,
+                    "clamd non raggiungibile",
+                    f"Non riesco a contattare clamd su {socket_path}.\n"
+                    "Verifica che il servizio clamav-daemon sia attivo.",
+                )
+            else:
+                self._probe_db_info(socket_path)
+            return
+
+        if transition is Transition.WENT_DOWN:
+            self._apply_db_info(None)
+            self.tray_icon.showMessage(
+                f"{APP_NAME} - clamd non risponde",
+                "L'antivirus è fermo: il Real-Time è sospeso finché clamd "
+                "non torna raggiungibile. Verifica il servizio clamav-daemon.",
+                _icon("dialog-warning", "data-error"),
+                10000,
+            )
+        elif transition is Transition.CAME_BACK:
+            self.tray_icon.showMessage(
+                f"{APP_NAME} - clamd di nuovo attivo",
+                "La protezione è ripristinata; i file in attesa vengono analizzati ora.",
+                _icon("emblem-checked"),
+                5000,
+            )
+            self._probe_db_info(socket_path)
+            self._process_realtime_queue()
+
+    def _apply_clamd_state(self) -> None:
+        """Icona e tooltip della tray, banner del Real-Time: persistenti
+        finché lo stato non cambia, a differenza delle notifiche."""
+        down = self.clamd_health.is_down
+        self.tray_icon.setIcon(_icon("dialog-warning", "data-error") if down else _app_icon())
+        self._reset_tray_tooltip()
+        self.realtime_page.set_clamd_down(down, len(self._realtime_queue) if down else 0)
+
+    def _probe_db_info(self, socket_path: str) -> None:
+        if self._db_info_worker is not None:
+            return
+        self._db_info_worker = DbInfoWorker(socket_path)
+        self._db_info_worker.result_ready.connect(self._on_db_info)
+        self._db_info_worker.start()
+
+    def _on_db_info(self, info: DbInfo | None) -> None:
+        self._apply_db_info(info)
+
+        enabled, self._startup_update_pending = self._startup_update_pending, False
+        if should_update_on_startup(info, enabled):
+            self.update_page._start_update()
+
+        # Rilascio differito, vedi _retire_qthread.
+        worker, self._db_info_worker = self._db_info_worker, None
+        if worker is not None:
+            _retire_qthread(worker)
+
+    def _apply_db_info(self, info: DbInfo | None) -> None:
+        self.update_page.set_db_info(info)
+        self.settings_page.set_db_info(info)

@@ -273,7 +273,7 @@ Questa versione risolve una serie di problemi di sicurezza emersi da un audit de
 
 - **Socket IPC single-instance ristretto e validato.** Il QLocalServer usa UserAccessOption: senza, su Linux i permessi del socket dipendono dallo umask del processo e potrebbero risultare accessibili ad altri utenti del sistema. Il percorso ricevuto dal socket è ora limitato in dimensione (evita payload enormi pensati come DoS) e decodificato in modo robusto (un payload UTF-8 malformato viene ignorato, non fa propagare eccezioni). Dalla 0.1.7 il socket non è più in `/tmp`: vedi la sezione precedente.
 
-- **Aggiornamento database senza stringa di shell costruita a runtime.** L'operazione via pkexec non passa più una stringa di comandi costruita in Python a sh -c: esegue uno script fisso spedito col pacchetto (klamav_py/gui/resources/freshclam-update.sh). Elimina alla radice la possibilità che un futuro parametro reso configurabile finisca interpolato in una riga di shell eseguita come root.
+- **Aggiornamento database delegato al servizio di sistema.** Il pulsante "Aggiorna Database" esegue solo `pkexec /usr/bin/systemctl restart clamav-freshclam.service`, con argv fisso e binari verificati root-owned: freshclam scarica le firme come utente `clamav`, con il sandboxing dell'unità della distribuzione, invece di girare come root. L'esito si verifica dalla versione del DB riportata da clamd; all'avvio l'aggiornamento parte solo se le firme hanno più di 36 ore.
 
 - **Rigenerazione cache servizi KDE senza shell.** `os.system()` è stato sostituito da `subprocess.run()` con argv esplicito (nessuna shell).
 

@@ -46,6 +46,36 @@ from PySide6.QtCore import QStandardPaths
 
 IPC_SOCKET_NAME = "klamav-py-ipc"
 
+# Payload IPC: uno o più percorsi UTF-8 separati da NUL, l'unico byte che
+# non può comparire in un percorso Linux. Un payload senza NUL è il
+# formato precedente (un solo percorso): resta valido. 256 KiB bastano per
+# qualche migliaio di file selezionati in Dolphin con %F; oltre, i
+# percorsi in eccesso non vengono inviati e l'utente lo viene a sapere.
+IPC_SEPARATOR = b"\0"
+IPC_MAX_PAYLOAD_BYTES = 256 * 1024
+
+
+def encode_targets(paths, max_bytes: int = IPC_MAX_PAYLOAD_BYTES) -> tuple[bytes, int]:
+    """
+    Codifica i percorsi per l'IPC. Ritorna (payload, esclusi): il payload
+    resta SEMPRE strettamente sotto max_bytes e contiene solo percorsi
+    completi, così il server può trattare "letti max_bytes" come
+    sovraccarico senza rischiare di interpretare un percorso troncato.
+    """
+    paths = list(paths)
+    parts: list[bytes] = []
+    size = 0
+    for p in paths:
+        enc = os.fsencode(str(p))
+        if not enc or IPC_SEPARATOR in enc:
+            continue
+        extra = len(enc) + (1 if parts else 0)
+        if size + extra >= max_bytes:
+            break
+        parts.append(enc)
+        size += extra
+    return IPC_SEPARATOR.join(parts), len(paths) - len(parts)
+
 # Timeout del client: la connessione è locale, un'istanza viva risponde
 # in pochi millisecondi. Lo stesso ordine di grandezza del vecchio
 # waitForConnected(500).

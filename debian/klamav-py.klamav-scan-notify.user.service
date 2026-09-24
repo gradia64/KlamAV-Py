@@ -1,0 +1,17 @@
+[Unit]
+Description=Notifica l'esito anomalo della scansione klamav-py
+
+[Service]
+Type=oneshot
+# Attivata da OnFailure= di klamav-scan.service; systemd passa l'esito in
+# MONITOR_SERVICE_RESULT / MONITOR_EXIT_STATUS. Si notifica solo un'uscita
+# con codice: un'interruzione per segnale (spegnimento, logout, stop
+# manuale) non è un problema da segnalare.
+# "$$" diventa "$" per la shell: le variabili le espande sh, non systemd.
+ExecStart=/bin/sh -c 'case "$$MONITOR_SERVICE_RESULT:$$MONITOR_EXIT_STATUS" in \
+    exit-code:1) msg="La scansione programmata ha trovato file infetti." ;; \
+    exit-code:*) msg="La scansione programmata non è riuscita." ;; \
+    *) exit 0 ;; \
+  esac; \
+  exec notify-send --app-name=KlamAV-Py --urgency=critical --icon=security-low \
+    "KlamAV-Py" "$$msg Dettagli: journalctl --user -u klamav-scan.service"'

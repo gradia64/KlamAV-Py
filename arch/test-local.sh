@@ -171,7 +171,7 @@ ls /usr/lib/systemd/user/ | grep klamav
 if [ "$KLAMAV_TEST_GUI" = "1" ]; then
     echo "==> Installo pyside6 (download pesante, qualche minuto)"
     pacman -S --noconfirm pyside6 >/dev/null 2>&1
-    python -c "from klamav_py.gui import app, main_window, scan_worker, update_worker, ping_worker; print(\"import moduli GUI: ok\")"
+    python -c "from klamav_py.gui import app, main_window, scan_worker, freshclam_restart_worker, db_info_worker, ping_worker; print(\"import moduli GUI: ok\")"
     set +e
     QT_QPA_PLATFORM=offscreen timeout 10 klamav-py-gui >/dev/null 2>&1
     rc=$?

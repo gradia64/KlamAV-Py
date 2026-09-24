@@ -20,14 +20,17 @@ from .main_window import (
     MainWindow,
     _migrate_legacy_settings,
 )
-from .single_instance import ipc_socket_path, notify_running_instance
+from .single_instance import encode_targets, ipc_socket_path, notify_running_instance
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="klamav-py-gui")
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     parser.add_argument("--quarantine-dir", type=Path, default=DEFAULT_QUARANTINE_DIR)
-    parser.add_argument("--scan-target", type=Path, default=None)
+    # Uno o più percorsi: il servicemenu di Dolphin passa %F, cioè tutta
+    # la selezione in un'unica invocazione (con %f ogni file selezionato
+    # lanciava un processo, e una scansione, separati).
+    parser.add_argument("--scan-target", type=Path, nargs="+", action="extend", default=None)
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
@@ -59,7 +62,15 @@ def main() -> int:
     # per l'attacco (squatting di /tmp/klamav_py_ipc da parte di un altro
     # utente locale) che questo schema chiude.
     ipc_path = ipc_socket_path()
-    payload = str(args.scan_target).encode("utf-8") if args.scan_target else None
+    payload = None
+    if args.scan_target:
+        payload, esclusi = encode_targets(args.scan_target)
+        if esclusi:
+            print(
+                f"{APP_NAME}: selezione troppo grande per l'invio all'istanza attiva, "
+                f"{esclusi} elementi non inviati: scansiona la cartella che li contiene.",
+                file=sys.stderr,
+            )
     if ipc_path is not None and notify_running_instance(ipc_path, payload):
         # Un'istanza dello stesso utente è attiva e ha ricevuto il target.
         return 0

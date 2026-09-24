@@ -446,6 +446,26 @@ class ClamdClient:
             os.close(fd)
             raise
 
+    @staticmethod
+    def _drop_page_cache(fh) -> None:
+        """
+        Il file è stato letto una sola volta per inviarlo a clamd: le sue
+        pagine in cache non servono più. Senza questo una scansione della
+        home riempie la page cache (GB: è ciò che systemd riporta come
+        "memory peak" della unit, con anon di pochi MB) e spinge fuori
+        quella del desktop.
+
+        Effetto collaterale noto: DONTNEED scarta le pagine a prescindere
+        da chi le aveva caricate, quindi un file in uso da un'altra
+        applicazione verrà riletto dal disco alla prossima richiesta.
+
+        Best effort: un errore qui non tocca il risultato della scansione.
+        """
+        try:
+            os.posix_fadvise(fh.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        except (OSError, AttributeError, ValueError):
+            pass
+
     def _should_skip_entry(self, target: Path) -> bool:
         """
         Filtro su lstat() PRIMA di qualsiasi apertura: True se l'entry va
@@ -566,8 +586,11 @@ class ClamdClient:
                 sock.sendall(b"zINSTREAM\0")
                 try:
                     with self._open_regular(target) as fh:
-                        while chunk := fh.read(CHUNK_SIZE):
-                            sock.sendall(struct.pack("!L", len(chunk)) + chunk)
+                        try:
+                            while chunk := fh.read(CHUNK_SIZE):
+                                sock.sendall(struct.pack("!L", len(chunk)) + chunk)
+                        finally:
+                            self._drop_page_cache(fh)
                     sock.sendall(struct.pack("!L", 0))  # chunk di lunghezza zero = fine stream
                 except (BrokenPipeError, ConnectionResetError):
                     # clamd ha chiuso la connessione mentre stavamo ancora
@@ -707,6 +730,10 @@ class _ClamdSession:
                 # scan_stream, che la ricrea e classifica il risultato
                 # con la dimensione del file.
                 pass
+            finally:
+                # Anche sul rifiuto a metà file (StreamMaxLength): le
+                # pagine lette fin lì non servono più.
+                self._client._drop_page_cache(fh)
 
         raw = self._read_reply()
         rest = self._client._strip_session_id(raw)
