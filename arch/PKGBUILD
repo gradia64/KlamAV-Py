@@ -33,7 +33,7 @@ install=klamav-py.install
 # Aggiornare pkgver a ogni rilascio, insieme a klamav_py/__init__.py,
 # debian/changelog e CHANGELOG.md (tests/test_changelog.py lo verifica).
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('468b91b17f3b7f3b0ee3c5e488547e56914b487bdc53aeb95ab5f943c2279082')
+sha256sums=('d7415e3376e2006538e66771fa612608fa8ec92a2c2b9e69a1a38afc7b139ced')
 
 build() {
   cd "$srcdir/KlamAV-Py-$pkgver"
