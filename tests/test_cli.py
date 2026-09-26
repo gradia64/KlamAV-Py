@@ -66,6 +66,10 @@ def test_cmd_scan_conta_too_large_separatamente(tmp_path, monkeypatch, capsys):
         yield ScanResult(path="/tmp/rotto.txt", status="ERROR", signature="Permission denied")
 
     monkeypatch.setattr(ClamdClient, "scan_stream", fake_scan_stream)
+    # cmd_scan fa un PING preliminare prima di scansionare (un clamd
+    # irraggiungibile esce con 2 invece di dare N errori e uscita 0). Senza
+    # questa riga il test passava solo sulle macchine con clamd attivo.
+    monkeypatch.setattr(ClamdClient, "ping", lambda self: True)
 
     parser = build_parser()
     args = parser.parse_args(["scan", str(tmp_path), "--quiet"])
