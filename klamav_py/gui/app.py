@@ -13,10 +13,10 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtNetwork import QLocalServer
 
+from ..cli import add_endpoint_arguments
 from .main_window import (
     APP_NAME,
     DEFAULT_QUARANTINE_DIR,
-    DEFAULT_SOCKET,
     MainWindow,
     _migrate_legacy_settings,
 )
@@ -25,7 +25,10 @@ from .single_instance import encode_targets, ipc_socket_path, notify_running_ins
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="klamav-py-gui")
-    parser.add_argument("--socket", default=DEFAULT_SOCKET)
+    # --socket/--tcp come nella CLI (stesso gruppo mutuamente esclusivo,
+    # stessi controlli): valori iniziali, usati solo per le chiavi che le
+    # Impostazioni non hanno ancora salvato.
+    add_endpoint_arguments(parser, default=None)
     parser.add_argument("--quarantine-dir", type=Path, default=DEFAULT_QUARANTINE_DIR)
     # Uno o più percorsi: il servicemenu di Dolphin passa %F, cioè tutta
     # la selezione in un'unica invocazione (con %f ogni file selezionato
@@ -108,7 +111,7 @@ def main() -> int:
     # ------------------------------------
 
     window = MainWindow(
-        socket_path=args.socket,
+        endpoint=args.endpoint,
         quarantine_dir=args.quarantine_dir,
         scan_target=args.scan_target
     )

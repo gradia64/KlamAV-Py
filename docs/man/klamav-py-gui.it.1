@@ -1,0 +1,168 @@
+.\" -*- coding: utf-8 -*-
+.\" klamav-py-gui(1) — pagina italiana
+.\"
+.\" Convenzioni di manutenzione: come klamav-py(1).
+.\" Coerenza con il parser di klamav_py/gui/app.py e con la pagina
+.\" inglese verificata da tests/test_manpage.py.
+.\"
+.TH KLAMAV-PY-GUI 1 "2026-09-26" "KlamAV-Py 0.1.10" "Comandi utente"
+.\" Sillabazione disattivata: i pattern italiani non sono garantiti ovunque
+.nh
+.
+.SH NOME
+klamav-py-gui \- interfaccia grafica di KlamAV-Py per il demone ClamAV
+.
+.SH SINTASSI
+.B klamav-py-gui
+.RB [ \-\-socket
+.IR percorso ]
+.RB [ \-\-tcp
+.IR host [: porta ]]
+.RB [ \-\-quarantine\-dir
+.IR directory ]
+.RB [ \-\-scan\-target
+.IR percorso ...]
+.
+.SH DESCRIZIONE
+.B klamav-py-gui
+è l'interfaccia grafica di KlamAV-Py: scansioni manuali e programmate,
+gestione della quarantena, aggiornamento delle firme e integrazione con
+il menu contestuale di Dolphin.
+Come
+.BR klamav-py (1),
+comunica con
+.BR clamd (8)
+tramite il suo protocollo nativo.
+.PP
+L'applicazione resta attiva nell'area di notifica anche chiudendo la
+finestra.
+Con l'impostazione di avvio nell'area di notifica, parte senza mostrare
+la finestra, salvo quando riceve percorsi da scansionare.
+.PP
+È ammessa una sola istanza per utente: un secondo avvio inoltra i
+percorsi di
+.B \-\-scan\-target
+all'istanza già attiva e termina subito.
+.
+.SH OPZIONI
+.BR \-\-socket ,
+.B \-\-tcp
+e
+.B \-\-quarantine\-dir
+valgono solo finché le Impostazioni non contengono un valore salvato:
+dopo il primo salvataggio prevale quello delle Impostazioni.
+.TP
+.BI \-\-socket " percorso"
+Socket Unix di clamd.
+Predefinito:
+.IR /run/clamav/clamd.ctl .
+.TP
+.BI \-\-tcp " host\fR[\fP:porta\fR]\fP"
+Collegati a clamd via TCP invece che tramite socket Unix
+(porta predefinita 3310).
+Incompatibile con
+.BR \-\-socket .
+Vedere
+.B SICUREZZA
+in
+.BR klamav-py (1)
+prima di usarla.
+.TP
+.BI \-\-quarantine\-dir " directory"
+Directory di quarantena.
+Predefinita:
+.IR \%~/.local/share/klamav-py/quarantine .
+.TP
+.BI \-\-scan\-target " percorso\fR...\fP"
+Scansiona uno o più file o directory all'avvio o, se l'applicazione è già
+in esecuzione, li inoltra all'istanza attiva.
+Il menu contestuale di Dolphin la usa passando l'intera selezione in una
+sola invocazione.
+Se la selezione è troppo grande per l'inoltro, gli elementi in eccesso non
+vengono inviati e un avviso su standard error ne riporta il numero: in
+quel caso conviene scansionare la cartella che li contiene.
+.
+.SH AMBIENTE
+.TP
+.B XDG_RUNTIME_DIR
+Directory del socket di istanza singola.
+Se è assente o non valida, l'applicazione parte comunque ma senza
+controllo di istanza singola, e lo segnala.
+.TP
+.B XDG_CONFIG_HOME
+Base del file di configurazione (predefinita
+.IR ~/.config ).
+.
+.SH FILE
+.TP
+.I \%~/.config/KlamAV-Py/KlamAV-Py.conf
+Impostazioni.
+Le impostazioni della versione precedente, salvate con il nome KlamAV,
+vengono migrate automaticamente al primo avvio.
+.TP
+.I \%~/.config/systemd/user/klamav-scan.service.d/50-klamav-py.conf
+Drop-in generato dalle Impostazioni quando la directory di quarantena o
+la connessione a clamd della scansione programmata differiscono dai
+valori predefiniti; viene rimosso quando entrambe tornano ai predefiniti.
+Il file è riconosciuto dall'intestazione
+.RI \(lq "Generato da KlamAV-Py" \(rq:
+non va modificato a mano, e un file con lo stesso nome privo di tale
+intestazione non viene mai toccato.
+Gli altri drop-in della unit che impostano
+.B ExecStart
+(per esempio un
+.I override.conf
+creato con
+.BR "systemctl \-\-user edit" )
+o, con TCP,
+.BR PrivateNetwork ,
+vengono segnalati al salvataggio e nella pagina Pianificazione, perché
+rendono inefficaci queste impostazioni o ne vengono sostituiti.
+.TP
+.I \%/usr/share/applications/klamav-py.desktop
+Voce di menu; il suo nome è anche l'identificativo dell'applicazione
+usato da Wayland e KDE per abbinare finestra e icona.
+.
+.SH SICUREZZA
+.SS Istanza singola
+Il socket di istanza singola risiede nella directory runtime dell'utente,
+mai in
+.IR /tmp ,
+ed è accessibile solo al proprietario; l'identità del processo in
+ascolto viene verificata prima di inviargli dati.
+Se il socket non può essere creato, l'applicazione parte comunque con un
+avviso: rifiutare l'avvio permetterebbe a chi causa il problema di
+bloccare l'antivirus.
+.
+.SS Directory di quarantena
+Valgono le regole descritte in
+.BR klamav-py (1):
+le directory volatili sono rifiutate, i file system
+.BR tmpfs " e " ramfs
+sono accettati con un avviso.
+.PP
+Il drop-in autorizza la directory risolta al momento del salvataggio: se
+un link simbolico viene poi ripuntato altrove, la sandbox non lo segue.
+Salvare di nuovo le Impostazioni rigenera il drop-in.
+.
+.SS Aggiornamento delle firme
+L'aggiornamento non esegue
+.BR freshclam (1)
+come root: riavvia l'unità di sistema tramite
+.BR pkexec (1)
+e
+.BR systemctl (1)
+con argomenti fissi e un elenco chiuso di unità ammesse.
+I binari coinvolti devono appartenere a root e non essere scrivibili da
+gruppo o altri, altrimenti l'operazione viene rifiutata.
+L'esito viene verificato rileggendo da clamd la versione del database.
+.
+.SH VEDERE ANCHE
+.BR klamav-py (1),
+.BR clamd (8),
+.BR freshclam (1),
+.BR pkexec (1)
+.PP
+.UR https://github.com/gradia64/KlamAV-Py
+Repository del progetto
+.UE

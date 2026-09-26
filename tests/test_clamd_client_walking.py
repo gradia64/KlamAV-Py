@@ -5,13 +5,17 @@ clamd_client: logica pura su filesystem temporaneo, senza clamd reale
 100 byte e soglie di 50).
 
 Attenzione: la soglia è applicata dal pre-check PRIMA di toccare clamd,
-quindi scan_stream con file tutti sotto la soglia di esclusione non
+quindi scan_stream con file tutti sopra la soglia di esclusione non
 apre mai connessioni — i test possono usare un socket inesistente.
+L'unico test che arriva davvero alla connessione azzera le attese fra i
+tentativi (RECONNECT_DELAYS), altrimenti resterebbe fermo 7 secondi.
 """
 
 from pathlib import Path
 
-from klamav_py.clamd_client import ClamdClient, ScanResult
+import pytest
+
+from klamav_py.clamd_client import ClamdClient, ClamdUnavailable, ScanResult
 
 
 def make_tree(tmp_path: Path) -> Path:
@@ -129,18 +133,22 @@ def test_scan_stream_precheck_skips_large_file_without_clamd(tmp_path):
     assert results[0].path == str(big)
 
 
-def test_scan_stream_without_precheck_does_not_fabricate_too_large(tmp_path):
-    # Senza pre-check, un file sopra (presunta) soglia viene inviato:
-    # con clamd assente il risultato è un ERROR di sessione, NON un
-    # TOO_LARGE inventato dal client (TOO_LARGE è solo di clamd vero
-    # o del pre-check, mai una supposizione su file inviati).
+def test_scan_stream_without_precheck_does_not_fabricate_too_large(tmp_path, monkeypatch):
+    # Senza pre-check il file viene inviato. Con clamd assente non nasce
+    # nessun risultato: né un TOO_LARGE inventato dal client (TOO_LARGE è
+    # solo di clamd vero o del pre-check, mai una supposizione su file
+    # inviati), né una riga ERROR per file. La scansione si interrompe con
+    # ClamdUnavailable: prima diventava un ERROR per ogni file, e una
+    # scansione che non aveva verificato nulla finiva "pulita".
     big = tmp_path / "big.bin"
     big.write_bytes(b"x" * 100)
     client = ClamdClient(unix_socket="/non/esiste/clamd.ctl")
-    results = list(client.scan_stream(big, max_stream_size=None))
-    assert len(results) == 1
-    assert results[0].status == "ERROR"
-    assert not results[0].too_large
+    monkeypatch.setattr(client, "RECONNECT_DELAYS", ())  # niente attese reali
+    results = []
+    with pytest.raises(ClamdUnavailable):
+        for r in client.scan_stream(big, max_stream_size=None):
+            results.append(r)
+    assert results == []
 
 
 def test_stream_failure_above_threshold_is_too_large(tmp_path):

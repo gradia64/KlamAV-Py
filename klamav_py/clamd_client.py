@@ -1,20 +1,30 @@
 """
 Client minimale per il demone clamd (ClamAV), protocollo nativo su socket
 Unix o TCP. Nessuna dipendenza esterna: usa direttamente il protocollo
-INSTREAM/CONTSCAN/PING di clamd invece di invocare i binari clamscan/
+INSTREAM/PING di clamd invece di invocare i binari clamscan/
 clamdscan tramite shell (è esattamente il problema di sicurezza che
 aveva klamav 0.22 in scanviewer.cpp: qui non c'è nessuna shell di mezzo,
 i path non vengono mai interpolati in una stringa di comando).
+
+Solo INSTREAM per la scansione: i byte del file viaggiano sulla
+connessione, quindi funziona uguale via socket Unix e via TCP, e clamd
+non ha bisogno di poter leggere i percorsi dell'utente. Niente
+CONTSCAN/SCAN di proposito: passano un percorso che clamd interpreta sul
+proprio filesystem, cosa che via TCP verso un'altra macchina non ha un
+significato corretto.
 
 Riferimento protocollo: clamd(8), sezione "COMMANDS".
 """
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 import socket
 import stat
 import struct
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,17 +55,170 @@ DEFAULT_SCAN_TIMEOUT = 120.0
 # Tetto alla risposta accumulata in memoria da una singola lettura.
 # Le risposte di clamd sono corte: un verdetto INSTREAM è una riga
 # (percorso + firma, al massimo qualche KB), PING/VERSION poche decine
-# di byte; il caso più voluminoso è CONTSCAN su una directory, che
-# restituisce una riga per file — da qui 1 MiB, largo per qualunque uso
-# legittimo. Senza tetto, un interlocutore che invia senza fermarsi fa
+# di byte. 1 MiB è quindi un margine di vari ordini di grandezza sopra
+# qualunque risposta legittima, e resta piccolo come memoria. Senza
+# tetto, un interlocutore che invia senza fermarsi fa
 # crescere il buffer fino a esaurire la memoria: non è il clamd di
 # sistema (è di root, e chi lo controlla ha già vinto), ma lo è un clamd
 # remoto via TCP o un socket in un percorso configurabile dall'utente.
 MAX_REPLY_BYTES = 1024 * 1024
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+DEFAULT_SOCKET = "/run/clamav/clamd.ctl"
+DEFAULT_TCP_PORT = 3310
+TRANSPORTS = ("unix", "tcp")
+
+_BAD_HOST_CHARS = re.compile(r"[\s\x00-\x1f\x7f/\[\]]")
+
+
+@dataclass(frozen=True)
+class ClamdEndpoint:
+    """
+    Dove si trova clamd: socket Unix oppure TCP. Unico punto del progetto
+    che costruisce un ClamdClient (new_client()), così aggiungere un
+    trasporto non significa ritrovare cinque punti diversi (worker di
+    scansione, ping, versione del database, Real-Time, CLI) in cui
+    dimenticarne un ramo.
+
+    Il trasporto è SEMPRE esplicito, mai dedotto ("host non vuoto quindi
+    TCP"): una configurazione sbagliata deve fallire in modo visibile, e
+    non esiste un ripiego automatico fra i due. Un ripiego silenzioso
+    verso TCP, dove i file viaggiano in chiaro, sarebbe di per sé un
+    peggioramento di sicurezza.
+
+    Immutabile e validato alla costruzione: un ClamdEndpoint esistente è
+    sempre utilizzabile così com'è.
+    """
+
+    transport: str = "unix"
+    unix_socket: str = DEFAULT_SOCKET
+    tcp_host: str = ""
+    tcp_port: int = DEFAULT_TCP_PORT
+
+    def __post_init__(self) -> None:
+        if self.transport not in TRANSPORTS:
+            raise ValueError(f"trasporto sconosciuto: {self.transport!r} (ammessi: unix, tcp)")
+        # bool è una sottoclasse di int: True non è una porta.
+        if isinstance(self.tcp_port, bool) or not isinstance(self.tcp_port, int):
+            raise ValueError(f"porta non valida: {self.tcp_port!r}")
+        if not 1 <= self.tcp_port <= 65535:
+            raise ValueError(f"porta fuori intervallo (1-65535): {self.tcp_port}")
+        if self.transport == "unix":
+            if not self.unix_socket or _CONTROL_CHARS.search(self.unix_socket):
+                raise ValueError("percorso del socket Unix vuoto o non valido")
+        else:
+            if not self.tcp_host:
+                raise ValueError("host TCP non indicato")
+            if _BAD_HOST_CHARS.search(self.tcp_host):
+                hint = ""
+                if "/" in self.tcp_host:
+                    hint = " (sembra un percorso: per un socket Unix usa --socket)"
+                raise ValueError(f"host TCP non valido: {self.tcp_host!r}{hint}")
+            if ":" in self.tcp_host:
+                # I due punti sono ammessi solo negli indirizzi IPv6. Senza
+                # questo controllo "127.0.0.1:3310" scritto nel campo host
+                # veniva accettato come nome, mostrato come
+                # "[127.0.0.1:3310]:3310" e fallito solo alla risoluzione.
+                try:
+                    ipaddress.IPv6Address(self.tcp_host)
+                except ValueError:
+                    raise ValueError(
+                        f"host TCP non valido: {self.tcp_host!r} contiene ':' ma non è "
+                        "un indirizzo IPv6. La porta va indicata a parte: nel campo "
+                        "Porta delle Impostazioni, o come HOST:PORTA con --tcp."
+                    ) from None
+
+    @classmethod
+    def unix(cls, path: str = DEFAULT_SOCKET) -> "ClamdEndpoint":
+        return cls(transport="unix", unix_socket=str(path))
+
+    @classmethod
+    def tcp(cls, host: str, port: int = DEFAULT_TCP_PORT) -> "ClamdEndpoint":
+        return cls(transport="tcp", tcp_host=host, tcp_port=port)
+
+    @classmethod
+    def parse_cli(cls, value: str) -> "ClamdEndpoint":
+        """
+        Endpoint TCP da HOST, HOST:PORTA, [IPV6] o [IPV6]:PORTA.
+
+        Un indirizzo IPv6 senza parentesi quadre (più di un ":") è preso
+        interamente come host con la porta predefinita: "::1" non va
+        spezzato in host "::" e porta 1. Per indicare la porta con IPv6
+        servono le parentesi, come negli URL.
+        """
+        if value.startswith("["):
+            host, sep, rest = value[1:].partition("]")
+            if not sep:
+                raise ValueError(f"parentesi quadra non chiusa in {value!r}")
+            if rest and not rest.startswith(":"):
+                raise ValueError(f"atteso ':PORTA' dopo ']' in {value!r}")
+            port_text = rest[1:] if rest else None
+        elif value.count(":") == 1:
+            host, port_text = value.split(":")
+        else:
+            host, port_text = value, None
+
+        if port_text is None:
+            port = DEFAULT_TCP_PORT
+        elif port_text.isascii() and port_text.isdigit():
+            port = int(port_text)
+        else:
+            # Niente int() diretto: accetterebbe " 80", "+80", "٨٠".
+            raise ValueError(f"porta non valida: {port_text!r}")
+        return cls.tcp(host, port)
+
+    @property
+    def is_tcp(self) -> bool:
+        return self.transport == "tcp"
+
+    def to_cli(self) -> str:
+        """Valore per --tcp (HOST:PORTA, [IPV6]:PORTA) o --socket (percorso):
+        parse_cli(ep.to_cli()) == ep per ogni endpoint TCP."""
+        if not self.is_tcp:
+            return self.unix_socket
+        host = f"[{self.tcp_host}]" if ":" in self.tcp_host else self.tcp_host
+        return f"{host}:{self.tcp_port}"
+
+    def describe(self) -> str:
+        """Per i messaggi: "socket /run/clamav/clamd.ctl" o "TCP host:3310"."""
+        return f"TCP {self.to_cli()}" if self.is_tcp else f"socket {self.unix_socket}"
+
+    def new_client(self, **kwargs) -> "ClamdClient":
+        """L'unico costruttore di ClamdClient del progetto."""
+        if self.is_tcp:
+            # unix_socket=None esplicito: ClamdClient ha un socket di
+            # default, e con quello valorizzato ignorerebbe l'host.
+            return ClamdClient(
+                unix_socket=None, tcp_host=self.tcp_host, tcp_port=self.tcp_port, **kwargs
+            )
+        return ClamdClient(unix_socket=self.unix_socket, **kwargs)
+
+
 class ClamdError(RuntimeError):
     """Errore di comunicazione con clamd o risposta inattesa."""
+
+
+class ClamdUnavailable(ClamdError):
+    """
+    clamd non accetta connessioni: spento, socket senza permessi, host TCP
+    sbagliato o irraggiungibile.
+
+    Distinta dagli errori su un singolo file: quelli diventano un
+    ScanResult ERROR e la scansione prosegue, questa la INTERROMPE. Prima
+    anche "clamd spento" diventava un ERROR per ogni file, e una
+    scansione senza aver verificato nulla finiva con uscita 0 ("pulito").
+
+    Sottoclasse di ClamdError, quindi chi intercetta già ClamdError (worker
+    della GUI, CLI) la gestisce senza modifiche. La causa originale
+    (ConnectionRefusedError, PermissionError, socket.gaierror...) resta in
+    __cause__; where dice dove si è cercato clamd.
+    """
+
+    def __init__(self, message: str, where: str) -> None:
+        super().__init__(message)
+        self.where = where
 
 
 @dataclass
@@ -95,7 +258,7 @@ class ClamdClient:
 
     def __init__(
         self,
-        unix_socket: Optional[str] = "/run/clamav/clamd.ctl",
+        unix_socket: Optional[str] = DEFAULT_SOCKET,
         tcp_host: Optional[str] = None,
         tcp_port: int = 3310,
         timeout: float = 30.0,
@@ -124,16 +287,45 @@ class ClamdClient:
         self._session: Optional[_ClamdSession] = None
         self._scanned_in_session = 0
 
-    def _connect(self) -> socket.socket:
+    def describe(self) -> str:
+        """Dove questo client cerca clamd, per i messaggi."""
         if self.unix_socket:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(self.timeout)
-            sock.connect(self.unix_socket)
-        else:
-            sock = socket.create_connection(
-                (self.tcp_host, self.tcp_port), timeout=self.timeout
-            )
+            return f"socket {self.unix_socket}"
+        host = f"[{self.tcp_host}]" if ":" in (self.tcp_host or "") else self.tcp_host
+        return f"TCP {host}:{self.tcp_port}"
+
+    def _connect(self) -> socket.socket:
+        try:
+            if self.unix_socket:
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    sock.settimeout(self.timeout)
+                    sock.connect(self.unix_socket)
+                except BaseException:
+                    sock.close()
+                    raise
+            else:
+                sock = socket.create_connection(
+                    (self.tcp_host, self.tcp_port), timeout=self.timeout
+                )
+        except OSError as exc:
+            raise ClamdUnavailable(str(exc), self.describe()) from exc
         return sock
+
+    # Attese prima dei nuovi tentativi di connessione DURANTE una scansione
+    # (non per ping/version, che devono rispondere subito). Coprono il
+    # riavvio di clamd (aggiornamento del pacchetto): senza, una scansione
+    # programmata in quel momento si interromperebbe con errore invece di
+    # proseguire dopo pochi secondi. Iniettabile per i test.
+    RECONNECT_DELAYS: tuple = (2.0, 5.0)
+
+    def _connect_for_scan(self) -> socket.socket:
+        for delay in self.RECONNECT_DELAYS:
+            try:
+                return self._connect()
+            except ClamdUnavailable:
+                time.sleep(delay)
+        return self._connect()
 
     def _send_simple_command(self, command: str) -> str:
         with self._connect() as sock:
@@ -166,18 +358,6 @@ class ClamdClient:
 
     def reload(self) -> str:
         return self._send_simple_command("RELOAD")
-
-    def scan_file(self, path: Path) -> ScanResult:
-        """
-        Scansiona un singolo file già presente sul filesystem raggiungibile
-        da clamd, usando CONTSCAN (path assoluto passato come argomento a
-        clamd, non a una shell).
-        """
-        path = Path(path).resolve()
-        with self._connect() as sock:
-            sock.sendall(f"zCONTSCAN {path}\0".encode("utf-8"))
-            raw = self._read_all(sock)
-        return self._parse_result_line(raw, fallback_path=str(path))
 
     @staticmethod
     def _iter_files(path: Path, exclude_dirs: Optional[Iterable[Path]]) -> Iterator[Path]:
@@ -300,8 +480,8 @@ class ClamdClient:
         # lo streaming a memoria costante sia l'esclusione, che continua a
         # lavorare sui path non risolti dei file interni.
         #
-        # È coerente con scan_file() (CONTSCAN), che già risolve, e con
-        # scan_worker, che già risolve la radice della quarantena.
+        # È coerente con scan_worker, che già risolve la radice della
+        # quarantena.
         path = Path(path).resolve()
         try:
             if not persistent:
@@ -336,6 +516,8 @@ class ClamdClient:
                 if self._session is None:
                     try:
                         self._session = _ClamdSession(self)
+                    except ClamdUnavailable:
+                        raise
                     except OSError as exc:
                         yield ScanResult(
                             path=str(target),
@@ -360,6 +542,8 @@ class ClamdClient:
                         self._session = _ClamdSession(self)
                         self._scanned_in_session = 0
                         result = self._session.scan_one(target)
+                    except ClamdUnavailable:
+                        raise
                     except (ClamdError, OSError) as retry_exc:
                         self.reset_session()
                         yield self._stream_failure_result(
@@ -582,7 +766,7 @@ class ClamdClient:
 
     def _instream_one(self, target: Path, max_stream_size: Optional[int] = None) -> ScanResult:
         try:
-            with self._connect() as sock:
+            with self._connect_for_scan() as sock:
                 sock.sendall(b"zINSTREAM\0")
                 try:
                     with self._open_regular(target) as fh:
@@ -602,6 +786,8 @@ class ClamdClient:
                 raw = self._read_all(sock)
         except (BrokenPipeError, ConnectionResetError) as exc:
             return self._stream_failure_result(target, exc, max_stream_size)
+        except ClamdUnavailable:
+            raise
         except ClamdError as exc:
             # Risposta oltre il tetto: è un problema di QUESTO file, non
             # della scansione. Diventa un errore sulla riga corrispondente
@@ -693,7 +879,7 @@ class _ClamdSession:
 
     def __init__(self, client: "ClamdClient") -> None:
         self._client = client
-        self._sock = client._connect()
+        self._sock = client._connect_for_scan()
         self._buffer = b""
         self.dead = False
         try:

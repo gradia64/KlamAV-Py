@@ -16,7 +16,7 @@ from PySide6.QtCore import QCoreApplication  # noqa: E402
 from PySide6.QtNetwork import QLocalServer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLineEdit  # noqa: E402
 
-from klamav_py.clamd_client import ScanResult  # noqa: E402
+from klamav_py.clamd_client import ClamdEndpoint, ScanResult  # noqa: E402
 from klamav_py.gui import main_window as mw  # noqa: E402
 from klamav_py.gui.single_instance import (  # noqa: E402
     IPC_MAX_PAYLOAD_BYTES, encode_targets, notify_running_instance,
@@ -153,7 +153,7 @@ def test_worker_scansiona_tutte_le_destinazioni(tmp_path):
             yield ScanResult(str(target), "OK")
             yield ScanResult(str(target) + "/x", "ERROR", "Permission denied")
 
-    w = ScanWorker(socket_path="-", target=[tmp_path / "a", tmp_path / "b"], client_factory=Client)
+    w = ScanWorker(endpoint=ClamdEndpoint(), target=[tmp_path / "a", tmp_path / "b"], client_factory=Client)
     fine = []
     w.finished_scan.connect(lambda *a: fine.append(a))
     w.run()

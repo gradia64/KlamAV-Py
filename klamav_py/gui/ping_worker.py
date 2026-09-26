@@ -17,21 +17,21 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from ..clamd_client import ClamdClient, ClamdError
+from ..clamd_client import ClamdEndpoint, ClamdError
 
 
 class PingWorker(QThread):
     result_ready = Signal(bool)  # True se clamd ha risposto correttamente
 
-    def __init__(self, socket_path: str, parent=None,
+    def __init__(self, endpoint: ClamdEndpoint, parent=None,
                  timeout: Optional[float] = None) -> None:
         super().__init__(parent)
-        self.socket_path = socket_path
+        self.endpoint = endpoint
         self.timeout = timeout
 
     def run(self) -> None:
         kwargs = {} if self.timeout is None else {"timeout": self.timeout}
-        client = ClamdClient(unix_socket=self.socket_path, **kwargs)
+        client = self.endpoint.new_client(**kwargs)
         try:
             alive = client.ping()
         except (ClamdError, OSError):

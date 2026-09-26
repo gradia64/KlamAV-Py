@@ -1,3 +1,9 @@
+klamav-py (0.1.10-1) unstable; urgency=medium
+
+  * Nuova versione: vedi CHANGELOG.md
+
+ -- gradia <gradia@disroot.org>  Sat, 26 Sep 2026 18:06:20 +0200
+
 klamav-py (0.1.9-1) unstable; urgency=medium
 
   * Aggiornamento firme delegato a clamav-freshclam.service (niente più

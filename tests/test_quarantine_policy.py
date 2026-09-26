@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from klamav_py import cli
-from klamav_py.clamd_client import ScanResult
+from klamav_py.clamd_client import ClamdEndpoint, ScanResult
 from klamav_py.quarantine_policy import (
     REASON_HEURISTIC, REASON_MAIL_STORE, QuarantinePolicy, default_report_only_dirs,
 )
@@ -66,14 +66,23 @@ class _FakeClient:
     def __init__(self, *a, **kw):
         self.skipped = {}
 
+    def ping(self):
+        # La CLI fa un PING preliminare prima di scansionare.
+        return True
+
     def scan_stream(self, root, **kw):
         yield from self.results
 
 
 def _scan(monkeypatch, tmp_path, capsys, results, *extra):
     monkeypatch.setenv("HOME", str(tmp_path))
+    # tmp_path sta sotto /tmp: fuori da systemd è solo un avviso su stderr,
+    # sotto systemd (INVOCATION_ID) sarebbe un errore. Il test non dipende
+    # da come è stato lanciato pytest.
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
     _FakeClient.results = results
-    monkeypatch.setattr(cli, "ClamdClient", _FakeClient)
+    # La CLI costruisce il client solo tramite ClamdEndpoint.new_client().
+    monkeypatch.setattr(ClamdEndpoint, "new_client", lambda self, **kw: _FakeClient())
     rc = cli.main(["scan", str(tmp_path), "--quarantine", str(tmp_path / "q"), *extra])
     return rc, capsys.readouterr().out
 
@@ -139,7 +148,7 @@ def test_worker_esito_dopo_result_ready(tmp_path):
             yield from results
 
     w = ScanWorker(
-        socket_path="unused", target=tmp_path / "a", quarantine_dir=tmp_path / "q",
+        endpoint=ClamdEndpoint(), target=tmp_path / "a", quarantine_dir=tmp_path / "q",
         auto_quarantine=True, client_factory=Client,
         policy=QuarantinePolicy(default_report_only_dirs(tmp_path)),
     )

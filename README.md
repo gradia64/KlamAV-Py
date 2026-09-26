@@ -287,7 +287,7 @@ I fix sono coperti da 9 nuovi test automatici (rifiuto di symlink e FIFO in quar
 
 La radice di ogni scansione viene ora risolta (`Path.resolve()`) all'inizio di `scan_stream`, in un unico punto comune a tutti i modi di avviare una scansione (CLI, GUI manuale, integrazione Dolphin/IPC, e in prospettiva Real-Time e programmata). Non è un fix di sicurezza: nel caso dell'IPC il socket è già ristretto allo stesso utente, quindi non esiste un confine di privilegio da proteggere e un symlink non dà accesso a nulla che l'utente non possa già leggere. È un fix di correttezza: se il percorso da scansionare è un symlink-directory, `os.walk()` lo segue comunque quando è il punto di partenza (followlinks=False blocca solo i symlink interni all'albero, non la radice), e senza risolverlo il referto di scansione mostrerebbe i risultati sotto il percorso del symlink invece che sotto quello reale effettivamente letto. Per un antivirus conta il contenuto reale controllato, non l'alias da cui ci si è arrivati.
 
-La risoluzione avviene una sola volta sulla radice, non per ogni file: `_iter_files` (l'attraversamento vero e proprio) resta invariato, così sia lo streaming a memoria costante sia il pruning delle directory escluse (quarantena inclusa) continuano a funzionare esattamente come prima. I symlink interni all'albero continuano a non essere seguiti. Il fix è coerente con `scan_file()` (CONTSCAN), che già risolveva il proprio path.
+La risoluzione avviene una sola volta sulla radice, non per ogni file: `_iter_files` (l'attraversamento vero e proprio) resta invariato, così sia lo streaming a memoria costante sia il pruning delle directory escluse (quarantena inclusa) continuano a funzionare esattamente come prima. I symlink interni all'albero continuano a non essere seguiti. 
 
 ## Cosa manca rispetto a KlamAV originale (di proposito)
 
@@ -373,3 +373,20 @@ La modalità `--tag` è quella da usare prima di pubblicare su AUR: è l'unica c
 - **Notifiche desktop native** (notify-send o D-Bus diretto) oltre a QSystemTrayIcon.showMessage, per desktop con supporto tray irregolare.
 - **Esportazione dell'indice quarantena** in un formato leggibile da un frontend web/TUI (es. per controllare la quarantena dal NAS).
 - **Configurabile da UI** se il Real-Time debba mettere in quarantena automaticamente o solo segnalare.
+
+## Verifica dei rilasci
+
+Dalla 0.1.10 i tag dei rilasci sono firmati con la chiave del progetto:
+
+    gradia (KlamAV-Py release signing) <gradia@disroot.org>
+    Impronta: EBEE 3E80 EFA3 8B42 B147  F1B9 9D7A A4F1 971F EAA9
+
+```bash
+gpg --keyserver hkps://keys.openpgp.org --recv-keys EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
+git clone https://github.com/gradia64/KlamAV-Py.git && cd KlamAV-Py
+git tag -v v0.1.10
+```
+
+Controlla che l'impronta riportata da `gpg` coincida con quella indicata
+sopra: il keyserver garantisce solo di consegnare una chiave, non che sia
+quella giusta. I tag precedenti alla 0.1.10 non sono firmati.

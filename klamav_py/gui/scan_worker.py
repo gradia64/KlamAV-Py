@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from ..clamd_client import ClamdClient, ClamdError
+from ..clamd_client import ClamdEndpoint, ClamdError, ClamdUnavailable
 from ..quarantine import Quarantine
 from ..quarantine_policy import QuarantinePolicy
 
@@ -69,7 +69,7 @@ class ScanWorker(QThread):
 
     def __init__(
         self,
-        socket_path: str,
+        endpoint: ClamdEndpoint,
         target: "Path | list[Path]",
         quarantine_dir: Optional[Path] = None,
         auto_quarantine: bool = False,
@@ -78,7 +78,7 @@ class ScanWorker(QThread):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.socket_path = socket_path
+        self.endpoint = endpoint
         # Una o più destinazioni (selezione multipla da Dolphin): una sola
         # scansione, contatori e report unici.
         self.targets = list(target) if isinstance(target, (list, tuple)) else [target]
@@ -144,8 +144,10 @@ class ScanWorker(QThread):
         return duration
 
     def run(self) -> None:
-        factory = self._client_factory or ClamdClient
-        client = factory(unix_socket=self.socket_path)
+        # Il client si costruisce solo da ClamdEndpoint.new_client(): socket
+        # Unix o TCP, qui non fa differenza.
+        factory = self._client_factory or self.endpoint.new_client
+        client = factory()
         quarantine = Quarantine(self.quarantine_dir) if self.quarantine_dir else None
 
         # I file dentro la directory di quarantena sono i dati stessi
@@ -289,8 +291,12 @@ class ScanWorker(QThread):
                     self.progress.emit(scanned, infections, errors, too_large)
                     last_emit = now
 
+        except ClamdUnavailable as exc:
+            # Una sola segnalazione invece di una riga ERROR per file: la
+            # scansione è incompleta, non "con errori".
+            self.error.emit(f"clamd non raggiungibile su {exc.where}: {exc}. Scansione incompleta.")
         except (ClamdError, OSError) as exc:
-            self.error.emit(f"Errore di comunicazione con clamd: {exc}")
+            self.error.emit(f"Errore di comunicazione con clamd ({self.endpoint.describe()}): {exc}")
 
         # Emissione finale non soggetta a throttling: garantisce che i
         # contatori mostrati combacino sempre col totale reale, anche se

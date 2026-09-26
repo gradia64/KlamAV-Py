@@ -58,8 +58,13 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
-from ..clamd_client import ScanResult
+from ..clamd_client import DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult
 from ..quarantine import Quarantine
+from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir
+from ..systemd_dropin import (
+    DropinConflict, daemon_reload, disable_timer, foreign_overrides, render_dropin,
+    sync_dropin, timer_enabled,
+)
 from ..private_files import (
     ensure_private_dir, ensure_private_file, open_private_for_write, write_private_text,
 )
@@ -74,8 +79,9 @@ from .ping_worker import PingWorker
 from .single_instance import IPC_MAX_PAYLOAD_BYTES, IPC_SEPARATOR
 from .update_check_worker import UpdateCheckWorker, UpdateInfo
 
-DEFAULT_SOCKET = "/run/clamav/clamd.ctl"
-DEFAULT_QUARANTINE_DIR = Path.home() / ".local/share/klamav-py/quarantine"
+# Fonte unica in quarantine_location: lo stesso percorso è nell'ExecStart
+# di klamav-scan.service, e la coerenza è verificata dai test.
+DEFAULT_QUARANTINE_DIR = default_quarantine_dir()
 DEFAULT_HISTORY_FILE = Path.home() / ".local/share/klamav-py/history.json"
 DEFAULT_LOGS_DIR = Path.home() / ".local/share/klamav-py/logs"
 
@@ -511,6 +517,54 @@ KDE_STYLESHEET = """
 """
 
 
+def load_endpoint(settings: QSettings, default: ClamdEndpoint | None = None) -> ClamdEndpoint:
+    """
+    Endpoint di clamd dalle Impostazioni: UNICO punto di lettura delle
+    quattro chiavi (clamd_transport, socket_path, tcp_host, tcp_port).
+
+    Nessuna migrazione necessaria: un'installazione precedente non ha
+    clamd_transport e viene letta come "unix" con il suo socket_path, cioè
+    il comportamento di prima. default fornisce i valori delle chiavi
+    assenti (la GUI passa quello di --socket/--tcp, che restano valori
+    iniziali). ValueError se i valori salvati non formano un endpoint
+    valido (file modificato a mano).
+    """
+    default = default or ClamdEndpoint()
+    raw_port = settings.value("tcp_port", default.tcp_port)
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError):
+        raise ValueError(f"porta TCP non valida nelle impostazioni: {raw_port!r}") from None
+    return ClamdEndpoint(
+        transport=str(settings.value("clamd_transport", default.transport)),
+        unix_socket=str(settings.value("socket_path", default.unix_socket)),
+        tcp_host=str(settings.value("tcp_host", default.tcp_host) or ""),
+        tcp_port=port,
+    )
+
+
+def save_endpoint(settings: QSettings, endpoint: ClamdEndpoint) -> None:
+    """Scrive tutte e quattro le chiavi: host e porta restano salvati anche
+    tornando al socket Unix, così non vanno riscritti per ripassare a TCP."""
+    settings.setValue("clamd_transport", endpoint.transport)
+    settings.setValue("socket_path", endpoint.unix_socket)
+    settings.setValue("tcp_host", endpoint.tcp_host)
+    settings.setValue("tcp_port", endpoint.tcp_port)
+
+
+def _quarantine_count(path: Path) -> int:
+    """Voci nell'indice di una quarantena esistente; 0 se non c'è o non si
+    legge. Solo informativo: non deve mai bloccare il salvataggio, né
+    creare la directory se manca (il costruttore di Quarantine la crea)."""
+    path = path.expanduser()
+    if not path.is_dir():
+        return 0
+    try:
+        return len(Quarantine(path).list_entries())
+    except Exception:  # noqa: BLE001 - dato informativo
+        return 0
+
+
 class HistoryManager:
     def __init__(self, file_path: Path = DEFAULT_HISTORY_FILE):
         self.file_path = file_path
@@ -585,9 +639,9 @@ class HistoryManager:
 
 
 class ScanPage(QWidget):
-    def __init__(self, socket_path: str, quarantine: Quarantine, history: HistoryManager, parent=None) -> None:
+    def __init__(self, endpoint: ClamdEndpoint, quarantine: Quarantine, history: HistoryManager, parent=None) -> None:
         super().__init__(parent)
-        self.socket_path = socket_path
+        self.endpoint = endpoint
         self.quarantine = quarantine
         self.history = history
         self.worker: ScanWorker | None = None
@@ -795,7 +849,7 @@ class ScanPage(QWidget):
             self.worker = None
 
         self.worker = ScanWorker(
-            socket_path=self.socket_path,
+            endpoint=self.endpoint,
             target=target,
             quarantine_dir=self.quarantine.dir,
             auto_quarantine=self.auto_quarantine_checkbox.isChecked(),
@@ -1260,9 +1314,9 @@ class UpdatePage(QWidget):
 
     db_info_changed = Signal(object)  # DbInfo | None
 
-    def __init__(self, socket_getter: Callable[[], str], parent=None) -> None:
+    def __init__(self, endpoint_getter: Callable[[], ClamdEndpoint], parent=None) -> None:
         super().__init__(parent)
-        self._socket_getter = socket_getter
+        self._endpoint_getter = endpoint_getter
         self.worker: FreshclamRestartWorker | None = None
 
         layout = QVBoxLayout(self)
@@ -1327,10 +1381,10 @@ class UpdatePage(QWidget):
         self.update_button.setEnabled(False)
         self.log_console.appendPlainText("Avvio dell'aggiornamento in corso...\n")
 
-        # Il percorso si legge qui, nel thread GUI: il probe gira nel
+        # L'endpoint si legge qui, nel thread GUI: il probe gira nel
         # worker e non deve toccare QSettings né i widget.
-        socket_path = self._socket_getter()
-        self.worker = FreshclamRestartWorker(lambda: probe_db_info(socket_path))
+        endpoint = self._endpoint_getter()
+        self.worker = FreshclamRestartWorker(lambda: probe_db_info(endpoint))
         self.worker.progress.connect(self._on_output)
         self.worker.finished_with.connect(self._on_finished)
         self.worker.start()
@@ -1570,6 +1624,17 @@ class SchedulerPage(QWidget):
         desc.setStyleSheet("font-size: 14px; color: palette(mid);")
         desc.setWordWrap(True)
         layout.addWidget(desc)
+
+        # Il timer systemd (klamav-scan.timer) e questa pianificazione sono
+        # alternativi: con entrambi attivi la home verrebbe scansionata due
+        # volte, con due quarantene se le impostazioni divergono. La label
+        # dice lo stato reale del timer nel punto dove si configura, come
+        # "Real-Time parziale".
+        self.system_timer_label = QLabel("")
+        self.system_timer_label.setWordWrap(True)
+        self.system_timer_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
+        self.system_timer_label.setVisible(False)
+        layout.addWidget(self.system_timer_label)
         layout.addSpacing(10)
 
         schedule_group = QGroupBox("Pianificazione Automatica")
@@ -1645,6 +1710,33 @@ class SchedulerPage(QWidget):
     def update_progress(self, text: str) -> None:
         self.execution_status_label.setText(text)
 
+    def showEvent(self, event) -> None:  # noqa: N802 - API Qt
+        super().showEvent(event)
+        self.refresh_system_timer()
+
+    def refresh_system_timer(self) -> bool | None:
+        """Aggiorna la label sul timer di sistema e ne restituisce lo stato
+        (None: sconosciuto, per esempio senza manager systemd utente)."""
+        state = timer_enabled()
+        if state is True:
+            text = (
+                "La scansione programmata di sistema (klamav-scan.timer) è attiva: "
+                "controlla ogni giorno l'intera home, anche con KlamAV-Py chiuso. "
+                "È alternativa a questa pianificazione."
+            )
+            if self.settings.value("schedule_enabled", False, type=bool):
+                text += " Al momento sono attive entrambe: la home viene scansionata due volte."
+            try:
+                tcp = load_endpoint(self.settings).is_tcp
+            except ValueError:
+                tcp = False
+            overrides = foreign_overrides(tcp=tcp)
+            if overrides:
+                text += "\n\nAttenzione: " + " ".join(o.describe() for o in overrides)
+            self.system_timer_label.setText(text)
+        self.system_timer_label.setVisible(state is True)
+        return state
+
     def set_next_run(self, text: str) -> None:
         self.next_run_label.setText(text)
 
@@ -1665,12 +1757,36 @@ class SchedulerPage(QWidget):
         self.target_edit.setText(self.settings.value("schedule_target", str(Path.home())))
 
     def _save_schedule(self) -> None:
+        if self.enable_check.isChecked() and timer_enabled() is True:
+            answer = QMessageBox.question(
+                self,
+                "Pianificazione Scansioni",
+                "La scansione programmata di sistema (klamav-scan.timer) è attiva. "
+                "Le due pianificazioni sono alternative: con entrambe la home verrebbe "
+                "scansionata due volte.\n\n"
+                "Disattivare il timer di sistema e usare questa pianificazione?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            problem = disable_timer()
+            if problem:
+                QMessageBox.warning(
+                    self,
+                    "Pianificazione Scansioni",
+                    "Non è stato possibile disattivare klamav-scan.timer, quindi la "
+                    f"pianificazione non è stata salvata:\n{problem}",
+                )
+                return
+
         self.settings.setValue("schedule_enabled", self.enable_check.isChecked())
         self.settings.setValue("schedule_interval", self.interval_spin.value())
         self.settings.setValue("schedule_unit", self.unit_combo.currentText())
         self.settings.setValue("schedule_target", self.target_edit.text())
 
         self.schedule_saved.emit()
+        self.refresh_system_timer()
 
         main_window = self.window()
         if hasattr(main_window, 'tray_icon') and main_window.tray_icon.isVisible():
@@ -1686,6 +1802,9 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         # QSettings sempre con org/app ESPLICITI (vedi SchedulerPage).
         self.settings = QSettings(APP_NAME, APP_NAME)
+        # Avvisi non bloccanti dell'ultimo salvataggio (es. daemon-reload non
+        # riuscito): li mostra MainWindow nel messaggio di conferma.
+        self.save_notes: list[str] = []
         # Worker del controllo aggiornamenti: None quando nessun controllo
         # è in corso. Vedi _check_updates / _release_update_check_worker.
         self._update_check_worker: UpdateCheckWorker | None = None
@@ -1737,7 +1856,25 @@ class SettingsPage(QWidget):
         general_group = QGroupBox("Generale")
         general_layout = QVBoxLayout(general_group)
 
-        socket_layout = QHBoxLayout()
+        # Connessione a clamd: il trasporto è una scelta esplicita (mai
+        # dedotto da "host valorizzato"), e con TCP la label dice nel punto
+        # dove si configura che i file viaggiano in chiaro, come "Real-Time
+        # parziale" per le sue limitazioni.
+        conn_layout = QHBoxLayout()
+        conn_label = QLabel("Connessione a clamd:")
+        conn_label.setFixedWidth(130)
+        self.transport_combo = QComboBox()
+        self.transport_combo.addItem("Socket Unix", "unix")
+        self.transport_combo.addItem("TCP", "tcp")
+        self.transport_combo.setFixedHeight(36)
+        conn_layout.addWidget(conn_label)
+        conn_layout.addWidget(self.transport_combo)
+        conn_layout.addStretch()
+        general_layout.addLayout(conn_layout)
+
+        self.socket_row = QWidget()
+        socket_layout = QHBoxLayout(self.socket_row)
+        socket_layout.setContentsMargins(0, 0, 0, 0)
         socket_label = QLabel("Socket clamd:")
         socket_label.setFixedWidth(130)
         self.socket_edit = QLineEdit()
@@ -1750,7 +1887,33 @@ class SettingsPage(QWidget):
         socket_layout.addWidget(socket_label)
         socket_layout.addWidget(self.socket_edit)
         socket_layout.addWidget(socket_browse)
-        general_layout.addLayout(socket_layout)
+        general_layout.addWidget(self.socket_row)
+
+        self.tcp_row = QWidget()
+        tcp_layout = QHBoxLayout(self.tcp_row)
+        tcp_layout.setContentsMargins(0, 0, 0, 0)
+        tcp_label = QLabel("Host e porta:")
+        tcp_label.setFixedWidth(130)
+        self.tcp_host_edit = QLineEdit()
+        self.tcp_host_edit.setFixedHeight(36)
+        self.tcp_host_edit.setPlaceholderText("es. 127.0.0.1, ::1 o clamd.lan")
+        self.tcp_port_spin = QSpinBox()
+        self.tcp_port_spin.setRange(1, 65535)
+        self.tcp_port_spin.setValue(DEFAULT_TCP_PORT)
+        self.tcp_port_spin.setFixedHeight(36)
+        tcp_layout.addWidget(tcp_label)
+        tcp_layout.addWidget(self.tcp_host_edit, 1)
+        tcp_layout.addWidget(self.tcp_port_spin)
+        general_layout.addWidget(self.tcp_row)
+
+        self.tcp_warning_label = QLabel("")
+        self.tcp_warning_label.setWordWrap(True)
+        self.tcp_warning_label.setStyleSheet("font-size: 12px; color: palette(highlight);")
+        general_layout.addWidget(self.tcp_warning_label)
+
+        self.transport_combo.currentIndexChanged.connect(self._update_transport_rows)
+        self.tcp_host_edit.textChanged.connect(self._update_transport_rows)
+        self.tcp_port_spin.valueChanged.connect(self._update_transport_rows)
 
         quar_layout = QHBoxLayout()
         quar_label = QLabel("Cartella quarantena:")
@@ -1890,6 +2053,51 @@ class SettingsPage(QWidget):
 
         self._load_settings()
 
+    def _update_transport_rows(self, *_args) -> None:
+        tcp = self.transport_combo.currentData() == "tcp"
+        self.socket_row.setVisible(not tcp)
+        self.tcp_row.setVisible(tcp)
+        self.tcp_warning_label.setVisible(tcp)
+        if tcp:
+            host = self.tcp_host_edit.text().strip() or "host"
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            self.tcp_warning_label.setText(
+                f"I file scansionati vengono inviati in chiaro a {host}:{self.tcp_port_spin.value()}: "
+                "usa TCP solo verso localhost o reti fidate. Anche la scansione "
+                "programmata di sistema userà la rete per raggiungere clamd."
+            )
+
+    def _endpoint_from_form(self) -> ClamdEndpoint:
+        """Endpoint dai campi; ValueError con il motivo se non è valido."""
+        host = self.tcp_host_edit.text().strip()
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]  # "[::1]" come negli URL: le parentesi non servono qui
+        return ClamdEndpoint(
+            transport=self.transport_combo.currentData(),
+            unix_socket=self.socket_edit.text().strip(),
+            tcp_host=host,
+            tcp_port=self.tcp_port_spin.value(),
+        )
+
+    def _set_endpoint_fields(self, endpoint: ClamdEndpoint) -> None:
+        self.transport_combo.setCurrentIndex(self.transport_combo.findData(endpoint.transport))
+        self.socket_edit.setText(endpoint.unix_socket)
+        self.tcp_host_edit.setText(endpoint.tcp_host)
+        self.tcp_port_spin.setValue(endpoint.tcp_port)
+        self._update_transport_rows()
+
+    def _set_raw_endpoint_fields(self) -> None:
+        index = self.transport_combo.findData(str(self.settings.value("clamd_transport", "unix")))
+        self.transport_combo.setCurrentIndex(max(index, 0))
+        self.socket_edit.setText(str(self.settings.value("socket_path", DEFAULT_SOCKET)))
+        self.tcp_host_edit.setText(str(self.settings.value("tcp_host", "") or ""))
+        try:
+            self.tcp_port_spin.setValue(int(self.settings.value("tcp_port", DEFAULT_TCP_PORT)))
+        except (TypeError, ValueError):
+            self.tcp_port_spin.setValue(DEFAULT_TCP_PORT)
+        self._update_transport_rows()
+
     def _browse_file(self, line_edit: QLineEdit) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Seleziona il socket di clamd", "/run/clamav/", "Tutti i file (*)")
         if path: line_edit.setText(path)
@@ -1913,7 +2121,15 @@ class SettingsPage(QWidget):
     def _load_settings(self) -> None:
         self.autostart_check.setChecked(self.settings.value("autostart_system", False, type=bool))
         self.start_in_tray_check.setChecked(self.settings.value("start_in_tray", False, type=bool))
-        self.socket_edit.setText(self.settings.value("socket_path", DEFAULT_SOCKET))
+        try:
+            self._set_endpoint_fields(load_endpoint(self.settings))
+        except ValueError:
+            # Valori salvati non validi (es. "127.0.0.1:3310" come host,
+            # accettato dalle versioni precedenti a questo controllo): si
+            # mostrano COSÌ COME SONO, perché l'utente veda cosa correggere.
+            # Proporre il predefinito li nasconderebbe. Il salvataggio li
+            # rivaliderà.
+            self._set_raw_endpoint_fields()
         self.quar_edit.setText(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR)))
         self.auto_quar_check.setChecked(self.settings.value("auto_quarantine", False, type=bool))
         self.startup_update_check.setChecked(self.settings.value("startup_update", True, type=bool))
@@ -1926,18 +2142,114 @@ class SettingsPage(QWidget):
     def _reset_defaults(self) -> None:
         self.autostart_check.setChecked(False)
         self.start_in_tray_check.setChecked(False)
-        self.socket_edit.setText(DEFAULT_SOCKET)
+        self._set_endpoint_fields(ClamdEndpoint())
         self.quar_edit.setText(str(DEFAULT_QUARANTINE_DIR))
         self.auto_quar_check.setChecked(False)
         self.startup_update_check.setChecked(True)
         self.auto_check_updates.setChecked(False)
         self.rt_dirs_list.clear()
 
+    def _confirm(self, title: str, text: str) -> bool:
+        return QMessageBox.question(
+            self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        ) == QMessageBox.Yes
+
+    def _prepare_quarantine_dir(self, endpoint: ClamdEndpoint) -> Path | None:
+        """
+        Valida la directory di quarantena e allinea la scansione programmata
+        di sistema (drop-in di klamav-scan.service) a quarantena ed endpoint
+        di clamd. Ritorna il percorso risolto da salvare, o None se il
+        salvataggio va annullato.
+
+        Ordine voluto: validazione, conferme, directory, drop-in; QSettings
+        solo dopo, nel chiamante. Se il drop-in non si può scrivere le
+        Impostazioni NON vengono salvate: GUI e timer userebbero due
+        quarantene diverse senza che nessuno lo sappia. Il daemon-reload
+        invece è solo un avviso: il suo fallimento è un ritardo, non una
+        divergenza.
+        """
+        title = "Cartella quarantena"
+        decision = decide_quarantine_dir(self.quar_edit.text())
+        problem = decision.error or decision.volatile
+        if problem:
+            QMessageBox.warning(self, title, problem)
+            return None
+        path = decision.path
+
+        for warning in decision.warnings:
+            if not self._confirm(title, f"{warning}\n\nUsarla comunque?"):
+                return None
+        if decision.loose_mode is not None and not self._confirm(
+            title,
+            f"«{path}» ha permessi {decision.loose_mode:o}: come cartella di "
+            "quarantena diventerà accessibile solo a te (700). Continuare?",
+        ):
+            return None
+
+        old = Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))).expanduser()
+        if path != old.resolve():
+            count = _quarantine_count(old)
+            if count and not self._confirm(
+                title,
+                f"La quarantena attuale in «{old}» contiene {count} file. Restano "
+                "lì, ma KlamAV-Py non li mostrerà più finché non torni a quella "
+                "cartella. Continuare?",
+            ):
+                return None
+
+        try:
+            ensure_private_dir(path)
+        except OSError as exc:  # PermissionError da mkdir, PrivateFileError
+            QMessageBox.warning(self, title, f"Impossibile preparare «{path}»:\n{exc}")
+            return None
+
+        try:
+            changed = sync_dropin(render_dropin(path, home=Path.home(), endpoint=endpoint))
+        except DropinConflict as exc:
+            QMessageBox.warning(self, title, f"{exc}\n\nLe impostazioni non sono state salvate.")
+            return None
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                title,
+                "Impossibile aggiornare la scansione programmata di sistema:\n"
+                f"{exc}\n\nLe impostazioni non sono state salvate.",
+            )
+            return None
+
+        if changed:
+            problem = daemon_reload()
+            if problem:
+                self.save_notes.append(
+                    "La scansione programmata di sistema userà le nuove impostazioni "
+                    "dal prossimo avvio della sessione "
+                    f"(systemctl --user daemon-reload non riuscito: {problem})."
+                )
+
+        # Altri drop-in della unit (es. override.conf di "systemctl --user
+        # edit") che rendono inefficaci queste impostazioni o ne vengono
+        # sostituiti. Solo avviso: la personalizzazione è dell'utente.
+        for override in foreign_overrides(tcp=endpoint.is_tcp):
+            self.save_notes.append(override.describe())
+
+        self.quar_edit.setText(str(path))
+        return path
+
     def _save_settings(self) -> None:
+        self.save_notes = []
+        try:
+            endpoint = self._endpoint_from_form()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Connessione a clamd", f"Impostazione non valida: {exc}")
+            return
+        quarantine_dir = self._prepare_quarantine_dir(endpoint)
+        if quarantine_dir is None:
+            return
+
         self.settings.setValue("autostart_system", self.autostart_check.isChecked())
         self.settings.setValue("start_in_tray", self.start_in_tray_check.isChecked())
-        self.settings.setValue("socket_path", self.socket_edit.text())
-        self.settings.setValue("quarantine_dir", self.quar_edit.text())
+        save_endpoint(self.settings, endpoint)
+        self.settings.setValue("quarantine_dir", str(quarantine_dir))
         self.settings.setValue("auto_quarantine", self.auto_quar_check.isChecked())
         self.settings.setValue("startup_update", self.startup_update_check.isChecked())
         self.settings.setValue("auto_check_updates", self.auto_check_updates.isChecked())
@@ -2134,7 +2446,7 @@ Exec={exec_cmd} --scan-target %F
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, socket_path: str = DEFAULT_SOCKET, quarantine_dir: Path = DEFAULT_QUARANTINE_DIR, scan_target: Path = None) -> None:
+    def __init__(self, endpoint: ClamdEndpoint | None = None, quarantine_dir: Path = DEFAULT_QUARANTINE_DIR, scan_target: Path = None) -> None:
         super().__init__()
 
         # Migrazione one-shot delle impostazioni (vedi docstring della
@@ -2176,7 +2488,10 @@ class MainWindow(QMainWindow):
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
 
-        saved_socket = self.settings.value("socket_path", socket_path)
+        # --socket/--tcp dell'entry point: valori iniziali per le chiavi
+        # assenti dalle Impostazioni, come prima --socket.
+        self._default_endpoint = endpoint or ClamdEndpoint()
+        self._endpoint_problem_noted = False
         saved_quar_dir = Path(self.settings.value("quarantine_dir", str(quarantine_dir)))
         quarantine = Quarantine(saved_quar_dir)
 
@@ -2212,10 +2527,10 @@ class MainWindow(QMainWindow):
         self.content_stack = QStackedWidget()
         self.content_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        self.scan_page = ScanPage(saved_socket, quarantine, self.history_manager)
+        self.scan_page = ScanPage(self._clamd_endpoint(), quarantine, self.history_manager)
         self.history_page = HistoryPage(self.history_manager)
         self.quarantine_page = QuarantinePage(quarantine)
-        self.update_page = UpdatePage(lambda: self.scan_page.socket_path)
+        self.update_page = UpdatePage(self._clamd_endpoint)
         self.realtime_page = RealTimePage()
         self.scheduler_page = SchedulerPage()
         self.settings_page = SettingsPage()
@@ -2250,6 +2565,7 @@ class MainWindow(QMainWindow):
         self._schedule_late_noted = False
         self._schedule_skip_noted = False
         self._schedule_missing_noted = False
+        self._double_schedule_noted = False
         self.bg_worker = None
         # Log della scansione programmata scritto man mano (vedi
         # _bg_log_write): memoria costante e niente log perso se la GUI
@@ -2317,7 +2633,7 @@ class MainWindow(QMainWindow):
         self.clamd_health_timer.timeout.connect(self._periodic_clamd_check)
         self.clamd_health_timer.start(CLAMD_HEALTH_INTERVAL_MS)
         self._db_info_worker: DbInfoWorker | None = None
-        self._check_clamd(saved_socket)
+        self._check_clamd(self._clamd_endpoint())
 
         if self.settings.value("auto_check_updates", False, type=bool):
             QTimer.singleShot(3000, self.settings_page._check_updates_automatico)
@@ -2526,24 +2842,69 @@ class MainWindow(QMainWindow):
             )
 
     def _on_settings_saved(self) -> None:
-        new_socket = self.settings.value("socket_path", DEFAULT_SOCKET)
-        self.scan_page.socket_path = new_socket
-        self._start_ping(new_socket)
+        endpoint = self._clamd_endpoint()
+        self.scan_page.endpoint = endpoint
+        self._start_ping(endpoint)
+        self._apply_quarantine_dir()
         self._load_realtime()
         self._load_schedule()
 
         autostart_enabled = self.settings.value("autostart_system", False, type=bool)
         autostart_ok, autostart_error = self._manage_autostart(autostart_enabled)
+        notes = list(self.settings_page.save_notes)
 
-        if autostart_ok:
+        if autostart_ok and not notes:
             QMessageBox.information(self, "Impostazioni Aggiornate", "Le nuove impostazioni sono state applicate.")
         else:
+            if not autostart_ok:
+                notes.insert(0, f"Non è stato possibile aggiornare l'avvio automatico:\n{autostart_error}")
             QMessageBox.warning(
                 self,
                 "Impostazioni Aggiornate (parzialmente)",
-                "Le impostazioni sono state salvate, ma non è stato possibile "
-                f"aggiornare l'avvio automatico:\n{autostart_error}",
+                "Le impostazioni sono state salvate, ma:\n\n" + "\n\n".join(notes),
             )
+
+    def _clamd_endpoint(self) -> ClamdEndpoint:
+        """
+        Endpoint corrente di clamd, letto dalle Impostazioni a ogni uso
+        (come la directory di quarantena): tutti i worker lo ricevono da
+        qui, nessuno ricostruisce un client per conto suo.
+
+        Con valori salvati non validi (file modificato a mano) si usa
+        l'endpoint iniziale di --socket/--tcp, lo si dice una volta per
+        sessione, e la pagina Impostazioni propone il predefinito da
+        salvare. Non è un ripiego fra trasporti per un errore di
+        connessione: quello resta un errore visibile.
+        """
+        try:
+            return load_endpoint(self.settings, self._default_endpoint)
+        except ValueError as exc:
+            if not self._endpoint_problem_noted:
+                self._endpoint_problem_noted = True
+                self.tray_icon.showMessage(
+                    f"{APP_NAME} - impostazioni di clamd non valide",
+                    f"{exc}. Uso {self._default_endpoint.describe()}: correggi la "
+                    "connessione in Impostazioni.",
+                    _icon("dialog-warning", "data-error"),
+                    10000,
+                )
+            return self._default_endpoint
+
+    def _apply_quarantine_dir(self) -> None:
+        """
+        Scansione manuale e pagina Quarantena usano un oggetto Quarantine
+        creato all'avvio, mentre programmata e Real-Time rileggono la
+        directory dalle Impostazioni a ogni esecuzione: senza questo, dopo un
+        cambio di cartella le prime due restavano sulla vecchia fino al
+        riavvio, e le quarantene divergevano dentro la GUI stessa.
+        """
+        new_dir = Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR)))
+        if new_dir == self.scan_page.quarantine.dir:
+            return
+        quarantine = Quarantine(new_dir)
+        self.scan_page.quarantine = quarantine
+        self.quarantine_page.quarantine = quarantine
+        self.quarantine_page.refresh()
 
     def _manage_autostart(self, enabled: bool) -> tuple[bool, str | None]:
         """
@@ -2599,6 +2960,20 @@ X-GNOME-Autostart-enabled=true
             self.schedule_timer.stop()
             self.scheduler_page.set_next_run("")
             return
+
+        # Entrambe le pianificazioni attive (il timer può essere stato
+        # abilitato da terminale dopo quella interna): una volta per
+        # sessione, senza bloccare nulla.
+        if not self._double_schedule_noted and timer_enabled() is True:
+            self._double_schedule_noted = True
+            self.tray_icon.showMessage(
+                APP_NAME,
+                "Sono attive sia la pianificazione interna sia il timer di sistema "
+                "klamav-scan.timer: la home verrebbe scansionata due volte. "
+                "Vedi la pagina Pianificazione.",
+                _app_icon(),
+                10000,
+            )
 
         # Prima attivazione: si fissa la base a "adesso" invece di
         # scansionare subito (l'utente ha appena scelto un intervallo, non
@@ -2698,7 +3073,7 @@ X-GNOME-Autostart-enabled=true
         self._bg_log_close()
         self._bg_log_path = None
         self.bg_worker = ScanWorker(
-            socket_path=self.settings.value("socket_path", DEFAULT_SOCKET),
+            endpoint=self._clamd_endpoint(),
             target=target,
             quarantine_dir=Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))),
             auto_quarantine=self.settings.value("auto_quarantine", False, type=bool)
@@ -3212,7 +3587,7 @@ X-GNOME-Autostart-enabled=true
         self.realtime_page.add_log_entry(Path(file_path).name, False)
 
         self.realtime_worker = ScanWorker(
-            socket_path=self.settings.value("socket_path", DEFAULT_SOCKET),
+            endpoint=self._clamd_endpoint(),
             target=Path(file_path),
             quarantine_dir=Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))),
             auto_quarantine=True
@@ -3246,7 +3621,7 @@ X-GNOME-Autostart-enabled=true
             # Può essere clamd appena morto: verifica subito invece di
             # aspettare il controllo periodico (con un tetto di frequenza).
             if self._forced_ping.ready():
-                self._start_ping(self.settings.value("socket_path", DEFAULT_SOCKET))
+                self._start_ping(self._clamd_endpoint())
 
     def _on_realtime_quarantine_outcome(self, path: str, outcome: str, detail: str) -> None:
         name = Path(path).name
@@ -3285,7 +3660,7 @@ X-GNOME-Autostart-enabled=true
             _retire_qthread(worker)
         self._process_realtime_queue()
 
-    def _check_clamd(self, socket_path: str) -> None:
+    def _check_clamd(self, endpoint: ClamdEndpoint) -> None:
         """
         Verifica che clamd risponda, ma senza mai bloccare l'avvio della
         finestra: il ping gira in un QThread separato (PingWorker) e
@@ -3293,12 +3668,12 @@ X-GNOME-Autostart-enabled=true
         potrebbe restare appeso fino a 30s se il socket esiste ma clamd
         non risponde.
         """
-        self._start_ping(socket_path, startup=True)
+        self._start_ping(endpoint, startup=True)
 
     def _periodic_clamd_check(self) -> None:
-        self._start_ping(self.settings.value("socket_path", DEFAULT_SOCKET))
+        self._start_ping(self._clamd_endpoint())
 
-    def _start_ping(self, socket_path: str, startup: bool = False) -> None:
+    def _start_ping(self, endpoint: ClamdEndpoint, startup: bool = False) -> None:
         # Un ping alla volta: se il precedente è ancora in corso (clamd
         # lento o appeso) il suo esito arriverà comunque.
         if self._ping_worker is not None:
@@ -3306,22 +3681,22 @@ X-GNOME-Autostart-enabled=true
         # Il ping di avvio mantiene il timeout di default del client, come
         # prima; quelli periodici e forzati usano un timeout breve.
         timeout = None if startup else CLAMD_PING_TIMEOUT_S
-        worker = PingWorker(socket_path, self, timeout=timeout)
+        worker = PingWorker(endpoint, self, timeout=timeout)
         # Con un ping al minuto i worker con parent si accumulerebbero come
         # figli della finestra per tutta la sessione: deleteLater a thread
         # terminato li distrugge. È sicuro perché la ownership è del C++
         # (parent) e finished arriva dopo la fine di run().
         worker.finished.connect(worker.deleteLater)
         worker.result_ready.connect(
-            lambda alive: self._on_ping_result(socket_path, alive, startup)
+            lambda alive: self._on_ping_result(endpoint, alive, startup)
         )
         self._ping_worker = worker
         worker.start()
 
-    def _on_ping_result(self, socket_path: str, alive: bool, startup: bool = False) -> None:
+    def _on_ping_result(self, endpoint: ClamdEndpoint, alive: bool, startup: bool = False) -> None:
         # A differenza degli altri worker questo NON passa da
         # _retire_qthread, ed è deliberato: PingWorker è l'unico creato
-        # con un parent Qt (vedi _start_ping, `PingWorker(socket_path,
+        # con un parent Qt (vedi _start_ping, `PingWorker(endpoint,
         # self, ...)`). Con un parent la ownership dell'oggetto passa al
         # C++, quindi la caduta del riferimento Python qui sotto non
         # distrugge l'oggetto sottostante e il qFatal "Destroyed while
@@ -3347,11 +3722,16 @@ X-GNOME-Autostart-enabled=true
                 QMessageBox.warning(
                     self,
                     "clamd non raggiungibile",
-                    f"Non riesco a contattare clamd su {socket_path}.\n"
-                    "Verifica che il servizio clamav-daemon sia attivo.",
+                    f"Non riesco a contattare clamd su {endpoint.describe()}.\n"
+                    + (
+                        "Verifica che clamd sia in ascolto su quell'indirizzo e che "
+                        "la rete lo consenta."
+                        if endpoint.is_tcp
+                        else "Verifica che il servizio clamav-daemon sia attivo."
+                    ),
                 )
             else:
-                self._probe_db_info(socket_path)
+                self._probe_db_info(endpoint)
             return
 
         if transition is Transition.WENT_DOWN:
@@ -3370,7 +3750,7 @@ X-GNOME-Autostart-enabled=true
                 _icon("emblem-checked"),
                 5000,
             )
-            self._probe_db_info(socket_path)
+            self._probe_db_info(endpoint)
             self._process_realtime_queue()
 
     def _apply_clamd_state(self) -> None:
@@ -3381,10 +3761,10 @@ X-GNOME-Autostart-enabled=true
         self._reset_tray_tooltip()
         self.realtime_page.set_clamd_down(down, len(self._realtime_queue) if down else 0)
 
-    def _probe_db_info(self, socket_path: str) -> None:
+    def _probe_db_info(self, endpoint: ClamdEndpoint) -> None:
         if self._db_info_worker is not None:
             return
-        self._db_info_worker = DbInfoWorker(socket_path)
+        self._db_info_worker = DbInfoWorker(endpoint)
         self._db_info_worker.result_ready.connect(self._on_db_info)
         self._db_info_worker.start()
 

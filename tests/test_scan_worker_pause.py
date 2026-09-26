@@ -14,7 +14,7 @@ Due note di protocollo, entrambe apprese dai primi fallimenti:
    e finished_scan riporta (n, n, 0, 0).
 
 2. Tutte le connessioni ai collezionisti usano Qt.DirectConnection
-   ESPPLICITO: una connect() a una funzione Python pura (non a uno
+   ESPLICITO: una connect() a una funzione Python pura (non a uno
    slot di QObject) è AutoConnection, e un'emit dal worker thread
    viene ACCODATA al thread del receiver (il main). Il test non gira
    mai l'event loop (è bloccato in wait_until/time.sleep), quindi gli
@@ -40,7 +40,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from klamav_py.clamd_client import ScanResult
+from klamav_py.clamd_client import ClamdEndpoint, ScanResult
 from klamav_py.gui import scan_worker as sw_module
 from klamav_py.gui.scan_worker import ScanWorker
 
@@ -90,13 +90,15 @@ class BarrierClient:
 def make_worker(files):
     created = []
 
-    def factory(unix_socket=None):
-        client = BarrierClient(files, unix_socket=unix_socket)
+    # Il worker chiama la factory senza argomenti (l'endpoint lo conosce
+    # già lui); **kw la tiene compatibile con eventuali parametri futuri.
+    def factory(**kw):
+        client = BarrierClient(files)
         created.append(client)
         return client
 
     worker = ScanWorker(
-        socket_path="/finto/clamd.ctl",
+        endpoint=ClamdEndpoint.unix("/finto/clamd.ctl"),
         target=Path("/finto/target"),
         quarantine_dir=None,
         auto_quarantine=False,

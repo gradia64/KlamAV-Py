@@ -2,8 +2,8 @@
 CLI di scansione. Pensata per due usi:
 
   1. interattivo:      klamav-py scan /percorso/da/controllare
-  2. da systemd timer: klamav-py scan /home --quarantine --quiet
-     (vedi le unit utente in debian/ e systemd/)
+  2. da systemd timer: klamav-py scan %h --quarantine DIR --quiet
+     (vedi la unit utente in debian/)
 
 La directory di quarantena (--quarantine) è sempre esclusa
 automaticamente dall'attraversamento: i file già gestiti non devono
@@ -22,16 +22,71 @@ esecuzione (clamd irraggiungibile, path inesistente, ecc.) — utile per
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
 from . import __version__
-from .clamd_client import DEFAULT_MAX_STREAM_SIZE, ClamdClient, ClamdError
+from .clamd_client import (
+    DEFAULT_MAX_STREAM_SIZE,
+    DEFAULT_SOCKET,
+    ClamdEndpoint,
+    ClamdError,
+    ClamdUnavailable,
+)
 from .private_files import open_private_for_write
-from .quarantine import Quarantine
+from .quarantine import Quarantine, QuarantineError
+from .quarantine_location import decide as decide_quarantine_dir
 from .quarantine_policy import QuarantinePolicy, default_report_only_dirs
+
+
+def _socket_endpoint(value: str) -> ClamdEndpoint:
+    try:
+        return ClamdEndpoint.unix(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _tcp_endpoint(value: str) -> ClamdEndpoint:
+    try:
+        return ClamdEndpoint.parse_cli(value)
+    except ValueError as exc:
+        # ArgumentTypeError invece di ValueError: argparse mostra il motivo
+        # ("porta fuori intervallo…") invece di un generico "invalid value".
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def add_endpoint_arguments(parser: argparse.ArgumentParser, default: ClamdEndpoint | None) -> None:
+    """
+    --socket e --tcp, condivisi da CLI e GUI: scrivono lo stesso
+    ClamdEndpoint in args.endpoint, così il resto del programma non sa (e
+    non deve sapere) quale dei due è stato usato. Mutuamente esclusivi e
+    senza ripiego automatico: una configurazione sbagliata fallisce in modo
+    visibile, e un ripiego verso TCP, in chiaro, sarebbe un peggioramento
+    di sicurezza.
+    """
+    endpoint = parser.add_mutually_exclusive_group()
+    endpoint.add_argument(
+        "--socket",
+        dest="endpoint",
+        metavar="PERCORSO",
+        type=_socket_endpoint,
+        help=f"Percorso del socket Unix di clamd (default: {DEFAULT_SOCKET})",
+    )
+    endpoint.add_argument(
+        "--tcp",
+        dest="endpoint",
+        metavar="HOST[:PORTA]",
+        type=_tcp_endpoint,
+        help=(
+            "Collegati a clamd via TCP invece che tramite socket Unix (porta "
+            "predefinita 3310; per IPv6 [indirizzo]:porta). I contenuti dei "
+            "file scansionati viaggiano in chiaro: solo localhost o reti fidate."
+        ),
+    )
+    parser.set_defaults(endpoint=default)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,11 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {__version__}",
     )
-    parser.add_argument(
-        "--socket",
-        default="/run/clamav/clamd.ctl",
-        help="Percorso del socket Unix di clamd (default: %(default)s)",
-    )
+    add_endpoint_arguments(parser, default=ClamdEndpoint())
     sub = parser.add_subparsers(dest="command", required=True)
 
     scan = sub.add_parser("scan", help="Scansiona un file o una directory")
@@ -145,6 +196,58 @@ def _error_category(signature: str) -> str:
     return cleaned.strip()
 
 
+def _prepare_quarantine_dir(raw: Path, scan_root: Path) -> Path | None:
+    """
+    Valida --quarantine con la stessa regola delle Impostazioni della GUI
+    (quarantine_location.decide) e ritorna la directory risolta, o None
+    dopo aver stampato il motivo (uscita 2).
+
+    Due differenze volute rispetto alla GUI:
+    - un percorso relativo è risolto sulla directory corrente: in una
+      shell la cwd è significativa, in una GUI lanciata dal menu no;
+    - una directory volatile (/tmp, /var/tmp, /run, /dev) è un errore solo
+      sotto systemd (INVOCATION_ID, impostata per ogni servizio): lì
+      PrivateTmp la rende privata e la distrugge a fine scansione, file
+      infetti compresi. In primo piano /tmp è quella reale e visibile, e
+      basta un avviso.
+    """
+    raw = raw.expanduser()
+    if not raw.is_absolute():
+        raw = Path.cwd() / raw
+    decision = decide_quarantine_dir(str(raw))
+    if decision.error:
+        print(f"Quarantena non utilizzabile: {decision.error}", file=sys.stderr)
+        return None
+    path = decision.path
+
+    if decision.volatile:
+        if os.environ.get("INVOCATION_ID"):
+            print(f"Quarantena non utilizzabile: {decision.volatile}", file=sys.stderr)
+            return None
+        print(f"ATTENZIONE: {decision.volatile}", file=sys.stderr)
+    for warning in decision.warnings:
+        print(f"ATTENZIONE: {warning}", file=sys.stderr)
+
+    # La quarantena è esclusa dall'attraversamento: se contenesse la radice
+    # della scansione, l'esclusione la svuoterebbe e l'uscita sarebbe 0
+    # senza aver controllato un solo file.
+    if scan_root == path or scan_root.is_relative_to(path):
+        print(
+            f"Quarantena non utilizzabile: «{path}» contiene il percorso da "
+            f"scansionare ({scan_root}), che verrebbe escluso per intero.",
+            file=sys.stderr,
+        )
+        return None
+
+    if decision.loose_mode is not None:
+        print(
+            f"Nota: «{path}» ha permessi {decision.loose_mode:o}, ristretti a 700 "
+            "per l'uso come quarantena.",
+            file=sys.stderr,
+        )
+    return path
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     scan_root_input = args.path.expanduser()
     if not scan_root_input.exists():
@@ -162,7 +265,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     scan_root = scan_root_input.resolve()
     exclude_dirs = [Path(p).expanduser().resolve() for p in args.exclude]
     if args.quarantine:
-        quarantine_dir = args.quarantine.expanduser().resolve()
+        quarantine_dir = _prepare_quarantine_dir(args.quarantine, scan_root)
+        if quarantine_dir is None:
+            return 2
         # L'esclusione della directory di quarantena va SEMPRE aggiunta,
         # indipendentemente da --exclude: è il dato gestito
         # dall'applicazione stessa, ri-rilevarlo a ogni scansione che
@@ -184,8 +289,32 @@ def cmd_scan(args: argparse.Namespace) -> int:
     else:
         max_stream_size = args.max_stream_size
 
-    client = ClamdClient(unix_socket=str(args.socket))
-    quarantine = Quarantine(quarantine_dir) if quarantine_dir else None
+    client = args.endpoint.new_client()
+    # Controllo preliminare: scan_stream NON solleva eccezioni se clamd è
+    # irraggiungibile, trasforma il fallimento di connessione in un
+    # risultato ERROR per ogni file (giusto per un errore su un singolo
+    # file, sbagliato per "clamd spento"). Senza questo PING, clamd giù,
+    # socket senza permessi o host TCP sbagliato davano N errori e uscita
+    # 0, e la scansione programmata non notificava nulla.
+    # clamd che sparisce A SCANSIONE INIZIATA è gestito più sotto
+    # (ClamdUnavailable dal client).
+    where = args.endpoint.describe()
+    try:
+        alive = client.ping()
+    except (ClamdError, OSError) as exc:
+        print(f"clamd non raggiungibile su {where}: {exc}", file=sys.stderr)
+        return 2
+    if not alive:
+        print(f"clamd su {where} non ha risposto correttamente al PING", file=sys.stderr)
+        return 2
+    # Il costruttore crea la directory: un errore qui (permessi, symlink,
+    # directory di altri) usciva come traceback con codice 1, cioè
+    # "infezioni trovate", e OnFailure notificava la cosa sbagliata.
+    try:
+        quarantine = Quarantine(quarantine_dir) if quarantine_dir else None
+    except (OSError, QuarantineError) as exc:
+        print(f"Quarantena non utilizzabile: {exc}", file=sys.stderr)
+        return 2
     policy = QuarantinePolicy(
         default_report_only_dirs() + [p.expanduser() for p in args.report_only],
         enabled=not args.quarantine_all,
@@ -246,11 +375,30 @@ def cmd_scan(args: argparse.Namespace) -> int:
                     log_fh.write(f"{result.path}\t{result.signature}\n")
             elif not args.quiet:
                 print(f"OK: {result.path}")
-    except ClamdError as exc:
-        print(f"Errore di comunicazione con clamd: {exc}", file=sys.stderr)
+    except ClamdUnavailable as exc:
+        # clamd sparito a scansione iniziata (i riavvii brevi sono già
+        # assorbiti dai nuovi tentativi del client): quanto scansionato
+        # finora è stato stampato, ma il risultato non vale come "pulito".
+        print(
+            f"\nclamd non più raggiungibile su {exc.where} dopo {scanned} file: {exc}. "
+            "Scansione incompleta.",
+            file=sys.stderr,
+        )
         return 2
-    except (ConnectionRefusedError, FileNotFoundError) as exc:
-        print(f"clamd non raggiungibile su {args.socket}: {exc}", file=sys.stderr)
+    except ClamdError as exc:
+        print(
+            f"Errore di comunicazione con clamd ({args.endpoint.describe()}): {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    except OSError as exc:
+        # Tutto OSError, non solo ConnectionRefused/FileNotFound: permessi
+        # negati sul socket (utente fuori dal gruppo clamav), host TCP non
+        # risolvibile, rete irraggiungibile, timeout. Prima questi casi
+        # uscivano come traceback con codice 1, cioè "infezioni trovate".
+        # Gli errori di lettura dei singoli file non arrivano qui: il
+        # client li trasforma in risultati ERROR.
+        print(f"clamd non raggiungibile su {args.endpoint.describe()}: {exc}", file=sys.stderr)
         return 2
     finally:
         if log_fh:
@@ -284,13 +432,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_ping(args: argparse.Namespace) -> int:
-    client = ClamdClient(unix_socket=str(args.socket))
+    where = args.endpoint.describe()
     try:
-        alive = client.ping()
+        alive = args.endpoint.new_client().ping()
     except (ClamdError, OSError) as exc:
-        print(f"clamd non raggiungibile: {exc}", file=sys.stderr)
+        print(f"clamd non raggiungibile su {where}: {exc}", file=sys.stderr)
         return 2
-    print("clamd attivo" if alive else "clamd non ha risposto correttamente")
+    print(f"clamd attivo su {where}" if alive else f"clamd su {where} non ha risposto correttamente")
     return 0 if alive else 2
 
 

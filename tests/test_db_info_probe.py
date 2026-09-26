@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from klamav_py.clamd_client import ClamdEndpoint
 from klamav_py.db_freshness import DbInfo, describe
 
 pytest.importorskip("PySide6")
@@ -48,16 +49,25 @@ def _fake_clamd(path, reply):
 def test_probe_reads_version(tmp_path):
     path = str(tmp_path / "clamd.ctl")
     t = _fake_clamd(path, b"ClamAV 1.4.2/27072/Tue Sep 22 09:00:00 2026\0")
-    assert probe_db_info(path, timeout=2) == INFO
+    assert probe_db_info(ClamdEndpoint.unix(path), timeout=2) == INFO
     t.join(2)
 
 
 def test_probe_without_database(tmp_path):
     path = str(tmp_path / "clamd.ctl")
     t = _fake_clamd(path, b"ClamAV 1.4.2\0")
-    assert probe_db_info(path, timeout=2) is None
+    assert probe_db_info(ClamdEndpoint.unix(path), timeout=2) is None
     t.join(2)
 
 
 def test_probe_missing_socket(tmp_path):
-    assert probe_db_info(str(tmp_path / "assente.ctl"), timeout=1) is None
+    # ClamdUnavailable non è un OSError: probe_db_info deve intercettarla.
+    assert probe_db_info(ClamdEndpoint.unix(str(tmp_path / "assente.ctl")), timeout=1) is None
+
+
+def test_probe_tcp_closed_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    assert probe_db_info(ClamdEndpoint.tcp("127.0.0.1", port), timeout=1) is None

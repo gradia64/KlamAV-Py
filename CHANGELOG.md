@@ -5,6 +5,59 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## 0.1.10 — 2026-09-26
+
+### Sicurezza
+- Tag dei rilasci firmati con una chiave GPG dedicata al progetto (impronta
+  nel README). Il pacchetto AUR clona il tag e ne verifica la firma
+  (`?signed`, `validpgpkeys`) invece di scaricare l'archivio non firmato.
+- La quarantena non può più stare in una directory volatile. Con
+  `PrivateTmp` la unit la creava nella sua `/var/tmp` privata, che systemd
+  elimina a fine scansione: file infetti e indice persi senza avvisi.
+  Rifiutate `/tmp`, `/var/tmp`, `/run`, `/dev` e i percorsi nascosti dalla
+  sandbox; avviso per tmpfs e ramfs montati altrove.
+- clamd via TCP apre la rete della unit solo per chi lo usa: il drop-in
+  sovrascrive `PrivateNetwork` ed estende `RestrictAddressFamilies`, senza
+  togliere il filtro. La unit spedita resta senza rete.
+
+### Corretto
+- clamd irraggiungibile (spento, socket senza permessi, host sbagliato)
+  produceva un errore per file e uscita 0: la scansione programmata non
+  notificava nulla. Ora esce con 2, anche se clamd sparisce a scansione
+  iniziata; un riavvio breve di clamd viene tollerato.
+- Errori di connessione e di creazione della quarantena uscivano come
+  traceback con codice 1, cioè "infezioni trovate".
+- `klamav-py scan` con una quarantena che conteneva il percorso da
+  scansionare usciva con 0 senza aver controllato alcun file.
+- Dopo un cambio di cartella di quarantena, scansione manuale e pagina
+  Quarantena restavano sulla vecchia fino al riavvio.
+- Un socket di clamd non predefinito era ignorato dalla scansione
+  programmata di sistema.
+
+### Aggiunto
+- Connessione a clamd via TCP: `--tcp HOST[:PORTA]` in CLI e GUI, scelta
+  nelle Impostazioni con avviso sul traffico in chiaro (clamd non supporta
+  TLS). Nessun ripiego automatico fra socket e TCP.
+- Cartella di quarantena e connessione delle Impostazioni valgono anche per
+  `klamav-scan.timer`, tramite un drop-in utente rimosso al ritorno ai
+  valori predefiniti. Altri drop-in che lo rendono inefficace (per esempio
+  un `override.conf`) vengono segnalati.
+- Pianificazione interna e timer di sistema resi alternativi: attivando la
+  prima viene proposto di disattivare il secondo.
+- Pagine man `klamav-py(1)` e `klamav-py-gui(1)`, in italiano e inglese.
+- Test su TCP, quarantena del timer, drop-in in conflitto e man page.
+  Totale: 582 test.
+  
+### Modificato
+- Rimossa la scansione per percorso (CONTSCAN): solo INSTREAM, che funziona
+  uguale via socket e via TCP e non richiede che clamd legga i file.
+- Validazione della cartella di quarantena condivisa fra GUI e CLI; nella
+  CLI un percorso relativo è risolto sulla directory corrente.
+
+Aggiornamento da AUR: la prima installazione richiede la chiave di rilascio
+(`gpg --recv-keys EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9`); paru e yay
+propongono di importarla da soli.
+
 ## 0.1.9 — 2026-09-24
 
 ### Sicurezza

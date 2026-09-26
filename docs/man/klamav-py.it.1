@@ -1,0 +1,330 @@
+.\" -*- coding: utf-8 -*-
+.\" klamav-py(1) — pagina italiana
+.\"
+.\" Convenzioni di manutenzione:
+.\"   .\" TODO:   dettaglio da verificare sul codice prima del tag
+.\"   .\" [TCP]   blocco da scommentare nel commit che introduce --tcp
+.\" Coerenza con build_parser() e con la pagina inglese verificata da
+.\" tests/test_manpage.py.
+.\"
+.TH KLAMAV-PY 1 "2026-09-26" "KlamAV-Py 0.1.10" "Comandi utente"
+.\" Sillabazione disattivata: i pattern italiani non sono garantiti ovunque
+.nh
+.
+.SH NOME
+klamav-py \- scansione antivirus a riga di comando tramite il demone ClamAV
+.
+.SH SINTASSI
+.B klamav-py
+.RB [ \-\-socket
+.IR percorso ]
+.RB [ \-\-tcp
+.IR host [: porta ]]
+.B scan
+.I percorso
+.RI [ opzioni ]
+.br
+.B klamav-py
+.RB [ \-\-socket
+.IR percorso ]
+.RB [ \-\-tcp
+.IR host [: porta ]]
+.B ping
+.br
+.B klamav-py \-\-version
+.
+.SH DESCRIZIONE
+.B klamav-py
+scansiona file e directory delegando l'analisi a
+.BR clamd (8)
+tramite il suo protocollo nativo, senza invocare shell né programmi esterni.
+I file vengono trasmessi a clamd come flusso
+.RB ( INSTREAM ),
+quindi il demone non ha bisogno di permessi di lettura sui percorsi
+dell'utente.
+Per default più file condividono una sessione persistente
+.RB ( IDSESSION ).
+.PP
+Il comando non dipende da Qt e funziona con il solo Python di sistema,
+per l'uso da script e dalla scansione programmata.
+L'interfaccia grafica è fornita da
+.BR klamav-py-gui (1).
+.
+.SH COMANDI
+.TP
+.BI scan " percorso"
+Scansiona un file o, ricorsivamente, una directory.
+Accetta un solo percorso per invocazione.
+.TP
+.B ping
+Verifica che clamd risponda.
+.
+.SH OPZIONI
+Le opzioni globali vanno indicate prima del comando.
+.TP
+.B \-\-version
+Mostra la versione ed esce.
+.TP
+.BI \-\-socket " percorso"
+Socket Unix di clamd.
+Predefinito:
+.IR /run/clamav/clamd.ctl .
+.TP
+.BI \-\-tcp " host\fR[\fP:porta\fR]\fP"
+Collegati a clamd via TCP invece che tramite socket Unix
+(porta predefinita 3310).
+Per IPv6 usare la forma
+.IR [indirizzo]:porta .
+Incompatibile con
+.BR \-\-socket .
+Vedere
+.B SICUREZZA
+prima di usarla.
+.SS Opzioni di scan
+.TP
+.BI \-\-quarantine " directory"
+Sposta i file infetti in
+.IR directory ,
+creata con permessi 0700 se non esiste; una directory esistente con
+permessi più larghi viene ristretta a 0700, con un avviso.
+Un percorso relativo è risolto rispetto alla directory corrente.
+La directory è sempre esclusa dalla scansione, così i file già isolati
+non vengono rilevati di nuovo: per questo non può contenere il
+.I percorso
+da scansionare, che verrebbe escluso per intero.
+Le directory volatili producono un avviso o un errore, e alcuni
+rilevamenti sono solo segnalati (vedere
+.BR SICUREZZA ).
+.TP
+.BI \-\-exclude " directory"
+Esclude
+.I directory
+dall'attraversamento: il suo contenuto non viene nemmeno letto.
+Ripetibile.
+.TP
+.BI \-\-report\-only " directory"
+Con
+.BR \-\-quarantine ,
+i file infetti sotto
+.I directory
+sono segnalati ma non spostati.
+Ripetibile; si aggiunge agli archivi di posta già protetti.
+.TP
+.B \-\-quarantine\-all
+Con
+.BR \-\-quarantine ,
+sposta anche i rilevamenti euristici e i file negli archivi di posta,
+che per default sono solo segnalati.
+.TP
+.BI \-\-max\-stream\-size " byte"
+File più grandi di
+.I byte
+non vengono inviati a clamd e sono segnalati come non verificati, senza
+contarli come errori.
+Predefinito: 25 MB, allineato a
+.B StreamMaxLength
+di
+.BR clamd.conf (5).
+Il valore 0 disattiva il controllo.
+.TP
+.B \-\-quiet
+Non mostra i file puliti, i singoli file non verificati e le voci saltate.
+Infezioni, errori e riepilogo restano visibili.
+.TP
+.B \-\-no\-persistent
+Apre una nuova connessione a clamd per ogni file invece di usare una
+sessione persistente.
+Più lento: serve solo a isolare problemi legati alla sessione.
+.TP
+.BI \-\-session\-batch\-size " n"
+Numero di file dopo cui la sessione persistente viene chiusa e riaperta.
+Predefinito: 500.
+.TP
+.BI \-\-log\-errors " file"
+Scrive in
+.I file
+una riga per ogni errore, con percorso e motivo separati da una
+tabulazione.
+Il file viene creato con permessi 0600, senza seguire link simbolici e
+rifiutando file preesistenti di altri utenti.
+.
+.SH OUTPUT
+Una riga per file:
+.BR OK: ,
+.BR INFETTO:
+(con la firma e l'esito dell'eventuale quarantena),
+.B NON VERIFICATO
+per i file oltre la soglia, oppure
+.B ERRORE
+su standard error.
+Segue un riepilogo con i totali e, se ci sono errori, un conteggio per
+tipo di errore.
+.
+.SH STATO DI USCITA
+.TP
+.B 0
+Nessuna infezione trovata, anche in presenza di errori di lettura o di
+file non verificati.
+.TP
+.B 1
+Infezioni trovate, anche se la quarantena di qualche file non è riuscita.
+.TP
+.B 2
+Errore bloccante: percorso inesistente, directory di quarantena non
+utilizzabile, clamd non raggiungibile o errore di protocollo, file di
+.B \-\-log\-errors
+non apribile, riga di comando non valida.
+Un errore di comunicazione a scansione iniziata prevale su eventuali
+infezioni già trovate.
+.PP
+Per
+.BR ping :
+0 se clamd risponde, 2 altrimenti.
+.PP
+Nella scansione programmata i codici 1 e 2 attivano la notifica desktop
+tramite
+.BR klamav-scan-notify.service .
+.
+.SH AMBIENTE
+.TP
+.B INVOCATION_ID
+Impostata da systemd per ogni servizio.
+Se presente, una directory di quarantena volatile passata con
+.B \-\-quarantine
+diventa un errore invece di un avviso (vedere
+.BR SICUREZZA ).
+.
+.SH FILE
+.TP
+.I \%/usr/lib/systemd/user/klamav-scan.service
+.TQ
+.I \%/usr/lib/systemd/user/klamav-scan.timer
+Unità utente per la scansione programmata della home, eseguita in
+sandbox con priorità minima di CPU e I/O.
+La directory di quarantena usata dal timer si cambia dalle Impostazioni
+di
+.BR klamav-py-gui (1).
+.TP
+.I \%/usr/lib/systemd/user/klamav-scan-notify.service
+Notifica desktop, attivata solo da
+.B OnFailure=
+della scansione.
+.TP
+.I \%~/.local/share/klamav-py/quarantine
+Directory di quarantena della scansione programmata (0700).
+Contiene i file isolati (0400) e i file di servizio (0600):
+l'indice
+.IR index.json ,
+il lock
+.IR index.json.lock ,
+mai troncato né riscritto, e i temporanei della scrittura atomica.
+Un indice illeggibile viene rinominato in
+.I index.json.corrupt-*
+e mai cancellato, per consentire il recupero manuale.
+.
+.SH SICUREZZA
+.SS Directory di quarantena
+La quarantena non può risiedere su directory volatili:
+.IR /tmp ,
+.IR /var/tmp ,
+.I /run
+e
+.I /dev
+sono rifiutate, così come i percorsi che le direttive di sandbox della
+unit rendono privati o inaccessibili.
+Il controllo avviene sul percorso già espanso e risolto, quindi vale
+anche per link simbolici come
+.IR /var/run .
+.PP
+Motivo: la unit di scansione usa
+.BR PrivateTmp=true .
+Una quarantena in
+.I /var/tmp
+finirebbe nella directory temporanea privata del servizio, che systemd
+elimina al termine della scansione insieme all'indice: i file infetti
+verrebbero distrutti senza alcun errore né notifica.
+.PP
+Directory su altri file system
+.BR tmpfs " o " ramfs
+sono accettate con un avviso, perché il loro contenuto va perso al
+riavvio.
+.PP
+Con
+.B \-\-quarantine
+da riga di comando, in primo piano, una directory volatile produce solo
+un avviso: lì
+.I /tmp
+è quella reale e visibile.
+Sotto systemd (variabile
+.B INVOCATION_ID
+presente) è invece un errore, con stato di uscita 2.
+.
+.SS Rilevamenti non spostati
+Con
+.BR \-\-quarantine ,
+i rilevamenti euristici
+.RB ( Heuristics.* )
+e i file negli archivi di posta di KMail/Akonadi, Thunderbird, Evolution
+e Maildir vengono segnalati ma non spostati, per non danneggiare le
+mailbox dell'utente.
+Vanno verificati a mano: il riepilogo ne riporta il numero.
+.B \-\-report\-only
+aggiunge altre directory a questa regola,
+.B \-\-quarantine\-all
+la disattiva.
+.SS Connessione TCP
+clamd non supporta TLS: con
+.B \-\-tcp
+il contenuto dei file scansionati viaggia in chiaro.
+Usarla solo verso localhost o reti fidate, oppure attraverso un
+tunnel
+.BR ssh (1)
+o
+.BR stunnel (8).
+Non esiste fallback automatico fra socket Unix e TCP.
+.PP
+Abilitare
+.B TCPSocket
+in
+.BR clamd.conf (5)
+è sconsigliato: a differenza del socket Unix, protetto dai suoi
+permessi, una porta TCP permette a ogni utente locale di usare
+clamd come oracolo di scansione.
+.PP
+La scansione programmata di sistema usa la connessione impostata in
+.BR klamav-py-gui (1).
+Con TCP il suo drop-in consente la rete, sovrascrivendo
+.B PrivateNetwork=no
+e
+.B RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+senza togliere il filtro; con il socket Unix la unit resta senza accesso
+alla rete.
+.
+.SH ESEMPI
+Scansione della home con quarantena, mostrando solo i problemi:
+.PP
+.RS
+.EX
+klamav\-py scan ~ \-\-quarantine ~/.local/share/klamav\-py/quarantine \-\-quiet
+.EE
+.RE
+.PP
+Verifica che clamd risponda su un socket non standard:
+.PP
+.RS
+.EX
+klamav\-py \-\-socket /run/clamd.scan/clamd.sock ping
+.EE
+.RE
+.
+.SH VEDERE ANCHE
+.BR klamav-py-gui (1),
+.BR clamd (8),
+.BR clamd.conf (5),
+.BR clamdscan (1),
+.BR systemd.exec (5),
+.BR systemd.timer (5)
+.PP
+.UR https://github.com/gradia64/KlamAV-Py
+Repository del progetto
+.UE
