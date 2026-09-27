@@ -169,7 +169,7 @@ def test_template_coincide_con_la_unit_spedita():
     # quando la quarantena è quella predefinita.
     unit_exec = _values(UNIT.read_text(), "ExecStart")
     assert len(unit_exec) == 1
-    nostro = EXEC_TEMPLATE.format(options="", quarantine=f"%h/{DEFAULT_QUARANTINE_SUBDIR}")
+    nostro = EXEC_TEMPLATE.format(options="", quarantine=f"%h/{DEFAULT_QUARANTINE_SUBDIR}", excludes="")
     assert split_exec(nostro, home=str(HOME)) == split_exec(unit_exec[0], home=str(HOME))
 
 
@@ -534,3 +534,78 @@ def test_dropin_paths_da_systemctl(monkeypatch):
 def test_dropin_paths_senza_manager(monkeypatch, kw):
     _fake_systemctl(monkeypatch, **kw)
     assert sd.dropin_paths() is None
+# -- cartelle escluse ----------------------------------------------------
+# Forma salvata (scan_exclusions: assoluta, NON risolta): la CLI le
+# risolve e rivalida a ogni esecuzione del timer.
+
+GOLDEN_ESCLUSIONI = f"""{HEADER}
+# Scritto e rimosso dalle Impostazioni di klamav-py-gui; vedi klamav-py-gui(1).
+
+[Service]
+# Azzeramento obbligatorio: su Type=oneshot le ExecStart si sommano.
+ExecStart=
+ExecStart=/usr/bin/klamav-py scan %h --quarantine "{DEFAULT_Q}" --exclude "/home/utente/vm" --exclude "/home/utente/Le Mie Foto" --quiet
+"""
+
+
+def test_golden_esclusioni_con_quarantena_predefinita():
+    # Bastano le esclusioni a richiedere il drop-in.
+    text = render_dropin(
+        DEFAULT_Q, home=HOME, excludes=["/home/utente/vm", "/home/utente/Le Mie Foto"]
+    )
+    assert text == GOLDEN_ESCLUSIONI
+
+
+@pytest.mark.parametrize("excludes", [(), []])
+def test_nessun_dropin_senza_esclusioni(excludes):
+    assert render_dropin(DEFAULT_Q, home=HOME, excludes=excludes) is None
+
+
+def test_esclusioni_non_allargano_il_sandbox():
+    # Una cartella esclusa non viene letta né scritta: niente ReadWritePaths,
+    # nemmeno fuori dalla home.
+    text = render_dropin(None, home=HOME, excludes=["/srv/archivio"])
+    assert "ReadWritePaths" not in text
+
+
+@pytest.mark.parametrize("endpoint", [None, ClamdEndpoint.tcp("::1", 3311)])
+@pytest.mark.parametrize("q", [DEFAULT_Q, Path("/srv/quarantena")])
+def test_argv_esclusioni_accettato_dal_parser_della_cli(endpoint, q):
+    excludes = [str(HOME / v.lstrip("/")) for v in INSIDIOSI]
+    text = render_dropin(q, home=HOME, endpoint=endpoint, excludes=excludes)
+    argv = split_exec(_values(text, "ExecStart")[1], home=str(HOME))
+    args = build_parser().parse_args(argv[1:])
+    assert [str(e) for e in args.exclude] == excludes
+    assert args.quarantine == q and args.path == HOME and args.quiet
+    assert args.endpoint == (endpoint or ClamdEndpoint())
+
+
+def test_esclusione_con_caratteri_di_controllo_rifiutata():
+    with pytest.raises(ValueError):
+        render_dropin(None, home=HOME, excludes=["/home/utente/a\nExecStartPre=/bin/x"])
+
+
+@pytest.mark.skipif(not shutil.which("systemd-analyze"), reason="systemd-analyze non disponibile")
+def test_systemd_analyze_verify_esclusioni(tmp_path):
+    true = shutil.which("true")
+    units = tmp_path / "units"
+    dropin_dir = units / "klamav-scan.service.d"
+    dropin_dir.mkdir(parents=True)
+    runtime = tmp_path / "run"
+    runtime.mkdir(mode=0o700)
+    (units / "klamav-scan.service").write_text(UNIT.read_text().replace(EXEC_BINARY, true))
+    (units / "klamav-scan-notify.service").write_text(f"[Service]\nType=oneshot\nExecStart={true}\n")
+    text = render_dropin(
+        None, home=HOME, excludes=["/home/utente/Le Mie Cartelle/100% $HOME \"x\" \\y", "/srv/a"]
+    )
+    (dropin_dir / "50-klamav-py.conf").write_text(text.replace(EXEC_BINARY, true))
+    env = {**os.environ, "SYSTEMD_UNIT_PATH": f"{units}:", "XDG_RUNTIME_DIR": str(runtime)}
+    proc = subprocess.run(
+        ["systemd-analyze", "--user", "verify", "--man=no", str(units / "klamav-scan.service")],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    output = proc.stdout + proc.stderr
+    if "Failed to initialize manager" in output:
+        pytest.skip(output.strip())
+    assert proc.returncode == 0, output
+    assert "50-klamav-py.conf" not in output, output

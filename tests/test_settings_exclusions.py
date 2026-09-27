@@ -23,6 +23,7 @@ from PySide6.QtCore import QSettings, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox  # noqa: E402
 
 import klamav_py.gui.main_window as mw  # noqa: E402
+from klamav_py.systemd_dropin import HEADER, dropin_path  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -41,8 +42,18 @@ def env(app, tmp_path, monkeypatch):
     for fmt in (QSettings.NativeFormat, QSettings.IniFormat):
         QSettings.setPath(fmt, QSettings.UserScope, str(config))
 
-    calls = SimpleNamespace(timer=False, disable=0, shown=[], answers=[])
+    monkeypatch.setattr(mw, "DEFAULT_QUARANTINE_DIR", home / ".local/share/klamav-py/quarantine")
+
+    calls = SimpleNamespace(timer=False, disable=0, reload=0, shown=[], answers=[])
     monkeypatch.setattr(mw, "timer_enabled", lambda: calls.timer)
+
+    def reload():
+        # Mai il vero systemctl --user: i test girano nella sessione di chi
+        # li lancia.
+        calls.reload += 1
+        return None
+
+    monkeypatch.setattr(mw, "daemon_reload", reload)
     monkeypatch.setattr(mw, "foreign_overrides", lambda **kw: [])
 
     def disable():
@@ -60,7 +71,7 @@ def env(app, tmp_path, monkeypatch):
 
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(warning))
     monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
-    return SimpleNamespace(home=home, tmp=tmp_path, calls=calls)
+    return SimpleNamespace(home=home, tmp=tmp_path, calls=calls, dropin=dropin_path())
 
 
 def _settings():
@@ -237,3 +248,75 @@ def test_scansione_programmata_passa_le_esclusioni(env, monkeypatch):
     assert len(creati) == 1
     assert creati[0]["target"] == (env.home / "Documenti").resolve()
     assert creati[0]["exclude_dirs"] == ["~/Documenti/archivio"]
+
+
+# -- drop-in del timer di sistema ----------------------------------------
+
+def test_salvataggio_scrive_le_esclusioni_nel_dropin(env):
+    page = _page(env, [str(env.home / "vm")])
+    page._save_schedule()
+    text = env.dropin.read_text()
+    assert text.startswith(HEADER)
+    assert f'--exclude "{env.home / "vm"}"' in text
+    assert env.calls.reload == 1
+
+
+def test_lista_svuotata_rimuove_il_dropin(env):
+    page = _page(env, [str(env.home / "vm")])
+    page._save_schedule()
+    page.excl_list.setCurrentRow(0)
+    page._remove_exclusion()
+    page._save_schedule()
+    assert not env.dropin.exists()
+    assert env.calls.reload == 2
+
+
+def test_salvataggio_senza_cambi_non_ricarica(env):
+    page = _page(env)
+    page._save_schedule()
+    assert not env.dropin.exists() and env.calls.reload == 0
+
+
+def test_dropin_estraneo_nessun_salvataggio(env):
+    env.dropin.parent.mkdir(parents=True)
+    env.dropin.write_text("[Service]\n# scritto a mano\n")
+    page = _page(env, [str(env.home / "vm")])
+    page.target_edit.setText(str(env.home / "Documenti"))
+    page._save_schedule()
+    assert _kinds(env) == ["warning"]
+    assert _settings().value("schedule_target") == str(env.home)
+    assert env.dropin.read_text() == "[Service]\n# scritto a mano\n"
+
+
+def test_quarantena_salvata_resta_nel_dropin(env):
+    # Stato completo: salvare la Pianificazione non deve perdere la
+    # quarantena scelta nelle Impostazioni.
+    q = env.home / "Quarantena"
+    s = _settings()
+    s.setValue("quarantine_dir", str(q))
+    s.sync()
+    page = _page(env, [str(env.home / "vm")])
+    page._save_schedule()
+    text = env.dropin.read_text()
+    assert f'--quarantine "{q}"' in text and "--exclude" in text
+
+
+def test_impostazioni_conservano_le_esclusioni_nel_dropin(env, monkeypatch):
+    # Il verso opposto: salvare le Impostazioni (quarantena) rigenera il
+    # drop-in con le esclusioni già salvate dalla Pianificazione.
+    from klamav_py.quarantine_location import decide
+
+    monkeypatch.setattr(
+        mw, "decide_quarantine_dir",
+        lambda raw: decide(raw, unit_hidden=(), mountinfo="22 1 8:1 / / rw - ext4 /dev/sda1 rw\n",
+                           volatile_roots=()),
+    )
+    s = _settings()
+    s.setValue(mw.SCHEDULE_EXCLUDES_KEY, [str(env.home / "vm")])
+    s.sync()
+    page = mw.SettingsPage()
+    page.quar_edit.setText(str(env.home / "Quarantena"))
+    page._save_settings()
+    text = env.dropin.read_text()
+    assert f'--exclude "{env.home / "vm"}"' in text
+    assert f'--quarantine "{env.home / "Quarantena"}"' in text

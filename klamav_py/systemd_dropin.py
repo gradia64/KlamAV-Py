@@ -11,6 +11,9 @@ e lo rimuove quando tutto torna ai valori predefiniti. Lo stesso vale per la
 connessione a clamd: un socket diverso da quello predefinito diventa
 --socket nell'ExecStart, TCP diventa --tcp più le due righe che consentono
 la rete (PrivateNetwork=no, RestrictAddressFamilies con AF_INET/AF_INET6).
+Le cartelle escluse della pagina Pianificazione diventano un --exclude
+ciascuna, nella forma non risolta: la CLI le risolve e le rivalida a ogni
+scansione (scan_exclusions).
 Un solo file, generato dallo stato completo: con più drop-in, ognuno
 azzererebbe ExecStart= e vincerebbe l'ultimo in ordine alfabetico, perdendo
 in silenzio gli altri.
@@ -34,6 +37,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Iterable
 
 from .clamd_client import DEFAULT_SOCKET, ClamdEndpoint
 from .private_files import ensure_private_dir, write_private_text
@@ -49,7 +53,7 @@ HEADER = "# Generato da KlamAV-Py: non modificare a mano."
 # verificata dai test, quindi un cambio nella unit non può passare
 # inosservato qui.
 EXEC_BINARY = "/usr/bin/klamav-py"
-EXEC_TEMPLATE = EXEC_BINARY + " {options}scan %h --quarantine {quarantine} --quiet"
+EXEC_TEMPLATE = EXEC_BINARY + " {options}scan %h --quarantine {quarantine}{excludes} --quiet"
 
 # Percorso assoluto, niente PATH: stesso principio di trusted_binary() in
 # freshclam_service.py.
@@ -186,16 +190,28 @@ def _endpoint_options(endpoint: ClamdEndpoint | None) -> str:
     return ""
 
 
+def _exclude_options(excludes: Iterable[str]) -> str:
+    """Un " --exclude <percorso>" per voce; "" senza esclusioni."""
+    return "".join(f" --exclude {quote_exec_arg(e)}" for e in excludes)
+
+
 def render_dropin(
     quarantine: Path | None,
     *,
     home: Path,
     endpoint: ClamdEndpoint | None = None,
+    excludes: Iterable[str] = (),
 ) -> str | None:
     """
     Testo del drop-in per la directory di quarantena già validata e
     risolta (quarantine_location.decide()) e per l'endpoint di clamd delle
-    Impostazioni. None quando non serve un drop-in: entrambi predefiniti.
+    Impostazioni, più le cartelle escluse della Pianificazione (forma
+    salvata, già validata da scan_exclusions). None quando non serve un
+    drop-in: tutto predefinito e nessuna esclusione.
+
+    Il drop-in si genera dallo stato COMPLETO: chi salva la quarantena
+    deve passare anche le esclusioni, e viceversa, altrimenti un
+    salvataggio cancellerebbe in silenzio ciò che l'altro ha scritto.
 
     ReadWritePaths solo per le directory fuori dalla home: la unit ha già
     ReadWritePaths=%h, e allargare il sandbox quando non serve non ha senso.
@@ -209,7 +225,8 @@ def render_dropin(
     home = home.resolve()
     default_quarantine = (home / DEFAULT_QUARANTINE_SUBDIR).resolve()
     options = _endpoint_options(endpoint)
-    if (quarantine is None or quarantine == default_quarantine) and not options:
+    exclude_options = _exclude_options(excludes)
+    if (quarantine is None or quarantine == default_quarantine) and not options and not exclude_options:
         return None
     quarantine = quarantine or default_quarantine
     if not quarantine.is_absolute():
@@ -223,7 +240,9 @@ def render_dropin(
         "# Azzeramento obbligatorio: su Type=oneshot le ExecStart si sommano.",
         "ExecStart=",
         "ExecStart="
-        + EXEC_TEMPLATE.format(options=options, quarantine=quote_exec_arg(str(quarantine))),
+        + EXEC_TEMPLATE.format(
+            options=options, quarantine=quote_exec_arg(str(quarantine)), excludes=exclude_options
+        ),
     ]
     if not (quarantine == home or quarantine.is_relative_to(home)):
         lines.append("ReadWritePaths=" + quote_path_value(str(quarantine)))

@@ -1923,6 +1923,50 @@ class SchedulerPage(QWidget):
             self.excl_list.takeItem(self.excl_list.row(item))
         self._update_exclusion_buttons()
 
+    def _sync_system_dropin(self, excludes: list[str]) -> bool:
+        """
+        Rigenera il drop-in di klamav-scan.service con le nuove esclusioni e
+        con quarantena ed endpoint già salvati nelle Impostazioni (stato
+        completo, vedi render_dropin). False, con un avviso, se il
+        salvataggio va annullato. Il daemon-reload fallito è solo un avviso,
+        come nelle Impostazioni: un ritardo, non una divergenza.
+        """
+        title = "Pianificazione Scansioni"
+        try:
+            endpoint = load_endpoint(self.settings)
+        except ValueError as exc:
+            QMessageBox.warning(
+                self, title,
+                f"Impostazioni di connessione a clamd non valide ({exc}): correggile "
+                "nelle Impostazioni.\n\nLa pianificazione non è stata salvata.",
+            )
+            return False
+        quarantine = Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))).expanduser()
+        try:
+            changed = sync_dropin(render_dropin(
+                quarantine.resolve(), home=Path.home(), endpoint=endpoint, excludes=excludes,
+            ))
+        except DropinConflict as exc:
+            QMessageBox.warning(self, title, f"{exc}\n\nLa pianificazione non è stata salvata.")
+            return False
+        except OSError as exc:
+            QMessageBox.warning(
+                self, title,
+                "Impossibile aggiornare la scansione programmata di sistema:\n"
+                f"{exc}\n\nLa pianificazione non è stata salvata.",
+            )
+            return False
+        if changed:
+            problem = daemon_reload()
+            if problem:
+                QMessageBox.warning(
+                    self, title,
+                    "La scansione programmata di sistema userà le nuove esclusioni "
+                    "dal prossimo avvio della sessione "
+                    f"(systemctl --user daemon-reload non riuscito: {problem}).",
+                )
+        return True
+
     def _validated_exclusions(self) -> list[str] | None:
         """Tutte le voci contro le radici che si stanno per salvare: la
         lista e la cartella interna si validano insieme, qualunque delle
@@ -1997,6 +2041,12 @@ class SchedulerPage(QWidget):
         self.settings.setValue("schedule_enabled", self.enable_check.isChecked())
         self.settings.setValue("schedule_interval", self.interval_spin.value())
         self.settings.setValue("schedule_unit", self.unit_combo.currentText())
+        # Il timer di sistema usa la stessa lista: drop-in prima di
+        # QSettings, e se non si può scrivere non si salva nulla (GUI e
+        # timer escluderebbero cartelle diverse senza che nessuno lo sappia).
+        if not self._sync_system_dropin(excludes):
+            return
+
         self.settings.setValue("schedule_target", self.target_edit.text())
         self.settings.setValue(SCHEDULE_EXCLUDES_KEY, excludes)
 
@@ -2419,7 +2469,12 @@ class SettingsPage(QWidget):
             return None
 
         try:
-            changed = sync_dropin(render_dropin(path, home=Path.home(), endpoint=endpoint))
+            # Stato completo: anche le cartelle escluse della Pianificazione,
+            # altrimenti questo salvataggio le toglierebbe dal timer.
+            changed = sync_dropin(render_dropin(
+                path, home=Path.home(), endpoint=endpoint,
+                excludes=load_schedule_excludes(self.settings),
+            ))
         except DropinConflict as exc:
             QMessageBox.warning(self, title, f"{exc}\n\nLe impostazioni non sono state salvate.")
             return None

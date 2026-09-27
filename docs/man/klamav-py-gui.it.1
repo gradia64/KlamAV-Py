@@ -101,9 +101,12 @@ Le impostazioni della versione precedente, salvate con il nome KlamAV,
 vengono migrate automaticamente al primo avvio.
 .TP
 .I \%~/.config/systemd/user/klamav-scan.service.d/50-klamav-py.conf
-Drop-in generato dalle Impostazioni quando la directory di quarantena o
-la connessione a clamd della scansione programmata differiscono dai
-valori predefiniti; viene rimosso quando entrambe tornano ai predefiniti.
+Drop-in generato dalle Impostazioni e dalla pagina Pianificazione quando
+la directory di quarantena o la connessione a clamd della scansione
+programmata differiscono dai valori predefiniti, o quando ci sono cartelle
+escluse (una opzione
+.B \-\-exclude
+ciascuna); viene rimosso quando tutto torna ai predefiniti.
 Il file è riconosciuto dall'intestazione
 .RI \(lq "Generato da KlamAV-Py" \(rq:
 non va modificato a mano, e un file con lo stesso nome privo di tale
