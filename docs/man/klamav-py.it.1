@@ -100,6 +100,15 @@ Esclude
 .I directory
 dall'attraversamento: il suo contenuto non viene nemmeno letto.
 Ripetibile.
+È un errore (codice di uscita 2) se
+.I directory
+non è una directory, perché i singoli file verrebbero scansionati comunque,
+o se contiene
+.IR percorso ,
+che verrebbe escluso per intero.
+Una directory che non esiste ancora, o che sta fuori da
+.IR percorso ,
+produce solo un avviso.
 .TP
 .BI \-\-report\-only " directory"
 Con

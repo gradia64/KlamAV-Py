@@ -97,6 +97,15 @@ Exclude
 .I directory
 from traversal: its contents are not even read.
 Can be repeated.
+It is an error (exit status 2) if
+.I directory
+is not a directory, since single files would be scanned anyway, or if it
+contains
+.IR path ,
+which would be excluded entirely.
+A directory that does not exist yet, or that lies outside
+.IR path ,
+only produces a warning.
 .TP
 .BI \-\-report\-only " directory"
 With

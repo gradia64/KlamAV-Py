@@ -40,6 +40,7 @@ from .private_files import open_private_for_write
 from .quarantine import Quarantine, QuarantineError
 from .quarantine_location import decide as decide_quarantine_dir
 from .quarantine_policy import QuarantinePolicy, default_report_only_dirs
+from .scan_exclusions import decide as decide_exclusion
 
 
 def _socket_endpoint(value: str) -> ClamdEndpoint:
@@ -118,8 +119,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Directory da escludere dall'attraversamento ricorsivo "
             "(ripetibile: una volta per ogni directory). Le directory "
-            "escluse non vengono nemmeno lette. La directory di "
-            "quarantena (--quarantine) è esclusa automaticamente."
+            "escluse non vengono nemmeno lette. Errore se non è una "
+            "directory o se contiene il percorso da scansionare. La "
+            "directory di quarantena (--quarantine) è esclusa "
+            "automaticamente."
         ),
     )
     scan.add_argument(
@@ -248,6 +251,30 @@ def _prepare_quarantine_dir(raw: Path, scan_root: Path) -> Path | None:
     return path
 
 
+def _prepare_exclusions(raws: list[Path], scan_root: Path) -> list[Path] | None:
+    """
+    Valida --exclude con la stessa regola delle Impostazioni della GUI
+    (scan_exclusions.decide) e ritorna le directory risolte, o None dopo
+    aver stampato il motivo (uscita 2).
+
+    Come per --quarantine, un percorso relativo è risolto sulla directory
+    corrente. Con un file come percorso da scansionare non c'è radice da
+    confrontare: _iter_files restituisce il file senza guardare le
+    esclusioni, quindi restano solo i controlli sul formato.
+    """
+    roots = {"percorso da scansionare": scan_root} if scan_root.is_dir() else {}
+    dirs: list[Path] = []
+    for raw in raws:
+        decision = decide_exclusion(str(raw), roots=roots, cwd=Path.cwd())
+        if decision.error:
+            print(f"Esclusione non utilizzabile: {decision.error}", file=sys.stderr)
+            return None
+        for warning in decision.warnings:
+            print(f"ATTENZIONE: {warning}", file=sys.stderr)
+        dirs.append(decision.path)
+    return dirs
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     scan_root_input = args.path.expanduser()
     if not scan_root_input.exists():
@@ -263,7 +290,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     # mostrati nei risultati (es. /home/utente invece di un symlink):
     # su sistemi tipici sono identici.
     scan_root = scan_root_input.resolve()
-    exclude_dirs = [Path(p).expanduser().resolve() for p in args.exclude]
+    exclude_dirs = _prepare_exclusions(args.exclude, scan_root)
+    if exclude_dirs is None:
+        return 2
     if args.quarantine:
         quarantine_dir = _prepare_quarantine_dir(args.quarantine, scan_root)
         if quarantine_dir is None:
