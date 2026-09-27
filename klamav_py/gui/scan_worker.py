@@ -13,7 +13,7 @@ import itertools
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import QThread, Signal
 
@@ -73,6 +73,7 @@ class ScanWorker(QThread):
         target: "Path | list[Path]",
         quarantine_dir: Optional[Path] = None,
         auto_quarantine: bool = False,
+        exclude_dirs: Iterable["str | Path"] = (),
         client_factory: Optional[Callable[..., Any]] = None,
         policy: Optional[QuarantinePolicy] = None,
         parent=None,
@@ -85,6 +86,11 @@ class ScanWorker(QThread):
         self.target = self.targets[0]
         self.quarantine_dir = quarantine_dir
         self.auto_quarantine = auto_quarantine
+        # Esclusioni configurate (scan_exclusions), nella forma salvata:
+        # expanduser e resolve avvengono in run(), cioè al momento della
+        # scansione, come fa la CLI per il timer. Tupla: copia immutabile,
+        # niente condivisione con la lista del chiamante fra thread.
+        self.exclude_dirs = tuple(exclude_dirs)
         # Factory iniettabile per i test (finto client senza clamd reale):
         # None = produzione, ClamdClient vero. I test della pausa hanno
         # bisogno di un client che produca risultati a ritmo controllato,
@@ -202,7 +208,12 @@ class ScanWorker(QThread):
             # significava rileggere e re-inviare a clamd ogni file già
             # quarantenato a ogni scansione che copre la quarantena (es.
             # tutta la home), per poi scartarne il risultato.
-            exclude_dirs = [quarantine_root] if quarantine_root else []
+            # Le esclusioni configurate si risolvono qui, a ogni scansione:
+            # un symlink cambiato dopo il salvataggio segue la destinazione
+            # attuale (il matching in _iter_files è letterale).
+            exclude_dirs = [Path(e).expanduser().resolve() for e in self.exclude_dirs]
+            if quarantine_root:
+                exclude_dirs.append(quarantine_root)
             iterator = itertools.chain.from_iterable(
                 client.scan_stream(
                     t,
