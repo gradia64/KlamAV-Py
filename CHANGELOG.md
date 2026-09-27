@@ -5,6 +5,49 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## 0.1.11 — 2026-09-27
+
+### Modificato
+- **`klamav-py scan --exclude` rifiuta due casi che prima passavano in
+  silenzio, con uscita 2.** Un'esclusione uguale al percorso da scansionare
+  o che lo contiene: la scansione terminava con 0 senza aver controllato
+  nulla. Un'esclusione che punta a un file: veniva ignorata e il file era
+  scansionato comunque. Uno script che usa `--exclude` in questi modi va
+  corretto. Una cartella che non esiste ancora, o fuori dal percorso da
+  scansionare, produce solo un avviso.
+- Pianificazione con il timer di sistema attivo: il dialogo ha tre esiti.
+  "No" mantiene il timer e salva, invece di annullare tutto; per annullare
+  c'è "Annulla". Le cartelle escluse si salvano in entrambi i casi.
+
+### Aggiunto
+- Cartelle escluse dalle scansioni programmate, dalla pagina
+  Pianificazione. Una lista sola per la pianificazione interna e per il
+  timer di sistema, controllata contro entrambe le cartelle da
+  scansionare; ogni voce mostra il proprio esito (icona e tooltip). Si
+  aggiungono con il selettore o scrivendo il percorso, anche di cartelle
+  nascoste o non ancora esistenti. Rende superfluo un `override.conf` con
+  `--exclude`: se ne esiste uno che ridefinisce `ExecStart`, il salvataggio
+  avvisa che sostituisce queste impostazioni.
+- Test su esclusioni, drop-in e aggiornamento con clamd via TCP. Totale:
+  695 test.
+
+### Corretto
+- Con clamd via TCP l'aggiornamento del database riavviava il freshclam
+  locale anche quando clamd usa un altro database, e riportava "nessun
+  aggiornamento". Ora è disabilitato, con una spiegazione, per un host
+  remoto, e per localhost quando clamd non usa il database di
+  `/var/lib/clamav` (per esempio in un container). L'aggiornamento
+  all'avvio non chiede più una password inutile in questi casi.
+- La scansione programmata interna usava la cartella da scansionare così
+  com'era salvata: con un link simbolico nel percorso la quarantena non
+  veniva esclusa dalla traversata, e i suoi file erano riletti e inviati a
+  clamd a ogni scansione (i risultati erano poi scartati). Ora il percorso
+  è risolto, come nella CLI.
+
+Chi usava un `override.conf` per le esclusioni del timer: dopo aver
+inserito le stesse cartelle nella Pianificazione e salvato, il file si può
+eliminare (`systemctl --user daemon-reload` subito dopo).
+
 ## 0.1.10 — 2026-09-26
 
 ### Sicurezza
