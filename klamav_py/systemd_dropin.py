@@ -12,8 +12,8 @@ connessione a clamd: un socket diverso da quello predefinito diventa
 --socket nell'ExecStart, TCP diventa --tcp più le due righe che consentono
 la rete (PrivateNetwork=no, RestrictAddressFamilies con AF_INET/AF_INET6).
 Le cartelle escluse della pagina Pianificazione diventano un --exclude
-ciascuna, nella forma non risolta: la CLI le risolve e le rivalida a ogni
-scansione (scan_exclusions).
+ciascuna, nella forma non risolta: si risolvono e rivalidano a ogni
+scansione (scan_exclusions), nella CLI come nella pianificazione interna.
 Un solo file, generato dallo stato completo: con più drop-in, ognuno
 azzererebbe ExecStart= e vincerebbe l'ultimo in ordine alfabetico, perdendo
 in silenzio gli altri.

@@ -2919,6 +2919,7 @@ class MainWindow(QMainWindow):
         self._schedule_late_noted = False
         self._schedule_skip_noted = False
         self._schedule_missing_noted = False
+        self._schedule_excludes_noted = False
         self._double_schedule_noted = False
         self.bg_worker = None
         # Log della scansione programmata scritto man mano (vedi
@@ -3416,9 +3417,33 @@ X-GNOME-Autostart-enabled=true
                 )
             return
 
+        # Stessa rivalidazione della CLI (_prepare_exclusions): le forme
+        # salvate si risolvono di nuovo qui, perché un symlink può essere
+        # stato ripuntato dopo il salvataggio. Un'esclusione che adesso
+        # contiene la radice farebbe percorrere zero file alla scansione,
+        # che risulterebbe pulita senza aver controllato nulla. Gli avvisi
+        # restano non bloccanti: sono già stati mostrati al salvataggio.
+        excludes = load_schedule_excludes(self.settings)
+        for raw in excludes:
+            decision = decide_exclusion(raw, roots={"pianificazione interna": target})
+            if not decision.usable:
+                # Come per il target mancante: una volta per scadenza,
+                # non a ogni controllo al minuto.
+                if not self._schedule_excludes_noted:
+                    self._schedule_excludes_noted = True
+                    self.tray_icon.showMessage(
+                        APP_NAME,
+                        f"Scansione programmata non eseguita: {decision.error} "
+                        "Controlla le cartelle escluse in Pianificazione.",
+                        _icon("dialog-warning"),
+                        8000,
+                    )
+                return
+
         self._schedule_late_noted = False
         self._schedule_skip_noted = False
         self._schedule_missing_noted = False
+        self._schedule_excludes_noted = False
 
         self.tray_icon.showMessage(
             APP_NAME, "Avvio scansione automatica in background...", _app_icon(), 3000
@@ -3433,7 +3458,7 @@ X-GNOME-Autostart-enabled=true
             target=target.resolve(),
             quarantine_dir=Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))),
             auto_quarantine=self.settings.value("auto_quarantine", False, type=bool),
-            exclude_dirs=load_schedule_excludes(self.settings),
+            exclude_dirs=excludes,
         )
         # A differenza della manuale, i risultati della programmata NON
         # sono visibili in nessuna lista UI: senza accumularli qui e

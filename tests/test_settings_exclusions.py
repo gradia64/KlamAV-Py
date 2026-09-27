@@ -253,6 +253,62 @@ def test_scansione_programmata_passa_le_esclusioni(env, monkeypatch):
     assert creati[0]["exclude_dirs"] == ["~/Documenti/archivio"]
 
 
+def test_scansione_programmata_rifiuta_esclusione_diventata_non_valida(env, monkeypatch):
+    # Rivalidazione al momento della scansione, come fa la CLI: l'esclusione
+    # ~/collegato era valida al salvataggio (symlink su una sottodirectory
+    # della cartella interna); ripuntato sulla home, senza il controllo la
+    # scansione partiva e percorreva zero file, risultando pulita senza
+    # aver controllato nulla.
+    creati = []
+    messaggi = []
+
+    class Signal:
+        def connect(self, *a):
+            pass
+
+    class FakeWorker:
+        def __init__(self, **kw):
+            creati.append(kw)
+            for name in ("result_ready", "progress", "finished_scan", "quarantined", "quarantine_outcome"):
+                setattr(self, name, Signal())
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(mw, "ScanWorker", FakeWorker)
+    (env.home / "Documenti" / "archivio").mkdir(parents=True)
+    collegato = env.home / "collegato"
+    collegato.symlink_to(env.home / "Documenti" / "archivio")
+    s = _settings()
+    s.setValue("schedule_target", "~/Documenti")
+    s.setValue(mw.SCHEDULE_EXCLUDES_KEY, ["~/collegato"])
+    s.sync()
+    collegato.unlink()
+    collegato.symlink_to(env.home)  # ora è un antenato della radice
+    fake = SimpleNamespace(
+        bg_worker=None,
+        scan_page=SimpleNamespace(worker=None),
+        settings=_settings(),
+        tray_icon=SimpleNamespace(showMessage=lambda *a, **k: messaggi.append(a)),
+        scheduler_page=SimpleNamespace(update_progress=lambda *a: None),
+        _bg_log_close=lambda: None,
+        _clamd_endpoint=lambda: None,
+        _schedule_skip_noted=False,
+        _schedule_missing_noted=False,
+        _schedule_late_noted=False,
+        _schedule_excludes_noted=False,
+        _on_bg_result=None, _on_bg_progress=None, _on_bg_finished=None,
+        _on_quarantine_changed=None, _on_bg_quarantine_outcome=None,
+    )
+    mw.MainWindow._run_scheduled_scan(fake)
+    assert creati == []
+    assert len(messaggi) == 1
+    assert "esclusa per intero" in messaggi[0][1]
+    # Al controllo successivo, stessa scadenza: niente seconda notifica.
+    mw.MainWindow._run_scheduled_scan(fake)
+    assert len(messaggi) == 1 and creati == []
+
+
 # -- drop-in del timer di sistema ----------------------------------------
 
 def test_salvataggio_scrive_le_esclusioni_nel_dropin(env):
