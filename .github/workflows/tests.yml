@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    # Immagine fissata: il passaggio a una nuova Ubuntu avviene con un
+    # commit verificato, non quando GitHub sposta ubuntu-latest.
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
