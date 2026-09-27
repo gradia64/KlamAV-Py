@@ -9,10 +9,6 @@ Per klamav-py la verità è build_parser() (nessuna dipendenza da Qt).
 Per klamav-py-gui il parser è costruito dentro main() e il modulo
 importa PySide6: le opzioni si leggono dall'AST, come negli altri test
 statici del progetto, così il test gira anche senza Qt.
-
-Le righe ".\\" [TCP] " sono documentazione pronta ma commentata: finché
-lo sono, --tcp non deve esistere nel parser; quando il commit TCP le
-attiva, il test pretende che il parser la accetti.
 """
 
 from __future__ import annotations
@@ -37,7 +33,6 @@ PAGES = {
     "klamav-py-gui": ["", ".it"],
 }
 
-TCP_PREFIX = '.\\" [TCP] '
 # Riga che segue .TP: ".B --opzione" o ".BI --opzione ..."
 _OPT_RE = re.compile(r'^\.BI? ((?:\\-){2}[a-z][a-z\\-]*)')
 # Riga che segue .TP: ".B comando" o ".BI comando ..." (minuscole, niente
@@ -49,11 +44,8 @@ def _files() -> list[Path]:
     return [MAN_DIR / f"{page}{lang}.1" for page, langs in PAGES.items() for lang in langs]
 
 
-def _read(path: Path, tcp: bool = False) -> list[str]:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    if tcp:
-        lines = [l[len(TCP_PREFIX):] if l.startswith(TCP_PREFIX) else l for l in lines]
-    return lines
+def _read(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8").splitlines()
 
 
 def _tagged(lines: list[str], regex: re.Pattern) -> set[str]:
@@ -67,8 +59,8 @@ def _tagged(lines: list[str], regex: re.Pattern) -> set[str]:
     return found
 
 
-def documented_options(path: Path, tcp: bool = False) -> set[str]:
-    return _tagged(_read(path, tcp), _OPT_RE)
+def documented_options(path: Path) -> set[str]:
+    return _tagged(_read(path), _OPT_RE)
 
 
 def documented_commands(path: Path) -> set[str]:
@@ -134,7 +126,7 @@ def test_file_esiste(path):
 def test_commenti_roff_integri(path):
     # '."' (backslash perso in un copia-incolla) è una chiamata a una
     # macro inesistente: groff la salta in silenzio, ma la riga non è più
-    # un commento e i blocchi [TCP] non sono più riconoscibili.
+    # un commento e il testo finisce nella pagina renderizzata.
     rotte = [n for n, l in enumerate(_read(path), 1) if l.startswith('."')]
     assert not rotte, f"{path.name}: commenti senza backslash alle righe {rotte}"
 
@@ -169,21 +161,7 @@ def test_traduzioni_allineate(page):
     paths = [MAN_DIR / f"{page}{lang}.1" for lang in PAGES[page]]
     riferimento, *altre = paths
     for p in altre:
-        # Stesse opzioni anche con i blocchi [TCP] attivati: una lingua
-        # aggiornata e l'altra no emergerebbe solo al commit TCP.
-        assert documented_options(p, tcp=True) == documented_options(riferimento, tcp=True), p.name
-        # Stesso numero di blocchi [TCP] contigui: il numero di righe può
-        # variare con la traduzione, quello dei blocchi no.
-        assert _tcp_blocks(p) == _tcp_blocks(riferimento), p.name
-
-
-def _tcp_blocks(path: Path) -> int:
-    blocchi, dentro = 0, False
-    for line in _read(path):
-        is_tcp = line.startswith(TCP_PREFIX)
-        blocchi += is_tcp and not dentro
-        dentro = is_tcp
-    return blocchi
+        assert documented_options(p) == documented_options(riferimento), p.name
 
 
 # -- versione -----------------------------------------------------------
