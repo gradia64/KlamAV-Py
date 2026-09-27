@@ -23,7 +23,7 @@ from collections import deque
 from typing import Callable
 
 from PySide6.QtCore import Qt, QSize, QSettings, Signal, QTimer, QFileSystemWatcher, QThread
-from PySide6.QtGui import QIcon, QColor, QAction, QFont, QPalette
+from PySide6.QtGui import QIcon, QColor, QAction, QFont, QPalette, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -50,6 +51,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
+    QStyle,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
@@ -61,6 +63,7 @@ from .. import __version__
 from ..clamd_client import DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult
 from ..quarantine import Quarantine
 from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir
+from ..scan_exclusions import decide as decide_exclusion
 from ..systemd_dropin import (
     DropinConflict, daemon_reload, disable_timer, foreign_overrides, render_dropin,
     sync_dropin, timer_enabled,
@@ -488,7 +491,8 @@ KDE_STYLESHEET = """
         border-bottom: 1px solid palette(mid);
         font-weight: bold;
     }
-    QListWidget#ResultsList, QListWidget#MonitoredDirsList, QListWidget#RealTimeLog {
+    QListWidget#ResultsList, QListWidget#MonitoredDirsList, QListWidget#RealTimeLog,
+    QListWidget#ExcludedDirsList {
         border: 1px solid palette(mid);
         border-radius: 8px;
         background-color: palette(base);
@@ -550,6 +554,37 @@ def save_endpoint(settings: QSettings, endpoint: ClamdEndpoint) -> None:
     settings.setValue("socket_path", endpoint.unix_socket)
     settings.setValue("tcp_host", endpoint.tcp_host)
     settings.setValue("tcp_port", endpoint.tcp_port)
+
+
+SCHEDULE_EXCLUDES_KEY = "schedule_excludes"
+
+
+def load_schedule_excludes(settings: QSettings) -> list[str]:
+    """
+    Cartelle escluse dalle scansioni programmate, nella forma salvata
+    (scan_exclusions: expanduser, assoluta, NON risolta): UNICO punto di
+    lettura della chiave. Una lista sola per pianificazione interna e
+    timer di sistema. type=list normalizza i casi di QSettings: chiave
+    assente, lista vuota e lista di un solo elemento letta come stringa.
+    """
+    value = settings.value(SCHEDULE_EXCLUDES_KEY, [], type=list)
+    return [str(v) for v in value if str(v).strip()]
+
+
+def schedule_roots(target: str, home: Path | None = None) -> dict[str, Path]:
+    """
+    Radici con cui confrontare le esclusioni: la home per il timer di
+    sistema (ExecStart: scan %h) e la cartella della pianificazione
+    interna. Una cartella interna vuota o relativa non è una radice: il
+    salvataggio della pianificazione non la valida, e la scansione la
+    segnala come inesistente.
+    """
+    roots = {"timer di sistema": home or Path.home()}
+    if target and target.strip():
+        path = Path(target).expanduser()
+        if path.is_absolute():
+            roots["pianificazione interna"] = path
+    return roots
 
 
 def _quarantine_count(path: Path) -> int:
@@ -1612,7 +1647,20 @@ class SchedulerPage(QWidget):
         # QApplication, e deve coincidere con quello della migrazione.
         self.settings = QSettings(APP_NAME, APP_NAME)
 
-        layout = QVBoxLayout(self)
+        # Scroll area come in SettingsPage: con il gruppo delle cartelle
+        # escluse l'altezza minima supera quella della finestra predefinita
+        # (900x600), e senza scroll i widget a dimensione fissa si
+        # sovrapporrebbero invece di scorrere.
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        outer_layout.addWidget(scroll_area)
+        content = QWidget()
+        scroll_area.setWidget(content)
+
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(15)
 
@@ -1676,6 +1724,59 @@ class SchedulerPage(QWidget):
         s_layout.addLayout(target_row)
 
         layout.addWidget(schedule_group)
+
+        # Esclusioni: una lista sola per questa pianificazione e per il
+        # timer di sistema (scan_exclusions). Validate contro entrambe le
+        # radici; l'esito di ogni voce (icona e tooltip) è ricalcolato
+        # quando cambia la cartella da scansionare.
+        excl_group = QGroupBox("Cartelle escluse")
+        e_layout = QVBoxLayout(excl_group)
+        excl_desc = QLabel(
+            "Non vengono controllate né da questa pianificazione né dal timer di "
+            "sistema (klamav-scan.timer). La cartella di quarantena è sempre esclusa."
+        )
+        excl_desc.setWordWrap(True)
+        excl_desc.setStyleSheet("font-size: 12px; color: palette(mid);")
+        e_layout.addWidget(excl_desc)
+
+        self.excl_list = QListWidget()
+        self.excl_list.setObjectName("ExcludedDirsList")
+        self.excl_list.setFixedHeight(110)
+        self.excl_list.setIconSize(QSize(16, 16))
+        # Icone dell'esito: tema, con ripiego sulle icone standard di Qt
+        # (_icon ripiegherebbe sull'icona dell'app, uno scudo con la spunta:
+        # fuorviante accanto a un avviso). Le voci senza problemi hanno
+        # un'icona trasparente, così le righe restano alte uguali.
+        style = self.style()
+        self._excl_icons = {
+            "error": QIcon.fromTheme("dialog-error", style.standardIcon(QStyle.SP_MessageBoxCritical)),
+            "warning": QIcon.fromTheme("dialog-warning", style.standardIcon(QStyle.SP_MessageBoxWarning)),
+        }
+        blank = QPixmap(16, 16)
+        blank.fill(Qt.transparent)
+        self._excl_icons["ok"] = QIcon(blank)
+        self.excl_list.itemSelectionChanged.connect(self._update_exclusion_buttons)
+        self.excl_list.itemDoubleClicked.connect(lambda _item: self._edit_exclusion())
+        e_layout.addWidget(self.excl_list)
+
+        excl_buttons = QHBoxLayout()
+        add_btn = QPushButton("Aggiungi…")
+        add_btn.setIcon(QIcon.fromTheme("list-add"))
+        add_btn.clicked.connect(self._add_exclusion)
+        self.excl_edit_btn = QPushButton("Modifica…")
+        self.excl_edit_btn.setIcon(QIcon.fromTheme("document-edit"))
+        self.excl_edit_btn.clicked.connect(self._edit_exclusion)
+        self.excl_remove_btn = QPushButton("Rimuovi")
+        self.excl_remove_btn.setIcon(QIcon.fromTheme("list-remove"))
+        self.excl_remove_btn.clicked.connect(self._remove_exclusion)
+        for btn in (add_btn, self.excl_edit_btn, self.excl_remove_btn):
+            btn.setFixedHeight(32)
+            excl_buttons.addWidget(btn)
+        excl_buttons.addStretch()
+        e_layout.addLayout(excl_buttons)
+        layout.addWidget(excl_group)
+
+        self.target_edit.textChanged.connect(self._refresh_exclusions)
 
         buttons_row = QHBoxLayout()
         buttons_row.addStretch()
@@ -1745,6 +1846,106 @@ class SchedulerPage(QWidget):
         if path:
             self.target_edit.setText(path)
 
+    # -- cartelle escluse ------------------------------------------------
+
+    def _exclusion_roots(self) -> dict[str, Path]:
+        return schedule_roots(self.target_edit.text())
+
+    def excluded_dirs(self) -> list[str]:
+        """Voci della lista, nella forma salvata."""
+        return [self.excl_list.item(i).data(Qt.UserRole) for i in range(self.excl_list.count())]
+
+    def _annotate_exclusion(self, item: QListWidgetItem) -> None:
+        """Icona e tooltip con l'esito della regola per le radici attuali:
+        una voce valida con la cartella di prima può non esserlo più."""
+        decision = decide_exclusion(item.data(Qt.UserRole), roots=self._exclusion_roots())
+        if decision.error:
+            item.setIcon(self._excl_icons["error"])
+            item.setToolTip(decision.error)
+        elif decision.warnings:
+            item.setIcon(self._excl_icons["warning"])
+            item.setToolTip("\n".join(decision.warnings))
+        else:
+            item.setIcon(self._excl_icons["ok"])
+            item.setToolTip("")
+
+    def _refresh_exclusions(self) -> None:
+        for i in range(self.excl_list.count()):
+            self._annotate_exclusion(self.excl_list.item(i))
+
+    def _update_exclusion_buttons(self) -> None:
+        selected = bool(self.excl_list.selectedItems())
+        self.excl_edit_btn.setEnabled(selected)
+        self.excl_remove_btn.setEnabled(selected)
+
+    def _put_exclusion(self, raw: str, replace: QListWidgetItem | None = None) -> bool:
+        """Aggiunge (o sostituisce) una voce se la regola la accetta. Gli
+        errori bloccano subito; gli avvisi restano visibili sulla voce."""
+        decision = decide_exclusion(raw, roots=self._exclusion_roots())
+        if decision.error:
+            QMessageBox.warning(self, "Cartelle escluse", decision.error)
+            return False
+        for i in range(self.excl_list.count()):
+            other = self.excl_list.item(i)
+            if other is not replace and other.data(Qt.UserRole) == decision.stored:
+                self.excl_list.setCurrentItem(other)
+                return False
+        item = replace or QListWidgetItem()
+        item.setText(decision.stored)
+        item.setData(Qt.UserRole, decision.stored)
+        if replace is None:
+            self.excl_list.addItem(item)
+        self._annotate_exclusion(item)
+        self.excl_list.setCurrentItem(item)
+        return True
+
+    def _add_exclusion(self) -> None:
+        start = self.target_edit.text() or str(Path.home())
+        path = QFileDialog.getExistingDirectory(self, "Seleziona cartella da escludere", start)
+        if path:
+            self._put_exclusion(path)
+
+    def _edit_exclusion(self) -> None:
+        # Testo libero, non solo Sfoglia: permette di escludere una
+        # cartella che non esiste ancora (con avviso sulla voce).
+        item = self.excl_list.currentItem()
+        if item is None:
+            return
+        text, ok = QInputDialog.getText(
+            self, "Cartelle escluse", "Cartella da escludere:", QLineEdit.Normal, item.data(Qt.UserRole)
+        )
+        if ok:
+            self._put_exclusion(text, replace=item)
+
+    def _remove_exclusion(self) -> None:
+        item = self.excl_list.currentItem()
+        if item is not None:
+            self.excl_list.takeItem(self.excl_list.row(item))
+        self._update_exclusion_buttons()
+
+    def _validated_exclusions(self) -> list[str] | None:
+        """Tutte le voci contro le radici che si stanno per salvare: la
+        lista e la cartella interna si validano insieme, qualunque delle
+        due sia cambiata. None, con un avviso, se qualcosa non va."""
+        roots = self._exclusion_roots()
+        stored, problems = [], []
+        for raw in self.excluded_dirs():
+            decision = decide_exclusion(raw, roots=roots)
+            if decision.error:
+                problems.append(decision.error)
+            else:
+                stored.append(decision.stored)
+        if problems:
+            QMessageBox.warning(
+                self,
+                "Pianificazione Scansioni",
+                "Alcune cartelle escluse non sono valide:\n\n"
+                + "\n".join(problems)
+                + "\n\nLa pianificazione non è stata salvata.",
+            )
+            return None
+        return stored
+
     def _load_settings(self) -> None:
         self.enable_check.setChecked(self.settings.value("schedule_enabled", False, type=bool))
         self.interval_spin.setValue(self.settings.value("schedule_interval", 24, type=int))
@@ -1756,7 +1957,20 @@ class SchedulerPage(QWidget):
 
         self.target_edit.setText(self.settings.value("schedule_target", str(Path.home())))
 
+        self.excl_list.clear()
+        for raw in load_schedule_excludes(self.settings):
+            item = QListWidgetItem(raw)
+            item.setData(Qt.UserRole, raw)
+            self.excl_list.addItem(item)
+        self._refresh_exclusions()
+        self._update_exclusion_buttons()
+
     def _save_schedule(self) -> None:
+        # Prima della domanda sul timer: un salvataggio che fallirebbe per
+        # le esclusioni non deve aver già disattivato klamav-scan.timer.
+        excludes = self._validated_exclusions()
+        if excludes is None:
+            return
         if self.enable_check.isChecked() and timer_enabled() is True:
             answer = QMessageBox.question(
                 self,
@@ -1784,6 +1998,7 @@ class SchedulerPage(QWidget):
         self.settings.setValue("schedule_interval", self.interval_spin.value())
         self.settings.setValue("schedule_unit", self.unit_combo.currentText())
         self.settings.setValue("schedule_target", self.target_edit.text())
+        self.settings.setValue(SCHEDULE_EXCLUDES_KEY, excludes)
 
         self.schedule_saved.emit()
         self.refresh_system_timer()
@@ -3047,7 +3262,7 @@ X-GNOME-Autostart-enabled=true
             return
 
         target_str = self.settings.value("schedule_target", str(Path.home()))
-        target = Path(target_str)
+        target = Path(target_str).expanduser()
         if not target.exists():
             # Prima: ritorno silenzioso, e la scansione non partiva mai
             # senza che nessuno lo sapesse.
@@ -3074,9 +3289,12 @@ X-GNOME-Autostart-enabled=true
         self._bg_log_path = None
         self.bg_worker = ScanWorker(
             endpoint=self._clamd_endpoint(),
-            target=target,
+            # resolve(): le esclusioni sono confrontate in forma canonica
+            # (_iter_files usa is_relative_to letterale), come nella CLI.
+            target=target.resolve(),
             quarantine_dir=Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))),
-            auto_quarantine=self.settings.value("auto_quarantine", False, type=bool)
+            auto_quarantine=self.settings.value("auto_quarantine", False, type=bool),
+            exclude_dirs=load_schedule_excludes(self.settings),
         )
         # A differenza della manuale, i risultati della programmata NON
         # sono visibili in nessuna lista UI: senza accumularli qui e
