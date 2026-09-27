@@ -67,7 +67,10 @@ def env(app, tmp_path, monkeypatch):
 
     def question(parent, title, text, *a, **k):
         calls.shown.append(("question", text))
-        return QMessageBox.Yes if calls.answers.pop(0) else QMessageBox.No
+        answer = calls.answers.pop(0)
+        if isinstance(answer, bool):
+            return QMessageBox.Yes if answer else QMessageBox.No
+        return answer  # un QMessageBox.StandardButton, es. Cancel
 
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(warning))
     monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
@@ -320,3 +323,93 @@ def test_impostazioni_conservano_le_esclusioni_nel_dropin(env, monkeypatch):
     text = env.dropin.read_text()
     assert f'--exclude "{env.home / "vm"}"' in text
     assert f'--quarantine "{env.home / "Quarantena"}"' in text
+
+
+# -- aggiunta con percorso scritto ----------------------------------------
+
+def test_aggiunta_percorso_scritto_anche_nascosto(env, monkeypatch):
+    nascosta = env.home / ".docker" / "diun" / "data"
+    nascosta.mkdir(parents=True)
+    page = _page(env)
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("~/.docker/diun/data", True)))
+    page._add_typed_exclusion()
+    assert page.excluded_dirs() == [str(nascosta)]
+
+
+@pytest.mark.parametrize("risposta", [("", True), ("   ", True), ("~/vm", False)])
+def test_aggiunta_percorso_annullata_o_vuota(env, monkeypatch, risposta):
+    page = _page(env)
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: risposta))
+    page._add_typed_exclusion()
+    assert page.excluded_dirs() == [] and _kinds(env) == []
+
+
+# -- scelta fra timer e pianificazione interna ------------------------------
+
+def _enabled():
+    return _settings().value("schedule_enabled", False, type=bool)
+
+
+def test_timer_attivo_annulla_non_salva_nulla(env):
+    env.calls.timer = True
+    env.calls.answers = [QMessageBox.Cancel]
+    page = _page(env, [str(env.home / "vm")])
+    page.enable_check.setChecked(True)
+    page._save_schedule()
+    assert _kinds(env) == ["question"]
+    assert not env.dropin.exists() and not _settings().contains("schedule_interval")
+
+
+def test_timer_attivo_no_salva_le_esclusioni_e_tiene_il_timer(env):
+    # Il caso emerso nella prova reale: si apre la pagina solo per le
+    # esclusioni del timer, con la casella della pianificazione spuntata.
+    env.calls.timer = True
+    env.calls.answers = [False]
+    page = _page(env, [str(env.home / "vm")])
+    page.enable_check.setChecked(True)
+    page._save_schedule()
+    assert env.calls.disable == 0 and not _enabled()
+    assert "--exclude" in env.dropin.read_text()
+    assert mw.load_schedule_excludes(_settings()) == [str(env.home / "vm")]
+    assert "valgono per tutte e due" in env.calls.shown[0][1]
+
+
+def test_timer_attivo_si_disattiva_il_timer(env):
+    env.calls.timer = True
+    env.calls.answers = [True]
+    page = _page(env)
+    page.enable_check.setChecked(True)
+    page._save_schedule()
+    assert env.calls.disable == 1 and _enabled()
+
+
+# -- tutto o niente, e avvisi ----------------------------------------------
+
+def test_dropin_non_scrivibile_nessuna_chiave_salvata(env):
+    # Prima di questa correzione intervallo, unità e stato erano scritti
+    # PRIMA del drop-in: un fallimento lasciava un salvataggio a metà.
+    env.dropin.parent.mkdir(parents=True)
+    env.dropin.write_text("[Service]\n# scritto a mano\n")
+    page = _page(env, [str(env.home / "vm")])
+    page.interval_spin.setValue(7)
+    page._save_schedule()
+    s = _settings()
+    assert not s.contains("schedule_interval") and not s.contains("schedule_enabled")
+
+
+def test_override_estraneo_segnalato_al_salvataggio(env, monkeypatch):
+    avviso = "override.conf ridefinisce ExecStart e sostituisce queste impostazioni."
+    monkeypatch.setattr(mw, "foreign_overrides", lambda **kw: [SimpleNamespace(describe=lambda: avviso)])
+    page = _page(env, [str(env.home / "vm")])
+    page._save_schedule()
+    assert _kinds(env) == ["warning"] and avviso in env.calls.shown[0][1]
+    # Solo avviso: il salvataggio è avvenuto.
+    assert mw.load_schedule_excludes(_settings()) == [str(env.home / "vm")]
+
+
+def test_daemon_reload_fallito_e_solo_un_avviso(env, monkeypatch):
+    monkeypatch.setattr(mw, "daemon_reload", lambda: "Access denied")
+    page = _page(env, [str(env.home / "vm")])
+    page._save_schedule()
+    assert _kinds(env) == ["warning"] and "Access denied" in env.calls.shown[0][1]
+    assert mw.load_schedule_excludes(_settings()) == [str(env.home / "vm")]

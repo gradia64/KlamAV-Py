@@ -1762,14 +1762,22 @@ class SchedulerPage(QWidget):
         excl_buttons = QHBoxLayout()
         add_btn = QPushButton("Aggiungi…")
         add_btn.setIcon(QIcon.fromTheme("list-add"))
+        add_btn.setToolTip("Scegli una cartella con il selettore di file")
         add_btn.clicked.connect(self._add_exclusion)
+        # Il selettore non basta: nasconde le cartelle nascoste (e dal venv,
+        # con PySide6 da pip, può non essere quello di KDE), e non permette
+        # di indicare una cartella che non esiste ancora.
+        add_typed_btn = QPushButton("Aggiungi percorso…")
+        add_typed_btn.setIcon(QIcon.fromTheme("edit-rename"))
+        add_typed_btn.setToolTip("Scrivi il percorso: anche cartelle nascoste o non ancora esistenti")
+        add_typed_btn.clicked.connect(self._add_typed_exclusion)
         self.excl_edit_btn = QPushButton("Modifica…")
         self.excl_edit_btn.setIcon(QIcon.fromTheme("document-edit"))
         self.excl_edit_btn.clicked.connect(self._edit_exclusion)
         self.excl_remove_btn = QPushButton("Rimuovi")
         self.excl_remove_btn.setIcon(QIcon.fromTheme("list-remove"))
         self.excl_remove_btn.clicked.connect(self._remove_exclusion)
-        for btn in (add_btn, self.excl_edit_btn, self.excl_remove_btn):
+        for btn in (add_btn, add_typed_btn, self.excl_edit_btn, self.excl_remove_btn):
             btn.setFixedHeight(32)
             excl_buttons.addWidget(btn)
         excl_buttons.addStretch()
@@ -1905,6 +1913,15 @@ class SchedulerPage(QWidget):
         if path:
             self._put_exclusion(path)
 
+    def _add_typed_exclusion(self) -> None:
+        text, ok = QInputDialog.getText(
+            self, "Cartelle escluse",
+            "Cartella da escludere (~ indica la home; anche nascosta o non ancora esistente):",
+            QLineEdit.Normal, "",
+        )
+        if ok and text.strip():
+            self._put_exclusion(text)
+
     def _edit_exclusion(self) -> None:
         # Testo libero, non solo Sfoglia: permette di escludere una
         # cartella che non esiste ancora (con avviso sulla voce).
@@ -1923,13 +1940,14 @@ class SchedulerPage(QWidget):
             self.excl_list.takeItem(self.excl_list.row(item))
         self._update_exclusion_buttons()
 
-    def _sync_system_dropin(self, excludes: list[str]) -> bool:
+    def _sync_system_dropin(self, excludes: list[str], timer_disabled: bool = False) -> bool:
         """
         Rigenera il drop-in di klamav-scan.service con le nuove esclusioni e
         con quarantena ed endpoint già salvati nelle Impostazioni (stato
         completo, vedi render_dropin). False, con un avviso, se il
-        salvataggio va annullato. Il daemon-reload fallito è solo un avviso,
-        come nelle Impostazioni: un ritardo, non una divergenza.
+        salvataggio va annullato. Il daemon-reload fallito e gli override
+        estranei sono solo avvisi (in self._save_notes), come nelle
+        Impostazioni.
         """
         title = "Pianificazione Scansioni"
         try:
@@ -1946,25 +1964,28 @@ class SchedulerPage(QWidget):
             changed = sync_dropin(render_dropin(
                 quarantine.resolve(), home=Path.home(), endpoint=endpoint, excludes=excludes,
             ))
-        except DropinConflict as exc:
-            QMessageBox.warning(self, title, f"{exc}\n\nLa pianificazione non è stata salvata.")
-            return False
-        except OSError as exc:
-            QMessageBox.warning(
-                self, title,
-                "Impossibile aggiornare la scansione programmata di sistema:\n"
-                f"{exc}\n\nLa pianificazione non è stata salvata.",
+        except (DropinConflict, OSError) as exc:
+            reason = str(exc) if isinstance(exc, DropinConflict) else (
+                f"Impossibile aggiornare la scansione programmata di sistema:\n{exc}"
             )
+            tail = "La pianificazione non è stata salvata."
+            if timer_disabled:
+                tail += " Il timer di sistema era già stato disattivato."
+            QMessageBox.warning(self, title, f"{reason}\n\n{tail}")
             return False
         if changed:
             problem = daemon_reload()
             if problem:
-                QMessageBox.warning(
-                    self, title,
+                self._save_notes.append(
                     "La scansione programmata di sistema userà le nuove esclusioni "
                     "dal prossimo avvio della sessione "
-                    f"(systemctl --user daemon-reload non riuscito: {problem}).",
+                    f"(systemctl --user daemon-reload non riuscito: {problem})."
                 )
+        # Un override.conf (systemctl --user edit) che ridefinisce ExecStart
+        # viene dopo il nostro drop-in e vince: le esclusioni appena salvate
+        # non arriverebbero al timer. Solo avviso: il file è dell'utente.
+        for override in foreign_overrides(tcp=endpoint.is_tcp):
+            self._save_notes.append(override.describe())
         return True
 
     def _validated_exclusions(self) -> list[str] | None:
@@ -2010,45 +2031,72 @@ class SchedulerPage(QWidget):
         self._update_exclusion_buttons()
 
     def _save_schedule(self) -> None:
+        """
+        Ordine: validazione delle esclusioni, scelta fra timer e
+        pianificazione interna, drop-in, QSettings. Niente viene salvato se
+        un passo fallisce, così GUI e timer non divergono.
+        """
+        title = "Pianificazione Scansioni"
         # Prima della domanda sul timer: un salvataggio che fallirebbe per
         # le esclusioni non deve aver già disattivato klamav-scan.timer.
         excludes = self._validated_exclusions()
         if excludes is None:
             return
-        if self.enable_check.isChecked() and timer_enabled() is True:
+
+        enabled = self.enable_check.isChecked()
+        timer_disabled = False
+        if enabled and timer_enabled() is True:
+            # Tre esiti, non due: chi apre questa pagina solo per le cartelle
+            # escluse (che valgono anche per il timer) deve poter salvare
+            # senza scegliere la pianificazione interna.
             answer = QMessageBox.question(
                 self,
-                "Pianificazione Scansioni",
+                title,
                 "La scansione programmata di sistema (klamav-scan.timer) è attiva. "
                 "Le due pianificazioni sono alternative: con entrambe la home verrebbe "
                 "scansionata due volte.\n\n"
-                "Disattivare il timer di sistema e usare questa pianificazione?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+                "Sì: disattiva il timer di sistema e usa questa pianificazione.\n"
+                "No: mantieni il timer; questa pianificazione resta disattivata.\n\n"
+                "In entrambi i casi le cartelle escluse vengono salvate e valgono "
+                "per tutte e due.",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.Cancel,
             )
-            if answer != QMessageBox.Yes:
-                return
-            problem = disable_timer()
-            if problem:
-                QMessageBox.warning(
-                    self,
-                    "Pianificazione Scansioni",
-                    "Non è stato possibile disattivare klamav-scan.timer, quindi la "
-                    f"pianificazione non è stata salvata:\n{problem}",
-                )
+            if answer == QMessageBox.Yes:
+                problem = disable_timer()
+                if problem:
+                    QMessageBox.warning(
+                        self,
+                        title,
+                        "Non è stato possibile disattivare klamav-scan.timer, quindi la "
+                        f"pianificazione non è stata salvata:\n{problem}",
+                    )
+                    return
+                timer_disabled = True
+            elif answer == QMessageBox.No:
+                enabled = False
+            else:
                 return
 
-        self.settings.setValue("schedule_enabled", self.enable_check.isChecked())
-        self.settings.setValue("schedule_interval", self.interval_spin.value())
-        self.settings.setValue("schedule_unit", self.unit_combo.currentText())
-        # Il timer di sistema usa la stessa lista: drop-in prima di
-        # QSettings, e se non si può scrivere non si salva nulla (GUI e
-        # timer escluderebbero cartelle diverse senza che nessuno lo sappia).
-        if not self._sync_system_dropin(excludes):
+        # Il timer di sistema usa la stessa lista: drop-in prima di QSettings,
+        # e se non si può scrivere non si salva NULLA (GUI e timer
+        # escluderebbero cartelle diverse senza che nessuno lo sappia).
+        self._save_notes: list[str] = []
+        if not self._sync_system_dropin(excludes, timer_disabled=timer_disabled):
             return
 
+        self.enable_check.setChecked(enabled)
+        self.settings.setValue("schedule_enabled", enabled)
+        self.settings.setValue("schedule_interval", self.interval_spin.value())
+        self.settings.setValue("schedule_unit", self.unit_combo.currentText())
         self.settings.setValue("schedule_target", self.target_edit.text())
         self.settings.setValue(SCHEDULE_EXCLUDES_KEY, excludes)
+
+        if self._save_notes:
+            QMessageBox.warning(
+                self, title,
+                "Pianificazione salvata, con queste note:\n\n" + "\n\n".join(self._save_notes),
+            )
 
         self.schedule_saved.emit()
         self.refresh_system_timer()

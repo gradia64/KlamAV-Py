@@ -235,12 +235,18 @@ def _schedule_enabled():
     return QSettings(mw.APP_NAME, mw.APP_NAME).value("schedule_enabled", False, type=bool)
 
 
-def test_timer_attivo_e_rifiuto_nessun_salvataggio(env):
+def test_timer_attivo_e_no_mantiene_il_timer(env):
+    # "No" non annulla più: salva con la pianificazione interna disattivata
+    # (le cartelle escluse valgono anche per il timer). L'annullamento è
+    # "Annulla": vedi test_settings_exclusions.
     env.calls.timer = True
     d = env.dialogs(False)
-    _scheduler()._save_schedule()
+    page = _scheduler()
+    page._save_schedule()
     assert d.kinds() == ["question"] and not _schedule_enabled()
+    assert not page.enable_check.isChecked()
     assert env.calls.disable == 0
+    assert QSettings(mw.APP_NAME, mw.APP_NAME).contains("schedule_interval")
 
 
 def test_timer_attivo_e_conferma_lo_disattiva(env):
