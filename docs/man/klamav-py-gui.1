@@ -157,6 +157,17 @@ with fixed arguments and a closed list of permitted units.
 The binaries involved must be owned by root and not writable by group or
 others; otherwise the operation is refused.
 The outcome is verified by reading the database version back from clamd.
+.PP
+With clamd reached over TCP, restarting the local freshclam does not
+always update the database clamd uses, and updating is disabled with an
+explanation: always for a remote host (the database is updated where
+clamd runs); for a loopback address, when the database version reported
+by clamd differs from the one in
+.I /var/lib/clamav
+(for example clamd in a container).
+Host names other than
+.I localhost
+are not resolved and count as remote.
 .
 .SH SEE ALSO
 .BR klamav-py (1),

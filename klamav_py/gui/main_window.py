@@ -73,6 +73,7 @@ from ..private_files import (
 )
 from .scan_worker import ScanWorker
 from ..db_freshness import DbInfo, describe, should_update_on_startup
+from ..db_update_policy import UpdateAvailability, update_availability
 from ..clamd_health import ClamdHealth, Throttle, Transition
 from .. import schedule as sched
 from ..freshclam_service import Outcome, RestartResult
@@ -1353,6 +1354,10 @@ class UpdatePage(QWidget):
         super().__init__(parent)
         self._endpoint_getter = endpoint_getter
         self.worker: FreshclamRestartWorker | None = None
+        # Ultima versione riportata da clamd: serve a decidere se il
+        # riavvio del freshclam locale aggiorna davvero il suo database
+        # (db_update_policy). None finché il probe non risponde.
+        self._db_info: DbInfo | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
@@ -1388,6 +1393,15 @@ class UpdatePage(QWidget):
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
+        # Perché il pulsante è disabilitato, detto dove si agisce (come la
+        # label "Real-Time parziale"): clamd remoto o con un altro database.
+        self.update_blocked_label = QLabel("")
+        self.update_blocked_label.setTextFormat(Qt.PlainText)
+        self.update_blocked_label.setWordWrap(True)
+        self.update_blocked_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
+        self.update_blocked_label.setVisible(False)
+        layout.addWidget(self.update_blocked_label)
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setFixedHeight(8)
@@ -1405,10 +1419,32 @@ class UpdatePage(QWidget):
         layout.addWidget(self.log_console, 1)
 
     def set_db_info(self, info: DbInfo | None) -> None:
+        self._db_info = info
         self.db_status_label.setText(describe(info))
+        self.refresh_availability()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - API Qt
+        # L'endpoint può essere cambiato nelle Impostazioni dopo l'ultimo
+        # probe: la regola si ricalcola ogni volta che la pagina si mostra.
+        super().showEvent(event)
+        self.refresh_availability()
+
+    def refresh_availability(self) -> UpdateAvailability:
+        availability = update_availability(self._endpoint_getter(), self._db_info)
+        self.update_button.setEnabled(availability.allowed and self.worker is None)
+        self.update_blocked_label.setText(availability.reason or "")
+        self.update_blocked_label.setVisible(not availability.allowed)
+        return availability
 
     def _start_update(self) -> None:
         if self.worker is not None:
+            return
+        # Anche qui, non solo sul pulsante: l'aggiornamento all'avvio
+        # (startup_update) chiama questo metodo direttamente, e con clamd
+        # remoto chiederebbe una password per riavviare un servizio inutile.
+        availability = self.refresh_availability()
+        if not availability.allowed:
+            self.log_console.appendPlainText(f"Aggiornamento non eseguito: {availability.reason}")
             return
 
         self.log_console.clear()
@@ -1429,7 +1465,6 @@ class UpdatePage(QWidget):
 
     def _on_finished(self, result: RestartResult) -> None:
         self.progress.setVisible(False)
-        self.update_button.setEnabled(True)
         self.log_console.appendPlainText(f"\n{result.message}")
         if result.db_info is not None:
             self.db_info_changed.emit(result.db_info)
@@ -1449,6 +1484,7 @@ class UpdatePage(QWidget):
         worker, self.worker = self.worker, None
         if worker is not None:
             _retire_qthread(worker)
+        self.refresh_availability()
 
 
 class RealTimePage(QWidget):

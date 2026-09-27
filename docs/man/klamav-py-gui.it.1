@@ -159,6 +159,17 @@ con argomenti fissi e un elenco chiuso di unità ammesse.
 I binari coinvolti devono appartenere a root e non essere scrivibili da
 gruppo o altri, altrimenti l'operazione viene rifiutata.
 L'esito viene verificato rileggendo da clamd la versione del database.
+.PP
+Con clamd raggiunto via TCP il riavvio del freshclam locale non sempre
+aggiorna il database che clamd usa, e l'aggiornamento viene disabilitato
+con una spiegazione: sempre per un host remoto (il database si aggiorna
+dove gira clamd); per un indirizzo di loopback, quando la versione del
+database riportata da clamd non coincide con quella in
+.I /var/lib/clamav
+(per esempio clamd in un container).
+I nomi host diversi da
+.I localhost
+non vengono risolti e contano come remoti.
 .
 .SH VEDERE ANCHE
 .BR klamav-py (1),
