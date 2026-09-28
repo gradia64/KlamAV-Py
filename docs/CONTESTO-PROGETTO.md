@@ -43,6 +43,7 @@ Moduli principali, tutti in `klamav_py/`:
 | `db_freshness.py`, `clamd_health.py`, `schedule.py` | Freschezza del DB, stato di clamd, scadenze della pianificazione interna |
 | `private_files.py` | Creazione di file e directory privati (0600/0700) |
 | `gui/` | Finestra principale, worker QThread, IPC single-instance |
+| `gui/off_thread.py` | Controlli brevi (filesystem, `systemctl --user`) fuori dal thread della GUI |
 
 I moduli fuori da `gui/` non importano Qt: la CLI deve funzionare senza
 PySide6.
@@ -274,6 +275,44 @@ nulla fa perdere tempo.
   `debian/changelog` e `CHANGELOG.md`, verificata dai test. Una correzione al
   codice richiede un nuovo tag, quindi una nuova versione, non un pkgrel.
 - `debian/klamav-py/` è un artefatto di build in `.gitignore`.
+- **Il `.deb` si costruisce su Debian sid** (`dpkg-buildpackage -us -uc -b`
+  dal tag firmato), come dalla 0.1.10. `python3-setuptools (>= 77)` in
+  Build-Depends lo impone. Una build su Ubuntu 24.04 (debhelper 13.14,
+  setuptools da PyPI) funziona ma non è equivalente: manca `changelog.gz`
+  (il debhelper vecchio non installa `CHANGELOG.md`), compare
+  `init-system-helpers (>= 1.52)` fra le dipendenze, `py3compile` nel
+  postinst perde `|| true` e nei metadati resta il file `WHEEL`. Va usata
+  solo per prova, non come allegato della release.
+- **`.SRCINFO` si rigenera con `tools/srcinfo.sh`** (container Arch, serve
+  docker). Aggiornarlo a mano va bene solo per `pkgver` e `source`, e va
+  comunque rigenerato prima di pubblicare su AUR.
+
+### Rilascio
+
+Ordine, per ogni versione:
+
+1. Commit di rilascio: versione in `__init__.py`, PKGBUILD/.SRCINFO,
+   `debian/changelog`, `CHANGELOG.md` (voce «Non rilasciato» → versione e
+   data), data e versione nelle pagine man, tappa in sezione 2 di questo
+   documento. `tests/test_changelog.py` e `tests/test_manpage.py`
+   verificano l'allineamento.
+2. Merge su `main` con la CI verde.
+3. Tag `v<versione>` firmato con la chiave di rilascio
+   (`EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9`) e verificato con
+   `git tag -v`. Lo crea solo il maintainer: un tag non firmato, o firmato
+   con un'altra chiave, fa fallire `makepkg` per tutti gli utenti AUR, e
+   rifarlo con lo stesso nome dopo la pubblicazione lascia copie
+   sbagliate in giro.
+4. `.deb` costruito su Debian sid dal tag.
+5. Release GitHub `KlamAV-Py <versione>`: descrizione = voce di
+   `CHANGELOG.md` (Modificato, Aggiunto, Corretto) più eventuali note per
+   chi aggiorna; `.deb` allegato. Il controllo aggiornamenti della GUI la
+   segnala da lì.
+6. `.SRCINFO` rigenerato e pacchetto AUR aggiornato.
+
+Un assistente automatico (sessione LLM in un ambiente cloud) può preparare i
+punti 1, 2 e le note del punto 5, ma non 3 e 4: non ha la chiave di rilascio,
+e la rete dell'ambiente può non raggiungere i mirror Debian.
 
 ### Quarantena
 
@@ -338,7 +377,15 @@ oracolo); scansione di home altrui; esecuzione come root.
 - **Skip e fallimenti ambientali attesi**: da root diversi test sui permessi
   si saltano; senza `::1` o senza locale italiano alcuni test si saltano; in
   un sandbox in sola lettura i test che invocano `systemd-analyze` possono
-  fallire. Riportarli come ambientali, non come difetti.
+  fallire. Riportarli come ambientali, non come difetti. Il test della gara
+  QThread non rientra più fra gli skip: dalla 0.1.12 si riproduce in modo
+  deterministico, e se la controprova non aborta è un fallimento.
+- **Test con thread veri**: alcuni test della pagina Pianificazione usano
+  `run_off_gui_thread` reale, con una funzione bloccata di proposito; gli
+  altri la sostituiscono con una versione in linea nelle fixture `env`.
+  Un test nuovo che salva la Pianificazione o le Impostazioni deve usare
+  una delle due strade, altrimenti controlla lo stato prima che l'esito
+  arrivi.
 - **`INVOCATION_ID` cambia il comportamento della CLI**: se presente (come
   dentro una unit systemd, o in certe sessioni), una quarantena su percorso
   volatile è un errore invece di un avviso. Nelle riproduzioni isolare le
