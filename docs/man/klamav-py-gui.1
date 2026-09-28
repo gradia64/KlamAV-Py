@@ -5,7 +5,7 @@
 .\" Consistency with the parser in klamav_py/gui/app.py and with the
 .\" Italian page is checked by tests/test_manpage.py.
 .\"
-.TH KLAMAV-PY-GUI 1 "2026-09-27" "KlamAV-Py 0.1.11" "User Commands"
+.TH KLAMAV-PY-GUI 1 "2026-09-28" "KlamAV-Py 0.1.12" "User Commands"
 .
 .SH NAME
 klamav-py-gui \- KlamAV-Py graphical interface for the ClamAV daemon
@@ -162,9 +162,13 @@ With clamd reached over TCP, restarting the local freshclam does not
 always update the database clamd uses, and updating is disabled with an
 explanation: always for a remote host (the database is updated where
 clamd runs); for a loopback address, when the database version reported
-by clamd differs from the one in
+by clamd differs from the one in the directory set by
+.B DatabaseDirectory
+in the local
+.BR freshclam.conf (5),
+or
 .I /var/lib/clamav
-(for example clamd in a container).
+if it is not set (for example clamd in a container).
 Host names other than
 .I localhost
 are not resolved and count as remote.

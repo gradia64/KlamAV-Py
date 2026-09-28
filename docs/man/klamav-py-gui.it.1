@@ -5,7 +5,7 @@
 .\" Coerenza con il parser di klamav_py/gui/app.py e con la pagina
 .\" inglese verificata da tests/test_manpage.py.
 .\"
-.TH KLAMAV-PY-GUI 1 "2026-09-27" "KlamAV-Py 0.1.11" "Comandi utente"
+.TH KLAMAV-PY-GUI 1 "2026-09-28" "KlamAV-Py 0.1.12" "Comandi utente"
 .\" Sillabazione disattivata: i pattern italiani non sono garantiti ovunque
 .nh
 .
@@ -164,9 +164,14 @@ Con clamd raggiunto via TCP il riavvio del freshclam locale non sempre
 aggiorna il database che clamd usa, e l'aggiornamento viene disabilitato
 con una spiegazione: sempre per un host remoto (il database si aggiorna
 dove gira clamd); per un indirizzo di loopback, quando la versione del
-database riportata da clamd non coincide con quella in
+database riportata da clamd non coincide con quella della directory
+indicata da
+.B DatabaseDirectory
+nel
+.BR freshclam.conf (5)
+locale, o
 .I /var/lib/clamav
-(per esempio clamd in un container).
+se non è indicata (per esempio clamd in un container).
 I nomi host diversi da
 .I localhost
 non vengono risolti e contano come remoti.

@@ -12,7 +12,7 @@ Non sostituisce la lettura del codice: i docstring dei moduli spiegano il
 dal codice non si vede, cioè da dove viene una regola e cosa è già stato
 valutato e scartato. La sezione 9 indica dove trovare il resto.
 
-Aggiornato alla versione 0.1.11 più il commit `6a7a326` su `main`.
+Aggiornato alla versione 0.1.12.
 
 ---
 
@@ -59,7 +59,7 @@ revisioni indipendenti del codice (umane e assistite da LLM), e ogni
 reperto è stato verificato e, dove possibile, riprodotto con un test prima
 di essere corretto. Le gravità proposte dai revisori sono state ricalibrate
 sul modello di minaccia reale, in entrambe le direzioni. La suite è passata
-da una manciata di test sulla logica pura a circa 700 test, compresi test
+da una manciata di test sulla logica pura a oltre 750 test, compresi test
 della GUI in modalità offscreen e test con socket reali.
 
 **0.1.0–0.1.5 (agosto 2026) — la riscrittura.** CLI e GUI che parlano con
@@ -113,16 +113,17 @@ regola condivisa con la CLI; `--exclude` rifiuta i casi che prima
 svuotavano la scansione in silenzio. Aggiornamento del database disabilitato
 quando clamd, via TCP, usa un database diverso da quello locale.
 
-**Dopo la 0.1.11.** Su `main`, in attesa della 0.1.12: la pianificazione
-interna rivalida le esclusioni a ogni avvio, come la CLI (`6a7a326`); la
-rivalidazione è poi passata in `ScanWorker.run()`, estesa alla quarantena,
-e le scansioni programmate non completate non risultano più pulite. La
-pagina Pianificazione non tocca più il filesystem nel thread della GUI, e la
-cartella interna è validata come directory al salvataggio. Anche le chiamate
-a `systemctl --user` sono uscite dal thread della GUI.
-Risolte anche le ultime voci aperte: quarantena interrotta da un crash,
-`DatabaseDirectory` personalizzata, versioni pre-release, test della gara
-QThread.
+**0.1.12 (28 settembre) — nessuna scansione pulita a zero file, niente
+blocchi della GUI.** Chiude tutte le voci aperte fino alla 0.1.11. La
+scansione della GUI rivalida quarantena ed esclusioni in `ScanWorker.run()`
+prima della traversata (una quarantena antenata della cartella interna la
+svuotava, preesistente dalla 0.1.10), e le scansioni programmate non
+completate, clamd irraggiungibile compreso, non risultano più pulite
+(`ScanWorker.aborted`). Controlli sul filesystem e chiamate a
+`systemctl --user` della pagina Pianificazione e delle Impostazioni escono
+dal thread della GUI (`gui/off_thread.py`). Quarantena con intento e
+recupero dopo un crash, `DatabaseDirectory` letta da `freshclam.conf`,
+versioni pre-release ordinate, test della gara QThread deterministico.
 
 ---
 
@@ -314,7 +315,7 @@ nulla fa perdere tempo.
 Già tracciati: segnalarli di nuovo è utile solo se si aggiunge uno scenario,
 una riproduzione o una correzione migliore.
 
-Nessuno al momento: le voci aperte fino alla 0.1.11 sono state risolte e le
+Nessuno alla 0.1.12: le voci aperte fino alla 0.1.11 sono state risolte e le
 decisioni corrispondenti sono in sezione 4.
 
 ---

@@ -6,7 +6,7 @@
 .\" Coerenza con build_parser() e con la pagina inglese verificata da
 .\" tests/test_manpage.py.
 .\"
-.TH KLAMAV-PY 1 "2026-09-27" "KlamAV-Py 0.1.11" "Comandi utente"
+.TH KLAMAV-PY 1 "2026-09-28" "KlamAV-Py 0.1.12" "Comandi utente"
 .\" Sillabazione disattivata: i pattern italiani non sono garantiti ovunque
 .nh
 .
@@ -229,6 +229,14 @@ mai troncato né riscritto, e i temporanei della scrittura atomica.
 Un indice illeggibile viene rinominato in
 .I index.json.corrupt-*
 e mai cancellato, per consentire il recupero manuale.
+Ogni quarantena in corso è registrata in un file nascosto
+.I .<nome>.intent
+(e
+.I .<nome>.copy
+se il file viene copiato da un altro file system): se l'operazione viene
+interrotta, per esempio da un crash, il successivo avvio della CLI o
+della GUI la completa o la annulla, lasciando in quel caso il file
+originale al suo posto.
 .
 .SH SICUREZZA
 .SS Directory di quarantena
