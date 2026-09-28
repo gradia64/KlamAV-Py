@@ -120,6 +120,9 @@ e le scansioni programmate non completate non risultano più pulite. La
 pagina Pianificazione non tocca più il filesystem nel thread della GUI, e la
 cartella interna è validata come directory al salvataggio. Anche le chiamate
 a `systemctl --user` sono uscite dal thread della GUI.
+Risolte anche le ultime voci aperte: quarantena interrotta da un crash,
+`DatabaseDirectory` personalizzata, versioni pre-release, test della gara
+QThread.
 
 ---
 
@@ -257,6 +260,9 @@ nulla fa perdere tempo.
 - **Con clamd via TCP** l'aggiornamento locale è consentito solo su loopback e
   solo se il daily locale coincide con quello di clamd (0.1.11). I nomi host
   non si risolvono nel thread della GUI.
+- **Database locale**: la `DatabaseDirectory` del primo `freshclam.conf`
+  esistente fra `/etc/clamav`, `/etc` e `/usr/local/etc`; senza, il
+  predefinito `/var/lib/clamav`.
 
 ### Packaging
 
@@ -268,12 +274,38 @@ nulla fa perdere tempo.
   codice richiede un nuovo tag, quindi una nuova versione, non un pkgrel.
 - `debian/klamav-py/` è un artefatto di build in `.gitignore`.
 
+### Quarantena
+
+- **Intento prima dello spostamento.** `quarantine_file` scrive
+  `.<nome>.intent` (con flock tenuto per tutta l'operazione) prima di
+  toccare il file, e `.<nome>.copy` prima di una copia fra filesystem.
+  `recover_interrupted()`, eseguita alla creazione di `Quarantine`, salta
+  gli intenti con il lock tenuto (operazione in corso in un altro processo)
+  e per gli altri: rename riuscito → voce nell'indice e 0400; copia
+  completa (0400, scritto solo dopo fsync) con l'originale già tolto →
+  voce, ed eventuale nome temporaneo `.klamav-quarantena-*` cancellato;
+  copia incompleta o originale ancora al suo posto → copia cancellata,
+  originale lasciato dov'è (la prossima scansione lo rileva). Non si
+  ripete mai lo spostamento dell'originale nel recupero: vorrebbe dire
+  ripeterne le verifiche.
+
+### Aggiornamento dell'applicazione
+
+- **Versioni con pre-release** (`update_check_worker.version_key`): stadi
+  dev < a/alpha < b/beta < rc/pre/c < finale, numero di stadio numerico,
+  zeri finali ignorati, metadati dopo `+` ignorati; un suffisso
+  sconosciuto è una pre-release del livello più basso.
+
 ### Qt
 
 - **Worker QThread ritirati con `_retire_qthread()`** e un set di riferimenti
   forti a livello di modulo: `deleteLater` da solo non basta a evitare la
   distruzione del wrapper Python con il thread ancora vivo (SIGABRT osservato
   su Arch). `PingWorker` fa eccezione perché ha un parent Qt.
+- **Il test della gara (`test_qthread_retire.py`) è deterministico**: lo
+  script di riproduzione tiene vivo `run()` 50 ms dopo l'emit, così la
+  controprova senza correzione aborta sempre. Un'uscita pulita della
+  controprova è un fallimento, non uno skip.
 
 ---
 
@@ -282,15 +314,8 @@ nulla fa perdere tempo.
 Già tracciati: segnalarli di nuovo è utile solo se si aggiunge uno scenario,
 una riproduzione o una correzione migliore.
 
-- **`LOCAL_DB_DIR` fisso su `/var/lib/clamav`** in `db_update_policy.py`: un
-  `DatabaseDirectory` personalizzato con TCP su loopback disabilita
-  l'aggiornamento con un messaggio fuorviante. Esito comunque sicuro.
-- **`_copy_across_filesystems`**: un crash fra copia e rename lascia un orfano
-  0400 in quarantena e il file infetto al suo posto. Esito sicuro, tenuto
-  come nota di comportamento.
-- **`_version_compare`** tronca i suffissi pre-release (`-rc1`).
-- **Test di regressione della gara QThread** (`test_qthread_retire.py`) saltato
-  dove la gara non si riproduce: da riverificare con PySide6 più recenti.
+Nessuno al momento: le voci aperte fino alla 0.1.11 sono state risolte e le
+decisioni corrispondenti sono in sezione 4.
 
 ---
 

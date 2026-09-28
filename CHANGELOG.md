@@ -40,6 +40,18 @@ sono in `docs/CHANGELOG-archive.md`.
   Pianificazione) non bloccano più la finestra: con il gestore utente di
   systemd lento o bloccato l'interfaccia poteva restare ferma fino a 10
   secondi.
+- Una quarantena interrotta (crash, spegnimento) fra lo spostamento del
+  file e l'aggiornamento dell'indice lasciava il file in quarantena senza
+  voce, non ripristinabile dalla finestra; con la cartella di quarantena su
+  un altro disco l'originale infetto poteva restare nella sua cartella
+  sotto un nome nascosto. Ora l'operazione viene completata o annullata al
+  successivo avvio di KlamAV-Py o della CLI.
+- Con clamd via TCP su localhost, l'aggiornamento del database era
+  disabilitato quando freshclam usa una `DatabaseDirectory` diversa da
+  `/var/lib/clamav`, con un messaggio che parlava di un container. Ora si
+  usa la cartella indicata in `freshclam.conf`.
+- Il controllo aggiornamenti ignorava i suffissi di pre-release: con
+  installata la 0.1.12-rc1 la 0.1.12 finale non veniva segnalata.
 - Con la pianificazione interna attiva, la cartella da scansionare deve
   essere un percorso assoluto di una cartella esistente: un file o un
   percorso relativo venivano salvati, e la scansione poi non partiva o

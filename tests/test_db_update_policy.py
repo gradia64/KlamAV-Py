@@ -8,14 +8,19 @@ da clamd, versione locale iniettabile): nessun clamd e nessun
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 from klamav_py.clamd_client import ClamdEndpoint
 from klamav_py.db_freshness import DbInfo
+from klamav_py import db_update_policy
 from klamav_py.db_update_policy import (
+    DEFAULT_DB_DIR,
     is_loopback_host,
     local_daily_version,
+    local_db_dir,
+    parse_database_directory,
     parse_db_header,
     update_availability,
 )
@@ -97,8 +102,54 @@ def test_loopback_database_diverso_bloccato():
 
 
 def test_loopback_senza_database_locale_bloccato():
-    a = update_availability(ClamdEndpoint.tcp("::1"), INFO, lambda: None)
+    a = update_availability(ClamdEndpoint.tcp("::1"), INFO, lambda: None, lambda: DEFAULT_DB_DIR)
     assert not a.allowed and "/var/lib/clamav" in a.reason
+
+
+def test_messaggio_con_la_directory_configurata():
+    a = update_availability(ClamdEndpoint.tcp("::1"), INFO, lambda: None, lambda: Path("/srv/firme"))
+    assert "/srv/firme" in a.reason
+
+
+# -- DatabaseDirectory del freshclam locale ------------------------------
+
+@pytest.mark.parametrize("testo, atteso", [
+    ("DatabaseDirectory /srv/clamav\n", Path("/srv/clamav")),
+    ("# DatabaseDirectory /commentata\nDatabaseDirectory   /a\n", Path("/a")),
+    ("DatabaseDirectory /a\nDatabaseDirectory /b\n", Path("/b")),  # vale l'ultima
+    ('DatabaseDirectory "/con spazi/db"\n', Path("/con spazi/db")),
+    ("databasedirectory /minuscolo\n", Path("/minuscolo")),
+    ("DatabaseDirectory relativa\n", None),
+    ("UpdateLogFile /var/log/freshclam.log\n", None),
+    ("", None),
+])
+def test_database_directory(testo, atteso):
+    assert parse_database_directory(testo) == atteso
+
+
+def test_directory_dal_primo_conf_esistente(tmp_path):
+    primo, secondo = tmp_path / "manca.conf", tmp_path / "freshclam.conf"
+    secondo.write_text("DatabaseDirectory /srv/clamav\n")
+    assert local_db_dir((primo, secondo)) == Path("/srv/clamav")
+
+
+def test_directory_predefinita(tmp_path):
+    assert local_db_dir((tmp_path / "manca.conf",)) == DEFAULT_DB_DIR
+    (tmp_path / "vuoto.conf").write_text("# niente\n")
+    assert local_db_dir((tmp_path / "vuoto.conf",)) == DEFAULT_DB_DIR
+
+
+def test_versione_locale_dalla_directory_configurata(tmp_path, monkeypatch):
+    # Il caso della voce aperta: DatabaseDirectory personalizzata, clamd
+    # via TCP su loopback. Prima si leggeva sempre /var/lib/clamav.
+    db = tmp_path / "db"
+    db.mkdir()
+    (db / "daily.cld").write_bytes(_header(27800))
+    conf = tmp_path / "freshclam.conf"
+    conf.write_text(f"DatabaseDirectory {db}\n")
+    monkeypatch.setattr(db_update_policy, "FRESHCLAM_CONF_PATHS", (conf,))
+    assert local_daily_version() == 27800
+    assert update_availability(ClamdEndpoint.tcp("127.0.0.1"), INFO).allowed
 
 
 def test_loopback_con_clamd_irraggiungibile_consentito():

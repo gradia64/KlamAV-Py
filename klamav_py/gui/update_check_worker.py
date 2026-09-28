@@ -6,6 +6,7 @@ Gira in QThread separato per non bloccare la UI.
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -21,6 +22,41 @@ class UpdateInfo:
     release_notes: str
     published_at: str
     has_update: bool
+
+
+# Stadi di pre-release riconosciuti, nell'ordine: 0.1.12a1 < 0.1.12b1 <
+# 0.1.12rc1 < 0.1.12. Un suffisso sconosciuto conta come pre-release del
+# livello più basso: una versione con un suffisso qualsiasi non supera mai
+# la stessa senza suffisso.
+_PRE_STAGES = {"dev": 0, "a": 1, "alpha": 1, "b": 2, "beta": 2, "pre": 3, "c": 3, "rc": 3}
+_PRE_RE = re.compile(r"^[-_.]?([a-z]*)[-_.]?(\d*)")
+
+
+def version_key(version: str) -> tuple:
+    """
+    Chiave ordinabile per le versioni dei tag (0.1.12, v0.1.12,
+    0.1.12-rc1, 0.1.12rc1, 0.1.12+deb1).
+
+    Prima i suffissi venivano scartati: 0.1.12-rc1 e 0.1.12 risultavano
+    uguali, quindi chi aveva installato la candidata non veniva avvisato
+    della versione finale. I componenti numerici si confrontano con gli
+    zeri finali ignorati (0.1 == 0.1.0); i metadati di build dopo "+" non
+    contano.
+    """
+    text = version.strip().lower().lstrip("v").split("+", 1)[0]
+    match = re.match(r"^(\d+(?:\.\d+)*)(.*)$", text)
+    if not match:
+        return ((0,), 1, 0, 0)
+    release = [int(p) for p in match.group(1).split(".")]
+    while len(release) > 1 and release[-1] == 0:
+        release.pop()
+    rest = match.group(2)
+    if not rest:
+        return (tuple(release), 1, 0, 0)  # finale: dopo ogni pre-release
+    pre = _PRE_RE.match(rest)
+    stage = _PRE_STAGES.get(pre.group(1), -1) if pre else -1
+    number = int(pre.group(2)) if pre and pre.group(2) else 0
+    return (tuple(release), 0, stage, number)
 
 
 class UpdateCheckWorker(QThread):
@@ -108,22 +144,6 @@ class UpdateCheckWorker(QThread):
 
     @staticmethod
     def _version_compare(a: str, b: str) -> int:
-        def parse(v: str):
-            parts = []
-            for p in v.split("."):
-                num = ""
-                for ch in p:
-                    if ch.isdigit():
-                        num += ch
-                    else:
-                        break
-                parts.append(int(num) if num else 0)
-            return parts
-
-        pa, pb = parse(a), parse(b)
-        for x, y in zip(pa, pb):
-            if x != y:
-                return 1 if x > y else -1
-        if len(pa) != len(pb):
-            return 1 if len(pa) > len(pb) else -1
-        return 0
+        """-1, 0 o 1 come a <, = o > b. Vedi version_key."""
+        ka, kb = version_key(a), version_key(b)
+        return (ka > kb) - (ka < kb)
