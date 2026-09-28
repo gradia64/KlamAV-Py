@@ -63,7 +63,7 @@ sono in `docs/CHANGELOG-archive.md`.
 - Test su quarantena interrotta, validazioni e chiamate a systemctl fuori
   dal thread dell'interfaccia, confronto delle versioni. Il test di
   regressione del crash dei QThread ora riproduce la gara in modo
-  deterministico e non viene più saltato. Totale: 756 test.
+  deterministico e non viene più saltato. Totale: 763 test.
 
 ## 0.1.11 — 2026-09-27
 
