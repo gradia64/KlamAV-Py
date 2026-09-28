@@ -114,7 +114,9 @@ svuotavano la scansione in silenzio. Aggiornamento del database disabilitato
 quando clamd, via TCP, usa un database diverso da quello locale.
 
 **Dopo la 0.1.11.** Su `main`, in attesa della 0.1.12: la pianificazione
-interna rivalida le esclusioni a ogni avvio, come la CLI (`6a7a326`).
+interna rivalida le esclusioni a ogni avvio, come la CLI (`6a7a326`); la
+rivalidazione è poi passata in `ScanWorker.run()`, estesa alla quarantena,
+e le scansioni programmate non completate non risultano più pulite.
 
 ---
 
@@ -199,8 +201,19 @@ nulla fa perdere tempo.
   su scenari con symlink ripuntati.
 - **Le esclusioni di file sono un errore**, non un avviso: `_iter_files`
   sfoltisce solo directory.
-- **Rivalidazione a ogni scansione**: nella CLI (e quindi nel timer) e, da
-  `6a7a326`, nella pianificazione interna per le esclusioni dell'utente.
+- **Rivalidazione a ogni scansione**: nella CLI (e quindi nel timer) e in
+  `ScanWorker.run()` per le scansioni della GUI, prima della traversata e
+  fuori dal thread principale. Il worker confronta con ogni radice che è
+  una directory sia le esclusioni dell'utente (`scan_exclusions.decide`)
+  sia la quarantena (`quarantine_location.root_inside`); un file come radice
+  non si controlla, perché `_iter_files` non gli applica le esclusioni.
+- **Quarantena e radici della GUI**: `quarantine_location.decide` accetta
+  `roots`; le Impostazioni passano home e `schedule_target`, la
+  Pianificazione controlla la regola inversa al salvataggio.
+- **Scansione non completata** (`ScanWorker.aborted`): per la pianificazione
+  interna non aggiorna `schedule_last_run`, quindi viene ritentata al
+  minuto; notifica e voce in cronologia una volta sola finché una scansione
+  non arriva alla fine.
 
 ### Unit systemd e drop-in
 
@@ -248,24 +261,19 @@ nulla fa perdere tempo.
 Già tracciati: segnalarli di nuovo è utile solo se si aggiunge uno scenario,
 una riproduzione o una correzione migliore.
 
-- **Contenenza quarantena/radice nella GUI.** `quarantine_location.decide`
-  confronta la quarantena solo con la home; né le Impostazioni né la
-  Pianificazione confrontano la quarantena con `schedule_target`. Con una
-  quarantena antenata del target interno la scansione programmata della GUI
-  percorre zero file. La CLI è protetta. Preesistente dalla 0.1.10.
-  Direzione prevista per la 0.1.12: parametro `roots` in
-  `quarantine_location.decide` e rivalidazione di tutte le esclusioni della
-  traversata dentro `ScanWorker.run()`.
-- **Syscall sul filesystem nel thread GUI.** La rivalidazione di `6a7a326`
-  esegue `resolve()`/`stat()` nel thread principale; un'esclusione su un mount
-  di rete `hard` non raggiungibile bloccherebbe l'interfaccia.
-  `_refresh_exclusions` rivaluta a ogni tasto nel campo target. Stessa
-  soluzione del punto precedente.
+- **Syscall sul filesystem nel thread GUI, parte residua.** La
+  rivalidazione prima di ogni scansione programmata è passata in
+  `ScanWorker.run()`, ma `_refresh_exclusions` rivaluta ancora le voci a
+  ogni tasto nel campo target della Pianificazione, e il salvataggio le
+  valida nel thread principale: un'esclusione su un mount di rete `hard`
+  non raggiungibile bloccherebbe l'interfaccia in quei momenti.
 - **Target della pianificazione interna non validato come directory** al
   salvataggio: un file scritto a mano produce blocchi e avvisi incoerenti con
   la CLI.
-- **Scansione programmata bloccata senza traccia in cronologia** (vale sia per
-  esclusioni non valide sia per target mancante).
+- **Scansione programmata con target mancante senza traccia in
+  cronologia**: solo la notifica. Le scansioni non completate per esclusioni
+  non valide o clamd irraggiungibile compaiono invece come «Programmata (non
+  completata)».
 - **`LOCAL_DB_DIR` fisso su `/var/lib/clamav`** in `db_update_policy.py`: un
   `DatabaseDirectory` personalizzato con TCP su loopback disabilita
   l'aggiornamento con un messaggio fuorviante. Esito comunque sicuro.

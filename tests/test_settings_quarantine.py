@@ -72,7 +72,7 @@ def env(app, tmp_path, monkeypatch):
     # directory di prova verrebbe (giustamente) rifiutata.
     monkeypatch.setattr(
         mw, "decide_quarantine_dir",
-        lambda raw: decide(raw, unit_hidden=(), mountinfo=MOUNTS_EXT4, volatile_roots=()),
+        lambda raw, **kw: decide(raw, unit_hidden=(), mountinfo=MOUNTS_EXT4, volatile_roots=(), **kw),
     )
 
     calls = SimpleNamespace(reload=0, reload_result=None, disable=0, disable_result=None, timer=False)
@@ -223,6 +223,18 @@ def test_cambio_directory_applicato_a_scansione_manuale_e_pagina(env, tmp_path):
     assert refreshed == [1]
 
 
+def test_quarantena_che_contiene_la_cartella_pianificata_rifiutata(env):
+    target = env.tmp / "dati" / "progetti"
+    target.mkdir(parents=True)
+    s = QSettings(mw.APP_NAME, mw.APP_NAME)
+    s.setValue("schedule_target", str(target))
+    s.sync()
+    d = env.dialogs()
+    _settings_page(str(env.tmp / "dati"))._save_settings()
+    assert d.kinds() == ["warning"] and "pianificazione interna" in d.shown[0][1]
+    assert _saved() is None and not env.dropin.exists()
+
+
 # -- pianificazione ------------------------------------------------------
 
 def _scheduler(enabled=True):
@@ -287,3 +299,27 @@ def test_label_timer(env):
     env.calls.timer = None
     page.refresh_system_timer()
     assert page.system_timer_label.isHidden()
+
+
+def test_cartella_pianificata_dentro_la_quarantena_rifiutata(env):
+    # La regola inversa, al salvataggio della Pianificazione.
+    q = env.tmp / "q"
+    (q / "dentro").mkdir(parents=True)
+    s = QSettings(mw.APP_NAME, mw.APP_NAME)
+    s.setValue("quarantine_dir", str(q))
+    s.sync()
+    d = env.dialogs()
+    page = _scheduler()
+    page.target_edit.setText(str(q / "dentro"))
+    page._save_schedule()
+    assert d.kinds() == ["warning"] and "non è stata salvata" in d.shown[0][1]
+    assert not QSettings(mw.APP_NAME, mw.APP_NAME).contains("schedule_target")
+
+
+def test_cartella_pianificata_fuori_dalla_quarantena_salvata(env):
+    (env.tmp / "dati").mkdir()
+    env.dialogs()
+    page = _scheduler()
+    page.target_edit.setText(str(env.tmp / "dati"))
+    page._save_schedule()
+    assert QSettings(mw.APP_NAME, mw.APP_NAME).value("schedule_target") == str(env.tmp / "dati")

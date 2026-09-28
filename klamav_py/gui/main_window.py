@@ -62,7 +62,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..clamd_client import DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult
 from ..quarantine import Quarantine
-from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir
+from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
 from ..scan_exclusions import decide as decide_exclusion
 from ..systemd_dropin import (
     DropinConflict, daemon_reload, disable_timer, foreign_overrides, render_dropin,
@@ -2078,6 +2078,19 @@ class SchedulerPage(QWidget):
         excludes = self._validated_exclusions()
         if excludes is None:
             return
+        # La regola inversa di quella delle Impostazioni: una cartella interna
+        # dentro la quarantena verrebbe esclusa per intero dalla scansione.
+        target = self._exclusion_roots().get("pianificazione interna")
+        if target is not None:
+            quarantine = Path(
+                self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))
+            ).expanduser().resolve()
+            problem = root_inside(quarantine, {"pianificazione interna": target})
+            if problem:
+                QMessageBox.warning(
+                    self, title, f"{problem}\n\nLa pianificazione non è stata salvata."
+                )
+                return
 
         enabled = self.enable_check.isChecked()
         timer_disabled = False
@@ -2518,7 +2531,12 @@ class SettingsPage(QWidget):
         divergenza.
         """
         title = "Cartella quarantena"
-        decision = decide_quarantine_dir(self.quar_edit.text())
+        # Anche la cartella della pianificazione interna: una quarantena che
+        # la contiene la escluderebbe per intero dalla scansione programmata.
+        decision = decide_quarantine_dir(
+            self.quar_edit.text(),
+            roots=schedule_roots(self.settings.value("schedule_target", str(Path.home()))),
+        )
         problem = decision.error or decision.volatile
         if problem:
             QMessageBox.warning(self, title, problem)
@@ -2919,7 +2937,11 @@ class MainWindow(QMainWindow):
         self._schedule_late_noted = False
         self._schedule_skip_noted = False
         self._schedule_missing_noted = False
-        self._schedule_excludes_noted = False
+        # Scansione programmata non completata (ScanWorker.aborted):
+        # notifica e cronologia una volta sola finché una scansione non
+        # arriva alla fine, non a ogni nuovo tentativo al minuto.
+        self._schedule_aborted_noted = False
+        self._bg_aborted: str | None = None
         self._double_schedule_noted = False
         self.bg_worker = None
         # Log della scansione programmata scritto man mano (vedi
@@ -3417,37 +3439,24 @@ X-GNOME-Autostart-enabled=true
                 )
             return
 
-        # Stessa rivalidazione della CLI (_prepare_exclusions): le forme
-        # salvate si risolvono di nuovo qui, perché un symlink può essere
-        # stato ripuntato dopo il salvataggio. Un'esclusione che adesso
-        # contiene la radice farebbe percorrere zero file alla scansione,
-        # che risulterebbe pulita senza aver controllato nulla. Gli avvisi
-        # restano non bloccanti: sono già stati mostrati al salvataggio.
+        # Le esclusioni (dell'utente e la quarantena) si rivalidano in
+        # ScanWorker.run(), come fa la CLI: un'esclusione che nel frattempo
+        # contiene la radice ferma la scansione con aborted invece di farle
+        # percorrere zero file. Lì e non qui perché resolve() e stat() su
+        # un mount di rete irraggiungibile bloccherebbero la GUI.
         excludes = load_schedule_excludes(self.settings)
-        for raw in excludes:
-            decision = decide_exclusion(raw, roots={"pianificazione interna": target})
-            if not decision.usable:
-                # Come per il target mancante: una volta per scadenza,
-                # non a ogni controllo al minuto.
-                if not self._schedule_excludes_noted:
-                    self._schedule_excludes_noted = True
-                    self.tray_icon.showMessage(
-                        APP_NAME,
-                        f"Scansione programmata non eseguita: {decision.error} "
-                        "Controlla le cartelle escluse in Pianificazione.",
-                        _icon("dialog-warning"),
-                        8000,
-                    )
-                return
 
         self._schedule_late_noted = False
         self._schedule_skip_noted = False
         self._schedule_missing_noted = False
-        self._schedule_excludes_noted = False
+        self._bg_aborted = None
 
-        self.tray_icon.showMessage(
-            APP_NAME, "Avvio scansione automatica in background...", _app_icon(), 3000
-        )
+        # Dopo una scansione non completata il controllo al minuto la
+        # ritenta: l'avvio si annuncia solo la prima volta.
+        if not self._schedule_aborted_noted:
+            self.tray_icon.showMessage(
+                APP_NAME, "Avvio scansione automatica in background...", _app_icon(), 3000
+            )
         self.scheduler_page.update_progress(f"In corso dal {datetime.now():%H:%M} — avvio…")
         self._bg_log_close()
         self._bg_log_path = None
@@ -3467,6 +3476,7 @@ X-GNOME-Autostart-enabled=true
         # scansioni programmate con risultati mai ispezionabili).
         self.bg_worker.result_ready.connect(self._on_bg_result)
         self.bg_worker.progress.connect(self._on_bg_progress)
+        self.bg_worker.aborted.connect(self._on_bg_aborted)
         self.bg_worker.finished_scan.connect(self._on_bg_finished)
         self.bg_worker.quarantined.connect(self._on_quarantine_changed)
         self.bg_worker.quarantine_outcome.connect(self._on_bg_quarantine_outcome)
@@ -3524,6 +3534,12 @@ X-GNOME-Autostart-enabled=true
         if line is not None:
             self._bg_log_write(line)
 
+    def _on_bg_aborted(self, message: str) -> None:
+        # Arriva prima di finished_scan (connessioni queued, stesso
+        # emettitore): _on_bg_finished lo trova già impostato.
+        self._bg_aborted = message
+        self._bg_log_write(f"ERRORE — {message}")
+
     def _on_bg_progress(self, scanned: int, infections: int, errors: int, too_large: int) -> None:
         # Visibilità della scansione background: label in Pianificazione +
         # tooltip della tray (già throttled lato worker a 150ms).
@@ -3536,12 +3552,27 @@ X-GNOME-Autostart-enabled=true
         )
 
     def _on_bg_finished(self, scanned: int, infections: int, errors: int, too_large: int = 0) -> None:
-        status = f"Scansione automatica completata: {infections} infetti trovati, {errors} errori."
-        if too_large:
-            status += f" {too_large} file non verificati (troppo grandi)."
-        self.tray_icon.showMessage(
-            APP_NAME, status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000
-        )
+        aborted, self._bg_aborted = self._bg_aborted, None
+        # Una scansione non completata non è "completata, 0 infetti": prima
+        # clamd irraggiungibile produceva proprio quella notifica.
+        first_abort = aborted is not None and not self._schedule_aborted_noted
+        if aborted is None:
+            self._schedule_aborted_noted = False
+            status = f"Scansione automatica completata: {infections} infetti trovati, {errors} errori."
+            if too_large:
+                status += f" {too_large} file non verificati (troppo grandi)."
+            self.tray_icon.showMessage(
+                APP_NAME, status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000
+            )
+        elif first_abort:
+            self._schedule_aborted_noted = True
+            self.tray_icon.showMessage(
+                APP_NAME,
+                f"Scansione programmata non completata: {aborted} "
+                "Verrà ritentata finché il problema non è risolto.",
+                _icon("dialog-warning"),
+                8000,
+            )
         self._reset_tray_tooltip()
 
         # Log persistente: il dettaglio di infetti/errori/non-verificati
@@ -3562,17 +3593,20 @@ X-GNOME-Autostart-enabled=true
         except OSError:
             pass
 
-        target_str = self.settings.value("schedule_target", str(Path.home()))
-        self.history_manager.add_entry(
-            "Programmata",
-            target_str,
-            scanned,
-            infections,
-            errors,
-            too_large=too_large,
-            log_file=str(log_path) if log_path else None,
-        )
-        self.history_page.refresh()
+        # I tentativi successivi di una scansione che non si completa non
+        # riempiono la cronologia: basta la prima voce.
+        if aborted is None or first_abort:
+            target_str = self.settings.value("schedule_target", str(Path.home()))
+            self.history_manager.add_entry(
+                "Programmata" if aborted is None else "Programmata (non completata)",
+                target_str,
+                scanned,
+                infections,
+                errors,
+                too_large=too_large,
+                log_file=str(log_path) if log_path else None,
+            )
+            self.history_page.refresh()
 
         finished_at = datetime.now().strftime("%H:%M")
         summary = (
@@ -3580,6 +3614,8 @@ X-GNOME-Autostart-enabled=true
             f"{infections} infetti, {errors} errori"
             + (f", {too_large} non verificati" if too_large else "")
         )
+        if aborted is not None:
+            summary = f"Ultimo tentativo: {finished_at} — non completata: {aborted}"
         if log_path:
             summary += f"\nLog: {log_path}"
         self.scheduler_page.update_progress(summary)
@@ -3588,7 +3624,7 @@ X-GNOME-Autostart-enabled=true
         # interrotta dalla chiusura della GUI viene recuperata al prossimo
         # avvio) e con clamd attivo: con il demone fermo la scansione
         # "finisce" subito senza aver verificato nulla, e va ritentata.
-        if not self.clamd_health.is_down:
+        if aborted is None and not self.clamd_health.is_down:
             self.settings.setValue("schedule_last_run", time.time())
             self.settings.sync()
         self._update_next_run_label()

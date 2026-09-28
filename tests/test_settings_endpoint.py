@@ -60,7 +60,7 @@ def env(app, tmp_path, monkeypatch):
     monkeypatch.setattr(mw, "DEFAULT_QUARANTINE_DIR", home / ".local/share/klamav-py/quarantine")
     monkeypatch.setattr(
         mw, "decide_quarantine_dir",
-        lambda raw: decide(raw, unit_hidden=(), mountinfo=MOUNTS_EXT4, volatile_roots=()),
+        lambda raw, **kw: decide(raw, unit_hidden=(), mountinfo=MOUNTS_EXT4, volatile_roots=(), **kw),
     )
     calls = SimpleNamespace(reload=0)
     # I drop-in reali della macchina (es. un override.conf dello sviluppatore)

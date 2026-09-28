@@ -13,7 +13,21 @@ sono in `docs/CHANGELOG-archive.md`.
   valida al salvataggio poteva diventarlo dopo (per esempio un link
   simbolico ripuntato su una cartella che contiene quella da
   scansionare), e la scansione terminava pulita senza aver controllato
-  nessun file. Ora non parte e lo segnala con una notifica.
+  nessun file. Ora non parte e lo segnala con una notifica. Il controllo
+  avviene fuori dal thread dell'interfaccia: un'esclusione su un mount di
+  rete irraggiungibile non blocca più la finestra.
+- Una quarantena che contiene la cartella della scansione programmata
+  interna la escludeva per intero: la scansione percorreva zero file e
+  risultava pulita. Ora le Impostazioni rifiutano una quarantena del
+  genere, la Pianificazione rifiuta una cartella dentro la quarantena, e
+  la scansione stessa non parte se il caso si presenta comunque (per
+  esempio con un link simbolico ripuntato). Una scansione manuale della
+  cartella di quarantena ora dà un errore invece di zero file.
+- La scansione programmata interna con clamd irraggiungibile risultava
+  "completata: 0 infetti". Ora una scansione non completata lo dice nella
+  notifica e in Cronologia ("Programmata (non completata)"), non conta
+  come eseguita e viene ritentata, con una sola notifica e una sola voce
+  in Cronologia finché il problema non si risolve.
 
 ## 0.1.11 — 2026-09-27
 

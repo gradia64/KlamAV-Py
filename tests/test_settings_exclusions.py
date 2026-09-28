@@ -212,101 +212,121 @@ def test_voci_con_errore_segnalate_al_caricamento(env):
 
 # -- scansione programmata interna ---------------------------------------
 
-def test_scansione_programmata_passa_le_esclusioni(env, monkeypatch):
-    creati = []
+class _Signal:
+    def connect(self, *a):
+        pass
 
-    class Signal:
-        def connect(self, *a):
-            pass
 
+def _fake_window(creati, messaggi=None):
     class FakeWorker:
         def __init__(self, **kw):
             creati.append(kw)
-            for name in ("result_ready", "progress", "finished_scan", "quarantined", "quarantine_outcome"):
-                setattr(self, name, Signal())
+            for name in (
+                "result_ready", "progress", "finished_scan", "quarantined",
+                "quarantine_outcome", "aborted",
+            ):
+                setattr(self, name, _Signal())
 
         def start(self):
             pass
 
-    monkeypatch.setattr(mw, "ScanWorker", FakeWorker)
-    s = _settings()
-    s.setValue("schedule_target", "~/Documenti")
-    s.setValue(mw.SCHEDULE_EXCLUDES_KEY, ["~/Documenti/archivio"])
-    s.sync()
     fake = SimpleNamespace(
         bg_worker=None,
         scan_page=SimpleNamespace(worker=None),
         settings=_settings(),
-        tray_icon=SimpleNamespace(showMessage=lambda *a: None),
+        tray_icon=SimpleNamespace(
+            showMessage=lambda *a, **k: messaggi.append(a) if messaggi is not None else None
+        ),
         scheduler_page=SimpleNamespace(update_progress=lambda *a: None),
         _bg_log_close=lambda: None,
         _clamd_endpoint=lambda: None,
         _schedule_skip_noted=False,
         _schedule_missing_noted=False,
         _schedule_late_noted=False,
+        _schedule_aborted_noted=False,
+        _bg_aborted=None,
         _on_bg_result=None, _on_bg_progress=None, _on_bg_finished=None,
         _on_quarantine_changed=None, _on_bg_quarantine_outcome=None,
+        _on_bg_aborted=None,
     )
+    return FakeWorker, fake
+
+
+def test_scansione_programmata_passa_le_esclusioni(env, monkeypatch):
+    creati = []
+    FakeWorker, fake = _fake_window(creati)
+    monkeypatch.setattr(mw, "ScanWorker", FakeWorker)
+    s = _settings()
+    s.setValue("schedule_target", "~/Documenti")
+    s.setValue(mw.SCHEDULE_EXCLUDES_KEY, ["~/Documenti/archivio"])
+    s.sync()
+    fake.settings = _settings()
     mw.MainWindow._run_scheduled_scan(fake)
     assert len(creati) == 1
     assert creati[0]["target"] == (env.home / "Documenti").resolve()
     assert creati[0]["exclude_dirs"] == ["~/Documenti/archivio"]
 
 
-def test_scansione_programmata_rifiuta_esclusione_diventata_non_valida(env, monkeypatch):
-    # Rivalidazione al momento della scansione, come fa la CLI: l'esclusione
-    # ~/collegato era valida al salvataggio (symlink su una sottodirectory
-    # della cartella interna); ripuntato sulla home, senza il controllo la
-    # scansione partiva e percorreva zero file, risultando pulita senza
-    # aver controllato nulla.
+def test_scansione_programmata_esclusione_non_validata_nel_thread_gui(env, monkeypatch):
+    # La rivalidazione delle esclusioni sta in ScanWorker.run() (vedi
+    # test_scan_worker_exclude): qui nessun resolve()/stat() sulle voci,
+    # che su un mount di rete irraggiungibile bloccherebbero la GUI.
     creati = []
-    messaggi = []
-
-    class Signal:
-        def connect(self, *a):
-            pass
-
-    class FakeWorker:
-        def __init__(self, **kw):
-            creati.append(kw)
-            for name in ("result_ready", "progress", "finished_scan", "quarantined", "quarantine_outcome"):
-                setattr(self, name, Signal())
-
-        def start(self):
-            pass
-
+    FakeWorker, fake = _fake_window(creati)
     monkeypatch.setattr(mw, "ScanWorker", FakeWorker)
-    (env.home / "Documenti" / "archivio").mkdir(parents=True)
-    collegato = env.home / "collegato"
-    collegato.symlink_to(env.home / "Documenti" / "archivio")
+    monkeypatch.setattr(
+        mw, "decide_exclusion", lambda *a, **k: pytest.fail("validazione nel thread GUI")
+    )
     s = _settings()
     s.setValue("schedule_target", "~/Documenti")
     s.setValue(mw.SCHEDULE_EXCLUDES_KEY, ["~/collegato"])
     s.sync()
-    collegato.unlink()
-    collegato.symlink_to(env.home)  # ora è un antenato della radice
+    fake.settings = _settings()
+    mw.MainWindow._run_scheduled_scan(fake)
+    assert len(creati) == 1
+
+
+def _finished_window(env):
+    voci, messaggi, progressi = [], [], []
     fake = SimpleNamespace(
-        bg_worker=None,
-        scan_page=SimpleNamespace(worker=None),
         settings=_settings(),
         tray_icon=SimpleNamespace(showMessage=lambda *a, **k: messaggi.append(a)),
-        scheduler_page=SimpleNamespace(update_progress=lambda *a: None),
+        _reset_tray_tooltip=lambda: None,
         _bg_log_close=lambda: None,
-        _clamd_endpoint=lambda: None,
-        _schedule_skip_noted=False,
-        _schedule_missing_noted=False,
-        _schedule_late_noted=False,
-        _schedule_excludes_noted=False,
-        _on_bg_result=None, _on_bg_progress=None, _on_bg_finished=None,
-        _on_quarantine_changed=None, _on_bg_quarantine_outcome=None,
+        _bg_log_path=None,
+        _bg_aborted=None,
+        _schedule_aborted_noted=False,
+        history_manager=SimpleNamespace(add_entry=lambda *a, **k: voci.append(a)),
+        history_page=SimpleNamespace(refresh=lambda: None),
+        scheduler_page=SimpleNamespace(update_progress=progressi.append),
+        clamd_health=SimpleNamespace(is_down=False),
+        _update_next_run_label=lambda: None,
+        bg_worker=None,
     )
-    mw.MainWindow._run_scheduled_scan(fake)
-    assert creati == []
+    return fake, voci, messaggi, progressi
+
+
+def test_scansione_programmata_non_completata_non_risulta_pulita(env, monkeypatch):
+    # Prima il segnale error del worker non era collegato: clamd
+    # irraggiungibile o una radice esclusa davano "completata, 0 infetti"
+    # e la scadenza risultava soddisfatta.
+    monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", env.home / "logs")
+    fake, voci, messaggi, progressi = _finished_window(env)
+    for _ in range(3):  # tentativi al minuto sulla stessa scadenza
+        fake._bg_aborted = "Scansione non eseguita. Cartella esclusa: X"
+        mw.MainWindow._on_bg_finished(fake, 0, 0, 0)
+    assert [v[0] for v in voci] == ["Programmata (non completata)"]
     assert len(messaggi) == 1
-    assert "esclusa per intero" in messaggi[0][1]
-    # Al controllo successivo, stessa scadenza: niente seconda notifica.
-    mw.MainWindow._run_scheduled_scan(fake)
-    assert len(messaggi) == 1 and creati == []
+    assert messaggi[0][1].startswith("Scansione programmata non completata")
+    assert "non completata" in progressi[-1]
+    assert _settings().value("schedule_last_run") is None
+
+    # Una scansione che arriva alla fine chiude la serie e conta.
+    mw.MainWindow._on_bg_finished(fake, 10, 0, 0)
+    assert [v[0] for v in voci][-1] == "Programmata"
+    assert "completata" in messaggi[-1][1]
+    assert _settings().value("schedule_last_run") is not None
+    assert fake._schedule_aborted_noted is False
 
 
 # -- drop-in del timer di sistema ----------------------------------------
@@ -367,8 +387,8 @@ def test_impostazioni_conservano_le_esclusioni_nel_dropin(env, monkeypatch):
 
     monkeypatch.setattr(
         mw, "decide_quarantine_dir",
-        lambda raw: decide(raw, unit_hidden=(), mountinfo="22 1 8:1 / / rw - ext4 /dev/sda1 rw\n",
-                           volatile_roots=()),
+        lambda raw, **kw: decide(raw, unit_hidden=(), mountinfo="22 1 8:1 / / rw - ext4 /dev/sda1 rw\n",
+                                 volatile_roots=(), **kw),
     )
     s = _settings()
     s.setValue(mw.SCHEDULE_EXCLUDES_KEY, [str(env.home / "vm")])

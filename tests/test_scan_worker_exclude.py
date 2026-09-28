@@ -3,6 +3,10 @@ Esclusioni configurate in ScanWorker: arrivano nella forma salvata
 (scan_exclusions.ExclusionDecision.stored) e si risolvono in run(), al
 momento della scansione, come fa la CLI per il timer. La quarantena
 resta sempre esclusa, in aggiunta.
+
+Prima di percorrere le radici il worker rivaluta le esclusioni: una
+radice dentro un'esclusione (o dentro la quarantena) darebbe una
+scansione di zero file conclusa senza errori.
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from klamav_py.clamd_client import ClamdEndpoint
+from klamav_py.clamd_client import ClamdEndpoint, ClamdUnavailable
 
 pytest.importorskip("PySide6")
 
@@ -92,3 +96,84 @@ def test_esclusioni_per_ogni_destinazione(tmp_path):
     )
     w.run()
     assert Client.visti == [[(tmp_path / "vm").resolve()]] * 2
+
+
+# -- rivalidazione prima della traversata --------------------------------
+
+def _run_capture(**kw):
+    w = ScanWorker(endpoint=ClamdEndpoint(), client_factory=kw.pop("client_factory", Client), **kw)
+    got = {"aborted": [], "error": [], "finished": []}
+    w.aborted.connect(got["aborted"].append)
+    w.error.connect(got["error"].append)
+    w.finished_scan.connect(lambda *a: got["finished"].append(a))
+    w.run()
+    return got
+
+
+def test_esclusione_ripuntata_su_un_antenato_ferma_la_scansione(tmp_path):
+    # Valida al salvataggio, poi il symlink viene ripuntato sulla radice:
+    # senza il controllo _iter_files non percorre nulla e la scansione
+    # risulta pulita.
+    (tmp_path / "radice" / "archivio").mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "radice" / "archivio")
+    w_kw = dict(target=tmp_path / "radice", exclude_dirs=[str(link)])
+    link.unlink()
+    link.symlink_to(tmp_path)
+    got = _run_capture(**w_kw)
+    assert Client.visti == []  # nessuna traversata
+    assert len(got["aborted"]) == 1 and "esclusa per intero" in got["aborted"][0]
+    assert got["error"] == got["aborted"]
+    assert got["finished"] == [(0, 0, 0, 0)]
+
+
+def test_esclusione_diventata_file_ferma_la_scansione(tmp_path):
+    (tmp_path / "radice").mkdir()
+    (tmp_path / "radice" / "nota").write_text("x")
+    got = _run_capture(target=tmp_path / "radice", exclude_dirs=[str(tmp_path / "radice" / "nota")])
+    assert Client.visti == [] and "non è una directory" in got["aborted"][0]
+
+
+def test_quarantena_che_contiene_la_radice_ferma_la_scansione(tmp_path):
+    # Il caso aperto della 0.1.11: quarantena antenata della cartella della
+    # pianificazione interna.
+    (tmp_path / "q" / "dentro").mkdir(parents=True)
+    got = _run_capture(target=tmp_path / "q" / "dentro", quarantine_dir=tmp_path / "q")
+    assert Client.visti == []
+    assert got["aborted"] and got["aborted"][0].startswith("Scansione non eseguita. Cartella di quarantena")
+
+
+def test_radice_uguale_alla_quarantena_ferma_la_scansione(tmp_path):
+    (tmp_path / "q").mkdir()
+    got = _run_capture(target=tmp_path / "q", quarantine_dir=tmp_path / "q")
+    assert Client.visti == [] and got["aborted"]
+
+
+def test_file_nella_quarantena_non_e_un_errore(tmp_path):
+    # Real-Time: un evento su un file della quarantena non va segnalato
+    # (i file non sono sfoltiti da _iter_files, il risultato è scartato).
+    (tmp_path / "q").mkdir()
+    f = tmp_path / "q" / "abc"
+    f.write_text("x")
+    got = _run_capture(target=f, quarantine_dir=tmp_path / "q")
+    assert got["aborted"] == [] and len(Client.visti) == 1
+
+
+def test_file_sparito_non_e_un_errore(tmp_path):
+    got = _run_capture(target=tmp_path / "sparito", quarantine_dir=tmp_path / "q")
+    assert got["aborted"] == []
+
+
+def test_esclusione_valida_non_ferma_la_scansione(tmp_path):
+    (tmp_path / "vm").mkdir()
+    got = _run_capture(target=tmp_path, exclude_dirs=[str(tmp_path / "vm"), str(tmp_path / "manca")])
+    assert got["aborted"] == [] and len(Client.visti) == 1
+
+
+def test_clamd_irraggiungibile_segnalato_come_aborted(tmp_path):
+    class Down(Client):
+        def scan_stream(self, target, **kw):
+            raise ClamdUnavailable("connessione rifiutata", where="/run/clamd.sock")
+
+    got = _run_capture(target=tmp_path, client_factory=Down)
+    assert len(got["aborted"]) == 1 and "non raggiungibile" in got["aborted"][0]

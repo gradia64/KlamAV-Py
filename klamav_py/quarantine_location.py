@@ -38,7 +38,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 # Stesso percorso dell'ExecStart di klamav-scan.service (%h/...): la
 # coerenza è verificata da tests/test_quarantine_location.py.
@@ -185,16 +185,42 @@ def _under(path: Path, roots: Iterable[Path]) -> Path | None:
     return None
 
 
+def root_inside(path: Path, roots: Mapping[str, Path]) -> str | None:
+    """
+    Motivo di rifiuto se la quarantena (già risolta) è uguale a una radice
+    di scansione o la contiene, altrimenti None.
+
+    La quarantena è esclusa dalla traversata (clamd_client._iter_files):
+    una radice al suo interno produrrebbe una scansione di zero file,
+    conclusa senza errori. Le radici si risolvono qui perché il confronto
+    in _iter_files è letterale sulle forme canoniche.
+    """
+    for label, root in roots.items():
+        resolved = Path(root).expanduser().resolve()
+        if resolved == path or resolved.is_relative_to(path):
+            return (
+                f"«{path}» contiene {resolved}, da cui parte la scansione "
+                f"({label}): la quarantena è esclusa dalla scansione, che "
+                "non controllerebbe nulla. Usa una directory separata."
+            )
+    return None
+
+
 def decide(
     raw: str,
     *,
     home: Path | None = None,
+    roots: Mapping[str, Path] | None = None,
     unit_hidden: Iterable[Path] | None = None,
     mountinfo: str | None = None,
     volatile_roots: Iterable[Path] = STATIC_VOLATILE,
 ) -> LocationDecision:
     """
     Valuta la directory di quarantena scritta dall'utente.
+
+    roots: radici di scansione ulteriori rispetto alla home (etichetta ->
+    percorso), per esempio la cartella della pianificazione interna della
+    GUI: la quarantena non può né coincidere con una di esse né contenerla.
 
     home, unit_hidden, mountinfo e volatile_roots sono iniettabili per i
     test (le cui directory temporanee stanno sotto /tmp); di default si
@@ -235,6 +261,11 @@ def decide(
             ),
             outside_home=outside_home,
         )
+
+    if roots:
+        contained = root_inside(path, roots)
+        if contained:
+            return LocationDecision(path, error=contained, outside_home=outside_home)
 
     hidden = set(installed_unit_hidden_paths() if unit_hidden is None else unit_hidden)
     root = _under(path, volatile_roots) or _under(path, hidden)
