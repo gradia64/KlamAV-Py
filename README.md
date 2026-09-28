@@ -21,7 +21,7 @@ Riscrittura minimale, in Python, dell'idea alla base di KlamAV 0.22 (frontend a 
 ## Requisiti
 
 - clamav-daemon installato e attivo (clamd), non i soli binari clamscan/freshclam: questo progetto parla col demone via socket, non invoca eseguibili esterni per la scansione.
-- Python 3.10+ come baseline dichiarata. Il minimo tecnico reale è 3.9 (Path.is_relative_to); il walrus operator usato in clamd_client.py esiste dal 3.8. Testato localmente su 3.14 (Debian Sid) e in CI su 3.10/3.11/3.12.
+- Python 3.10+ come baseline dichiarata. Il minimo tecnico reale è 3.9 (Path.is_relative_to); il walrus operator usato in clamd_client.py esiste dal 3.8. Testato localmente su 3.14 (Debian Sid) e in CI su 3.10–3.14.
 - CLI: nessuna dipendenza esterna a runtime — gira anche con il Python di sistema, senza venv.
 - GUI: PySide6, va installato in un venv dedicato (vedi sotto), non nel Python di sistema.
 - GUI, solo per l'aggiornamento del database virus dal pulsante "Aggiorna Database": freshclam nel PATH e pkexec (PolicyKit) disponibili, dato che l'operazione richiede privilegi di root.

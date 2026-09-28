@@ -12,7 +12,7 @@ Non sostituisce la lettura del codice: i docstring dei moduli spiegano il
 dal codice non si vede, cioè da dove viene una regola e cosa è già stato
 valutato e scartato. La sezione 9 indica dove trovare il resto.
 
-Aggiornato alla versione 0.1.11 più il commit `6a7a326` su `main`.
+Aggiornato alla versione 0.1.12.
 
 ---
 
@@ -59,7 +59,7 @@ revisioni indipendenti del codice (umane e assistite da LLM), e ogni
 reperto è stato verificato e, dove possibile, riprodotto con un test prima
 di essere corretto. Le gravità proposte dai revisori sono state ricalibrate
 sul modello di minaccia reale, in entrambe le direzioni. La suite è passata
-da una manciata di test sulla logica pura a circa 700 test, compresi test
+da una manciata di test sulla logica pura a oltre 750 test, compresi test
 della GUI in modalità offscreen e test con socket reali.
 
 **0.1.0–0.1.5 (agosto 2026) — la riscrittura.** CLI e GUI che parlano con
@@ -113,8 +113,17 @@ regola condivisa con la CLI; `--exclude` rifiuta i casi che prima
 svuotavano la scansione in silenzio. Aggiornamento del database disabilitato
 quando clamd, via TCP, usa un database diverso da quello locale.
 
-**Dopo la 0.1.11.** Su `main`, in attesa della 0.1.12: la pianificazione
-interna rivalida le esclusioni a ogni avvio, come la CLI (`6a7a326`).
+**0.1.12 (28 settembre) — nessuna scansione pulita a zero file, niente
+blocchi della GUI.** Chiude tutte le voci aperte fino alla 0.1.11. La
+scansione della GUI rivalida quarantena ed esclusioni in `ScanWorker.run()`
+prima della traversata (una quarantena antenata della cartella interna la
+svuotava, preesistente dalla 0.1.10), e le scansioni programmate non
+completate, clamd irraggiungibile compreso, non risultano più pulite
+(`ScanWorker.aborted`). Controlli sul filesystem e chiamate a
+`systemctl --user` della pagina Pianificazione e delle Impostazioni escono
+dal thread della GUI (`gui/off_thread.py`). Quarantena con intento e
+recupero dopo un crash, `DatabaseDirectory` letta da `freshclam.conf`,
+versioni pre-release ordinate, test della gara QThread deterministico.
 
 ---
 
@@ -199,8 +208,37 @@ nulla fa perdere tempo.
   su scenari con symlink ripuntati.
 - **Le esclusioni di file sono un errore**, non un avviso: `_iter_files`
   sfoltisce solo directory.
-- **Rivalidazione a ogni scansione**: nella CLI (e quindi nel timer) e, da
-  `6a7a326`, nella pianificazione interna per le esclusioni dell'utente.
+- **Rivalidazione a ogni scansione**: nella CLI (e quindi nel timer) e in
+  `ScanWorker.run()` per le scansioni della GUI, prima della traversata e
+  fuori dal thread principale. Il worker confronta con ogni radice che è
+  una directory sia le esclusioni dell'utente (`scan_exclusions.decide`)
+  sia la quarantena (`quarantine_location.root_inside`); un file come radice
+  non si controlla, perché `_iter_files` non gli applica le esclusioni.
+- **Controlli sul filesystem fuori dal thread della GUI.** La pagina
+  Pianificazione valuta esclusioni, cartella interna e quarantena con
+  `gui/off_thread.run_off_gui_thread` (thread daemon, risultato consegnato
+  con un segnale queued), una valutazione per tipo alla volta; il
+  salvataggio disattiva il pulsante finché la validazione non risponde e
+  prosegue con i valori letti al clic. Thread daemon e non QThread: un
+  controllo bloccato su un mount di rete non deve impedire l'uscita.
+  Stesso meccanismo per `systemctl --user` (timeout 10 s): stato del timer
+  nella label e nel salvataggio, `disable_timer()`, `daemon_reload()` dopo
+  la scrittura del drop-in (Pianificazione e Impostazioni, con
+  `dropin_followup`/`dropin_notes`) e avviso di doppia pianificazione. Il
+  drop-in e le QSettings si scrivono nel thread della GUI (file locali);
+  reload fallito e override estranei restano avvisi mostrati dopo.
+- **Cartella della pianificazione interna**: al salvataggio, con la
+  pianificazione interna attiva, dev'essere un percorso assoluto di una
+  directory esistente. A ogni scansione la verifica il worker
+  (`strict_roots`), che la risolve prima della traversata; una cartella
+  mancante è una scansione non completata come le altre.
+- **Quarantena e radici della GUI**: `quarantine_location.decide` accetta
+  `roots`; le Impostazioni passano home e `schedule_target`, la
+  Pianificazione controlla la regola inversa al salvataggio.
+- **Scansione non completata** (`ScanWorker.aborted`): per la pianificazione
+  interna non aggiorna `schedule_last_run`, quindi viene ritentata al
+  minuto; notifica e voce in cronologia una volta sola finché una scansione
+  non arriva alla fine.
 
 ### Unit systemd e drop-in
 
@@ -223,6 +261,9 @@ nulla fa perdere tempo.
 - **Con clamd via TCP** l'aggiornamento locale è consentito solo su loopback e
   solo se il daily locale coincide con quello di clamd (0.1.11). I nomi host
   non si risolvono nel thread della GUI.
+- **Database locale**: la `DatabaseDirectory` del primo `freshclam.conf`
+  esistente fra `/etc/clamav`, `/etc` e `/usr/local/etc`; senza, il
+  predefinito `/var/lib/clamav`.
 
 ### Packaging
 
@@ -234,12 +275,38 @@ nulla fa perdere tempo.
   codice richiede un nuovo tag, quindi una nuova versione, non un pkgrel.
 - `debian/klamav-py/` è un artefatto di build in `.gitignore`.
 
+### Quarantena
+
+- **Intento prima dello spostamento.** `quarantine_file` scrive
+  `.<nome>.intent` (con flock tenuto per tutta l'operazione) prima di
+  toccare il file, e `.<nome>.copy` prima di una copia fra filesystem.
+  `recover_interrupted()`, eseguita alla creazione di `Quarantine`, salta
+  gli intenti con il lock tenuto (operazione in corso in un altro processo)
+  e per gli altri: rename riuscito → voce nell'indice e 0400; copia
+  completa (0400, scritto solo dopo fsync) con l'originale già tolto →
+  voce, ed eventuale nome temporaneo `.klamav-quarantena-*` cancellato;
+  copia incompleta o originale ancora al suo posto → copia cancellata,
+  originale lasciato dov'è (la prossima scansione lo rileva). Non si
+  ripete mai lo spostamento dell'originale nel recupero: vorrebbe dire
+  ripeterne le verifiche.
+
+### Aggiornamento dell'applicazione
+
+- **Versioni con pre-release** (`update_check_worker.version_key`): stadi
+  dev < a/alpha < b/beta < rc/pre/c < finale, numero di stadio numerico,
+  zeri finali ignorati, metadati dopo `+` ignorati; un suffisso
+  sconosciuto è una pre-release del livello più basso.
+
 ### Qt
 
 - **Worker QThread ritirati con `_retire_qthread()`** e un set di riferimenti
   forti a livello di modulo: `deleteLater` da solo non basta a evitare la
   distruzione del wrapper Python con il thread ancora vivo (SIGABRT osservato
   su Arch). `PingWorker` fa eccezione perché ha un parent Qt.
+- **Il test della gara (`test_qthread_retire.py`) è deterministico**: lo
+  script di riproduzione tiene vivo `run()` 50 ms dopo l'emit, così la
+  controprova senza correzione aborta sempre. Un'uscita pulita della
+  controprova è un fallimento, non uno skip.
 
 ---
 
@@ -248,35 +315,8 @@ nulla fa perdere tempo.
 Già tracciati: segnalarli di nuovo è utile solo se si aggiunge uno scenario,
 una riproduzione o una correzione migliore.
 
-- **Contenenza quarantena/radice nella GUI.** `quarantine_location.decide`
-  confronta la quarantena solo con la home; né le Impostazioni né la
-  Pianificazione confrontano la quarantena con `schedule_target`. Con una
-  quarantena antenata del target interno la scansione programmata della GUI
-  percorre zero file. La CLI è protetta. Preesistente dalla 0.1.10.
-  Direzione prevista per la 0.1.12: parametro `roots` in
-  `quarantine_location.decide` e rivalidazione di tutte le esclusioni della
-  traversata dentro `ScanWorker.run()`.
-- **Syscall sul filesystem nel thread GUI.** La rivalidazione di `6a7a326`
-  esegue `resolve()`/`stat()` nel thread principale; un'esclusione su un mount
-  di rete `hard` non raggiungibile bloccherebbe l'interfaccia.
-  `_refresh_exclusions` rivaluta a ogni tasto nel campo target. Stessa
-  soluzione del punto precedente.
-- **Target della pianificazione interna non validato come directory** al
-  salvataggio: un file scritto a mano produce blocchi e avvisi incoerenti con
-  la CLI.
-- **Scansione programmata bloccata senza traccia in cronologia** (vale sia per
-  esclusioni non valide sia per target mancante).
-- **`LOCAL_DB_DIR` fisso su `/var/lib/clamav`** in `db_update_policy.py`: un
-  `DatabaseDirectory` personalizzato con TCP su loopback disabilita
-  l'aggiornamento con un messaggio fuorviante. Esito comunque sicuro.
-- **`systemctl --user` sincrono nel thread GUI** (`timer_enabled()`,
-  `refresh_system_timer()`), timeout 10 s.
-- **`_copy_across_filesystems`**: un crash fra copia e rename lascia un orfano
-  0400 in quarantena e il file infetto al suo posto. Esito sicuro, tenuto
-  come nota di comportamento.
-- **`_version_compare`** tronca i suffissi pre-release (`-rc1`).
-- **Test di regressione della gara QThread** (`test_qthread_retire.py`) saltato
-  dove la gara non si riproduce: da riverificare con PySide6 più recenti.
+Nessuno alla 0.1.12: le voci aperte fino alla 0.1.11 sono state risolte e le
+decisioni corrispondenti sono in sezione 4.
 
 ---
 

@@ -139,6 +139,7 @@ def test_retire_trattiene_un_riferimento():
 
 SCRIPT_RIPRODUZIONE = """
 import sys
+import time
 from PySide6.QtCore import QCoreApplication, QThread, QTimer, Signal
 
 MODO = sys.argv[1]
@@ -165,6 +166,13 @@ class Worker(QThread):
         # come ScanWorker/FreshclamRestartWorker: il segnale di fine e' emesso
         # dentro run(), non dopo
         self.fine.emit()
+        # Finestra della gara allargata: run() resta vivo ancora un poco
+        # dopo l'emit, come un worker reale che chiude socket e file. Senza,
+        # la finestra e' di pochi microsecondi e la gara si riproduceva solo
+        # a volte (mai in CI, spesso mai in locale): il test di controprova
+        # veniva saltato e la rete di sicurezza non misurava nulla. Con
+        # 50 ms la slot gira sempre a thread ancora vivo.
+        time.sleep(0.05)
 
 
 class Pagina:
@@ -243,16 +251,19 @@ def test_lo_scenario_senza_fix_aborta_davvero(tmp_path):
     di riprodurre la gara. In quel caso questo test fallisce e segnala
     che la rete di sicurezza non sta più misurando niente, invece di
     restare verde a vuoto.
+
+    Prima qui c'era uno skip, perché la gara non si riproduceva in modo
+    affidabile; con la finestra allargata nello script (vedi run()) la
+    riproduzione è deterministica, e un'uscita pulita è un fallimento.
     """
     pytest.importorskip("PySide6", reason="PySide6 non disponibile (atteso in CI)")
 
     esito = _esegui("senza_fix", tmp_path)
-    if esito.returncode == 0:
-        pytest.skip(
-            "il rilascio immediato non aborta più in questo ambiente: la "
-            "gara non è riprodotta, il test di regressione non sta "
-            "misurando nulla (verificare il comportamento di PySide6)"
-        )
+    assert esito.returncode != 0, (
+        "il rilascio immediato non aborta più: la gara non è riprodotta e "
+        "test_rilascio_ripetuto_non_aborta non sta misurando nulla. "
+        "Verificare il comportamento di PySide6 o lo scenario."
+    )
     assert esito.returncode == USCITA_ABORT, (
         "atteso SIGABRT dal rilascio immediato, ottenuto "
         f"returncode={esito.returncode}.\nstderr:\n{esito.stderr}"

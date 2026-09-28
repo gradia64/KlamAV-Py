@@ -62,7 +62,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..clamd_client import DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult
 from ..quarantine import Quarantine
-from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir
+from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
 from ..scan_exclusions import decide as decide_exclusion
 from ..systemd_dropin import (
     DropinConflict, daemon_reload, disable_timer, foreign_overrides, render_dropin,
@@ -77,6 +77,7 @@ from ..db_update_policy import UpdateAvailability, update_availability
 from ..clamd_health import ClamdHealth, Throttle, Transition
 from .. import schedule as sched
 from ..freshclam_service import Outcome, RestartResult
+from .off_thread import run_off_gui_thread
 from .freshclam_restart_worker import FreshclamRestartWorker
 from .db_info_worker import DbInfoWorker, probe_db_info
 from .ping_worker import PingWorker
@@ -586,6 +587,80 @@ def schedule_roots(target: str, home: Path | None = None) -> dict[str, Path]:
         if path.is_absolute():
             roots["pianificazione interna"] = path
     return roots
+
+
+def dropin_followup(changed: bool, tcp: bool) -> tuple[str | None, list]:
+    """
+    Dopo la scrittura del drop-in: daemon-reload se è cambiato e override
+    estranei della unit. Chiama systemctl --user (timeout 10 s): la GUI la
+    esegue con run_off_gui_thread. Ritorna (motivo del reload fallito o
+    None, override estranei).
+    """
+    problem = daemon_reload() if changed else None
+    return problem, foreign_overrides(tcp=tcp)
+
+
+def dropin_notes(problem: str | None, overrides: list, *, what: str) -> list[str]:
+    """Avvisi non bloccanti del salvataggio, dal risultato di dropin_followup.
+    Un override.conf (systemctl --user edit) che ridefinisce ExecStart viene
+    dopo il nostro drop-in e vince: solo avviso, il file è dell'utente."""
+    notes = []
+    if problem:
+        notes.append(
+            f"La scansione programmata di sistema userà {what} "
+            "dal prossimo avvio della sessione "
+            f"(systemctl --user daemon-reload non riuscito: {problem})."
+        )
+    notes.extend(o.describe() for o in overrides)
+    return notes
+
+
+def validate_schedule(
+    raws: list[str],
+    roots: dict[str, Path],
+    target_text: str,
+    quarantine_raw: str,
+    require_target: bool,
+) -> tuple[list[str], list[str]]:
+    """
+    Validazione del salvataggio della Pianificazione: (esclusioni nella
+    forma salvata, problemi bloccanti). Tocca il filesystem: la GUI la
+    esegue con run_off_gui_thread.
+
+    Lista e cartella interna si validano insieme, qualunque delle due sia
+    cambiata. La quarantena si controlla con la regola inversa di quella
+    delle Impostazioni: una cartella interna al suo interno verrebbe
+    esclusa per intero dalla scansione. Con la pianificazione interna
+    attiva la cartella dev'essere una directory esistente, come per
+    `klamav-py scan`: prima un file o un percorso relativo passavano e la
+    scansione poi non partiva, o partiva senza escludere nulla.
+    """
+    stored, problems = [], []
+    for raw in raws:
+        decision = decide_exclusion(raw, roots=roots)
+        if decision.error:
+            problems.append(decision.error)
+        else:
+            stored.append(decision.stored)
+    if problems:
+        problems.insert(0, "Alcune cartelle escluse non sono valide:")
+
+    target = roots.get("pianificazione interna")
+    if require_target:
+        if target is None:
+            problems.append(
+                f"Cartella da scansionare non valida («{target_text}»): serve un "
+                "percorso assoluto, per esempio ~/Documenti."
+            )
+        elif not target.is_dir():
+            what = "non è una directory" if target.exists() else "non esiste"
+            problems.append(f"La cartella da scansionare «{target}» {what}.")
+    if target is not None:
+        quarantine = Path(quarantine_raw).expanduser().resolve()
+        problem = root_inside(quarantine, {"pianificazione interna": target})
+        if problem:
+            problems.append(problem)
+    return stored, problems
 
 
 def _quarantine_count(path: Path) -> int:
@@ -1682,6 +1757,15 @@ class SchedulerPage(QWidget):
         # default): il valore non deve dipendere da come è stato creato
         # QApplication, e deve coincidere con quello della migrazione.
         self.settings = QSettings(APP_NAME, APP_NAME)
+        # Valutazioni in corso fuori dal thread della GUI (vedi
+        # _refresh_exclusions, _put_exclusion, _save_schedule).
+        self._refresh_running = False
+        self._refresh_again = False
+        self._put_running = False
+        self._save_running = False
+        self._timer_refresh_running = False
+        self._timer_refresh_again = False
+        self.timer_state: bool | None = None
 
         # Scroll area come in SettingsPage: con il gruppo delle cartelle
         # escluse l'altezza minima supera quella della finestra predefinita
@@ -1825,13 +1909,13 @@ class SchedulerPage(QWidget):
         buttons_row = QHBoxLayout()
         buttons_row.addStretch()
 
-        save_btn = QPushButton("Salva Pianificazione")
-        save_btn.setObjectName("PrimaryButton")
-        save_btn.setFixedHeight(36)
-        save_btn.setIcon(QIcon.fromTheme("document-save"))
-        save_btn.clicked.connect(self._save_schedule)
+        self.save_btn = QPushButton("Salva Pianificazione")
+        self.save_btn.setObjectName("PrimaryButton")
+        self.save_btn.setFixedHeight(36)
+        self.save_btn.setIcon(QIcon.fromTheme("document-save"))
+        self.save_btn.clicked.connect(self._save_schedule)
 
-        buttons_row.addWidget(save_btn)
+        buttons_row.addWidget(self.save_btn)
         layout.addStretch()
         layout.addLayout(buttons_row)
 
@@ -1859,10 +1943,34 @@ class SchedulerPage(QWidget):
         super().showEvent(event)
         self.refresh_system_timer()
 
-    def refresh_system_timer(self) -> bool | None:
-        """Aggiorna la label sul timer di sistema e ne restituisce lo stato
-        (None: sconosciuto, per esempio senza manager systemd utente)."""
-        state = timer_enabled()
+    def refresh_system_timer(self) -> None:
+        """Aggiorna la label sul timer di sistema. systemctl --user (fino a
+        10 s di timeout) e la lettura degli override girano fuori dal thread
+        della GUI; lo stato arriva in self.timer_state (None: sconosciuto,
+        per esempio senza manager systemd utente)."""
+        if self._timer_refresh_running:
+            self._timer_refresh_again = True
+            return
+        self._timer_refresh_running = True
+        self._timer_refresh_again = False
+        try:
+            tcp = load_endpoint(self.settings).is_tcp
+        except ValueError:
+            tcp = False
+
+        def check():
+            state = timer_enabled()
+            return state, (foreign_overrides(tcp=tcp) if state is True else [])
+
+        run_off_gui_thread(check, self._timer_state_done)
+
+    def _timer_state_done(self, result) -> None:
+        self._timer_refresh_running = False
+        if self._timer_refresh_again:
+            self.refresh_system_timer()
+            return
+        state, overrides = (None, []) if isinstance(result, Exception) else result
+        self.timer_state = state
         if state is True:
             text = (
                 "La scansione programmata di sistema (klamav-scan.timer) è attiva: "
@@ -1871,16 +1979,10 @@ class SchedulerPage(QWidget):
             )
             if self.settings.value("schedule_enabled", False, type=bool):
                 text += " Al momento sono attive entrambe: la home viene scansionata due volte."
-            try:
-                tcp = load_endpoint(self.settings).is_tcp
-            except ValueError:
-                tcp = False
-            overrides = foreign_overrides(tcp=tcp)
             if overrides:
                 text += "\n\nAttenzione: " + " ".join(o.describe() for o in overrides)
             self.system_timer_label.setText(text)
         self.system_timer_label.setVisible(state is True)
-        return state
 
     def set_next_run(self, text: str) -> None:
         self.next_run_label.setText(text)
@@ -1899,10 +2001,16 @@ class SchedulerPage(QWidget):
         """Voci della lista, nella forma salvata."""
         return [self.excl_list.item(i).data(Qt.UserRole) for i in range(self.excl_list.count())]
 
-    def _annotate_exclusion(self, item: QListWidgetItem) -> None:
+    # La regola (scan_exclusions.decide) fa resolve() e stat() sulle voci e
+    # sulle radici: tutte le valutazioni della pagina passano da
+    # run_off_gui_thread, perché un percorso su un mount di rete
+    # irraggiungibile bloccherebbe la finestra. Una sola valutazione per
+    # tipo alla volta: un controllo bloccato non accumula thread a ogni
+    # tasto premuto nel campo della cartella.
+
+    def _annotate_exclusion(self, item: QListWidgetItem, decision) -> None:
         """Icona e tooltip con l'esito della regola per le radici attuali:
         una voce valida con la cartella di prima può non esserlo più."""
-        decision = decide_exclusion(item.data(Qt.UserRole), roots=self._exclusion_roots())
         if decision.error:
             item.setIcon(self._excl_icons["error"])
             item.setToolTip(decision.error)
@@ -1914,34 +2022,75 @@ class SchedulerPage(QWidget):
             item.setToolTip("")
 
     def _refresh_exclusions(self) -> None:
+        if self._refresh_running:
+            # Ripetuta quando finisce quella in corso, con i dati di allora.
+            self._refresh_again = True
+            return
+        self._refresh_running = True
+        self._refresh_again = False
+        raws = self.excluded_dirs()
+        roots = self._exclusion_roots()
+        run_off_gui_thread(
+            lambda: {raw: decide_exclusion(raw, roots=roots) for raw in raws},
+            self._refresh_done,
+        )
+
+    def _refresh_done(self, decisions) -> None:
+        self._refresh_running = False
+        if self._refresh_again:
+            # Cartella o lista cambiate nel frattempo: l'esito è superato.
+            self._refresh_exclusions()
+            return
+        if isinstance(decisions, Exception):
+            return
         for i in range(self.excl_list.count()):
-            self._annotate_exclusion(self.excl_list.item(i))
+            item = self.excl_list.item(i)
+            decision = decisions.get(item.data(Qt.UserRole))
+            if decision is not None:
+                self._annotate_exclusion(item, decision)
 
     def _update_exclusion_buttons(self) -> None:
         selected = bool(self.excl_list.selectedItems())
         self.excl_edit_btn.setEnabled(selected)
         self.excl_remove_btn.setEnabled(selected)
 
-    def _put_exclusion(self, raw: str, replace: QListWidgetItem | None = None) -> bool:
+    def _put_exclusion(self, raw: str, replace: QListWidgetItem | None = None) -> None:
         """Aggiunge (o sostituisce) una voce se la regola la accetta. Gli
-        errori bloccano subito; gli avvisi restano visibili sulla voce."""
-        decision = decide_exclusion(raw, roots=self._exclusion_roots())
+        errori bloccano; gli avvisi restano visibili sulla voce. L'esito
+        arriva da run_off_gui_thread: finché non arriva, un'altra aggiunta
+        è ignorata."""
+        if self._put_running:
+            return
+        self._put_running = True
+        roots = self._exclusion_roots()
+        run_off_gui_thread(
+            lambda: decide_exclusion(raw, roots=roots),
+            lambda decision: self._put_done(decision, replace),
+        )
+
+    def _put_done(self, decision, replace: QListWidgetItem | None) -> None:
+        self._put_running = False
+        title = "Cartelle escluse"
+        if isinstance(decision, Exception):
+            QMessageBox.warning(self, title, f"Impossibile verificare la cartella: {decision}")
+            return
         if decision.error:
-            QMessageBox.warning(self, "Cartelle escluse", decision.error)
-            return False
+            QMessageBox.warning(self, title, decision.error)
+            return
+        if replace is not None and self.excl_list.row(replace) < 0:
+            replace = None  # rimossa nel frattempo: diventa un'aggiunta
         for i in range(self.excl_list.count()):
             other = self.excl_list.item(i)
             if other is not replace and other.data(Qt.UserRole) == decision.stored:
                 self.excl_list.setCurrentItem(other)
-                return False
+                return
         item = replace or QListWidgetItem()
         item.setText(decision.stored)
         item.setData(Qt.UserRole, decision.stored)
         if replace is None:
             self.excl_list.addItem(item)
-        self._annotate_exclusion(item)
+        self._annotate_exclusion(item, decision)
         self.excl_list.setCurrentItem(item)
-        return True
 
     def _add_exclusion(self) -> None:
         start = self.target_edit.text() or str(Path.home())
@@ -1976,14 +2125,16 @@ class SchedulerPage(QWidget):
             self.excl_list.takeItem(self.excl_list.row(item))
         self._update_exclusion_buttons()
 
-    def _sync_system_dropin(self, excludes: list[str], timer_disabled: bool = False) -> bool:
+    def _sync_system_dropin(
+        self, excludes: list[str], timer_disabled: bool = False
+    ) -> tuple[bool, bool] | None:
         """
         Rigenera il drop-in di klamav-scan.service con le nuove esclusioni e
         con quarantena ed endpoint già salvati nelle Impostazioni (stato
-        completo, vedi render_dropin). False, con un avviso, se il
-        salvataggio va annullato. Il daemon-reload fallito e gli override
-        estranei sono solo avvisi (in self._save_notes), come nelle
-        Impostazioni.
+        completo, vedi render_dropin). None, con un avviso, se il
+        salvataggio va annullato; altrimenti (drop-in cambiato, endpoint
+        TCP), per il daemon-reload e il controllo degli override estranei
+        che _save_write esegue fuori dal thread della GUI.
         """
         title = "Pianificazione Scansioni"
         try:
@@ -1994,7 +2145,7 @@ class SchedulerPage(QWidget):
                 f"Impostazioni di connessione a clamd non valide ({exc}): correggile "
                 "nelle Impostazioni.\n\nLa pianificazione non è stata salvata.",
             )
-            return False
+            return None
         quarantine = Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))).expanduser()
         try:
             changed = sync_dropin(render_dropin(
@@ -2008,44 +2159,9 @@ class SchedulerPage(QWidget):
             if timer_disabled:
                 tail += " Il timer di sistema era già stato disattivato."
             QMessageBox.warning(self, title, f"{reason}\n\n{tail}")
-            return False
-        if changed:
-            problem = daemon_reload()
-            if problem:
-                self._save_notes.append(
-                    "La scansione programmata di sistema userà le nuove esclusioni "
-                    "dal prossimo avvio della sessione "
-                    f"(systemctl --user daemon-reload non riuscito: {problem})."
-                )
-        # Un override.conf (systemctl --user edit) che ridefinisce ExecStart
-        # viene dopo il nostro drop-in e vince: le esclusioni appena salvate
-        # non arriverebbero al timer. Solo avviso: il file è dell'utente.
-        for override in foreign_overrides(tcp=endpoint.is_tcp):
-            self._save_notes.append(override.describe())
-        return True
-
-    def _validated_exclusions(self) -> list[str] | None:
-        """Tutte le voci contro le radici che si stanno per salvare: la
-        lista e la cartella interna si validano insieme, qualunque delle
-        due sia cambiata. None, con un avviso, se qualcosa non va."""
-        roots = self._exclusion_roots()
-        stored, problems = [], []
-        for raw in self.excluded_dirs():
-            decision = decide_exclusion(raw, roots=roots)
-            if decision.error:
-                problems.append(decision.error)
-            else:
-                stored.append(decision.stored)
-        if problems:
-            QMessageBox.warning(
-                self,
-                "Pianificazione Scansioni",
-                "Alcune cartelle escluse non sono valide:\n\n"
-                + "\n".join(problems)
-                + "\n\nLa pianificazione non è stata salvata.",
-            )
             return None
-        return stored
+        return changed, endpoint.is_tcp
+
 
     def _load_settings(self) -> None:
         self.enable_check.setChecked(self.settings.value("schedule_enabled", False, type=bool))
@@ -2068,72 +2184,135 @@ class SchedulerPage(QWidget):
 
     def _save_schedule(self) -> None:
         """
-        Ordine: validazione delle esclusioni, scelta fra timer e
-        pianificazione interna, drop-in, QSettings. Niente viene salvato se
-        un passo fallisce, così GUI e timer non divergono.
+        Ordine: validazione (esclusioni, quarantena, cartella interna),
+        scelta fra timer e pianificazione interna, drop-in, QSettings.
+        Niente viene salvato se un passo fallisce, così GUI e timer non
+        divergono.
+
+        La validazione tocca il filesystem e gira fuori dal thread della
+        GUI; il salvataggio prosegue in _save_validated con i valori letti
+        qui, non con quelli che l'utente scrive nel frattempo.
         """
+        if self._save_running:
+            return
+        self._save_running = True
+        self.save_btn.setEnabled(False)
+        target_text = self.target_edit.text()
+        raws = self.excluded_dirs()
+        roots = schedule_roots(target_text)
+        quarantine_raw = self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))
+        enabled = self.enable_check.isChecked()
+
+        def check():
+            # Lo stato del timer serve solo se si attiva la pianificazione
+            # interna: systemctl --user può impiegare fino a 10 s.
+            state = timer_enabled() if enabled else None
+            return validate_schedule(raws, roots, target_text, quarantine_raw, enabled), state
+
+        run_off_gui_thread(check, lambda result: self._save_validated(result, target_text))
+
+    def _save_end(self) -> None:
+        self._save_running = False
+        self.save_btn.setEnabled(True)
+
+    def _save_validated(self, result, target_text: str) -> None:
         title = "Pianificazione Scansioni"
         # Prima della domanda sul timer: un salvataggio che fallirebbe per
-        # le esclusioni non deve aver già disattivato klamav-scan.timer.
-        excludes = self._validated_exclusions()
-        if excludes is None:
+        # la validazione non deve aver già disattivato klamav-scan.timer.
+        if isinstance(result, Exception):
+            QMessageBox.warning(
+                self, title,
+                f"Impossibile verificare la pianificazione: {result}\n\n"
+                "La pianificazione non è stata salvata.",
+            )
+            self._save_end()
+            return
+        (excludes, problems), timer_state = result
+        if problems:
+            QMessageBox.warning(
+                self, title,
+                "\n\n".join(problems) + "\n\nLa pianificazione non è stata salvata.",
+            )
+            self._save_end()
             return
 
         enabled = self.enable_check.isChecked()
-        timer_disabled = False
-        if enabled and timer_enabled() is True:
-            # Tre esiti, non due: chi apre questa pagina solo per le cartelle
-            # escluse (che valgono anche per il timer) deve poter salvare
-            # senza scegliere la pianificazione interna.
-            answer = QMessageBox.question(
-                self,
-                title,
-                "La scansione programmata di sistema (klamav-scan.timer) è attiva. "
-                "Le due pianificazioni sono alternative: con entrambe la home verrebbe "
-                "scansionata due volte.\n\n"
-                "Sì: disattiva il timer di sistema e usa questa pianificazione.\n"
-                "No: mantieni il timer; questa pianificazione resta disattivata.\n\n"
-                "In entrambi i casi le cartelle escluse vengono salvate e valgono "
-                "per tutte e due.",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                QMessageBox.Cancel,
+        if not (enabled and timer_state is True):
+            self._save_write(excludes, target_text, enabled, timer_disabled=False)
+            return
+        # Tre esiti, non due: chi apre questa pagina solo per le cartelle
+        # escluse (che valgono anche per il timer) deve poter salvare
+        # senza scegliere la pianificazione interna.
+        answer = QMessageBox.question(
+            self,
+            title,
+            "La scansione programmata di sistema (klamav-scan.timer) è attiva. "
+            "Le due pianificazioni sono alternative: con entrambe la home verrebbe "
+            "scansionata due volte.\n\n"
+            "Sì: disattiva il timer di sistema e usa questa pianificazione.\n"
+            "No: mantieni il timer; questa pianificazione resta disattivata.\n\n"
+            "In entrambi i casi le cartelle escluse vengono salvate e valgono "
+            "per tutte e due.",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if answer == QMessageBox.Yes:
+            run_off_gui_thread(
+                disable_timer,
+                lambda problem: self._save_timer_disabled(problem, excludes, target_text),
             )
-            if answer == QMessageBox.Yes:
-                problem = disable_timer()
-                if problem:
-                    QMessageBox.warning(
-                        self,
-                        title,
-                        "Non è stato possibile disattivare klamav-scan.timer, quindi la "
-                        f"pianificazione non è stata salvata:\n{problem}",
-                    )
-                    return
-                timer_disabled = True
-            elif answer == QMessageBox.No:
-                enabled = False
-            else:
-                return
+        elif answer == QMessageBox.No:
+            self._save_write(excludes, target_text, False, timer_disabled=False)
+        else:
+            self._save_end()
 
+    def _save_timer_disabled(self, problem, excludes: list[str], target_text: str) -> None:
+        if problem:
+            QMessageBox.warning(
+                self,
+                "Pianificazione Scansioni",
+                "Non è stato possibile disattivare klamav-scan.timer, quindi la "
+                f"pianificazione non è stata salvata:\n{problem}",
+            )
+            self._save_end()
+            return
+        self._save_write(excludes, target_text, True, timer_disabled=True)
+
+    def _save_write(self, excludes: list[str], target_text: str, enabled: bool, timer_disabled: bool) -> None:
         # Il timer di sistema usa la stessa lista: drop-in prima di QSettings,
         # e se non si può scrivere non si salva NULLA (GUI e timer
         # escluderebbero cartelle diverse senza che nessuno lo sappia).
-        self._save_notes: list[str] = []
-        if not self._sync_system_dropin(excludes, timer_disabled=timer_disabled):
+        synced = self._sync_system_dropin(excludes, timer_disabled=timer_disabled)
+        if synced is None:
+            self._save_end()
             return
+        changed, tcp = synced
 
         self.enable_check.setChecked(enabled)
         self.settings.setValue("schedule_enabled", enabled)
         self.settings.setValue("schedule_interval", self.interval_spin.value())
         self.settings.setValue("schedule_unit", self.unit_combo.currentText())
-        self.settings.setValue("schedule_target", self.target_edit.text())
+        self.settings.setValue("schedule_target", target_text)
         self.settings.setValue(SCHEDULE_EXCLUDES_KEY, excludes)
 
-        if self._save_notes:
+        # Il daemon-reload fallito e gli override estranei sono solo avvisi,
+        # come nelle Impostazioni: le impostazioni sono già salvate.
+        run_off_gui_thread(lambda: dropin_followup(changed, tcp), self._save_done)
+
+    def _save_done(self, result) -> None:
+        title = "Pianificazione Scansioni"
+        notes = (
+            [f"Impossibile completare l'aggiornamento del timer di sistema: {result}"]
+            if isinstance(result, Exception)
+            else dropin_notes(*result, what="le nuove esclusioni")
+        )
+        if notes:
             QMessageBox.warning(
                 self, title,
-                "Pianificazione salvata, con queste note:\n\n" + "\n\n".join(self._save_notes),
+                "Pianificazione salvata, con queste note:\n\n" + "\n\n".join(notes),
             )
 
+        self._save_end()
         self.schedule_saved.emit()
         self.refresh_system_timer()
 
@@ -2157,6 +2336,9 @@ class SettingsPage(QWidget):
         # Worker del controllo aggiornamenti: None quando nessun controllo
         # è in corso. Vedi _check_updates / _release_update_check_worker.
         self._update_check_worker: UpdateCheckWorker | None = None
+        # Salvataggio in attesa del daemon-reload (vedi _save_settings).
+        self._save_running = False
+        self._dropin_changed = False
 
         # FIX SOVRAPPOSIZIONE WIDGET: il contenuto della pagina (parecchi
         # widget a dimensione fissa: QLineEdit/QPushButton alti 36px,
@@ -2393,6 +2575,7 @@ class SettingsPage(QWidget):
         save_btn.setFixedHeight(36)
         save_btn.setIcon(QIcon.fromTheme("document-save"))
         save_btn.clicked.connect(self._save_settings)
+        self.save_btn = save_btn
 
         buttons_row.addWidget(reset_btn)
         buttons_row.addWidget(save_btn)
@@ -2518,7 +2701,12 @@ class SettingsPage(QWidget):
         divergenza.
         """
         title = "Cartella quarantena"
-        decision = decide_quarantine_dir(self.quar_edit.text())
+        # Anche la cartella della pianificazione interna: una quarantena che
+        # la contiene la escluderebbe per intero dalla scansione programmata.
+        decision = decide_quarantine_dir(
+            self.quar_edit.text(),
+            roots=schedule_roots(self.settings.value("schedule_target", str(Path.home()))),
+        )
         problem = decision.error or decision.volatile
         if problem:
             QMessageBox.warning(self, title, problem)
@@ -2571,25 +2759,16 @@ class SettingsPage(QWidget):
             )
             return None
 
-        if changed:
-            problem = daemon_reload()
-            if problem:
-                self.save_notes.append(
-                    "La scansione programmata di sistema userà le nuove impostazioni "
-                    "dal prossimo avvio della sessione "
-                    f"(systemctl --user daemon-reload non riuscito: {problem})."
-                )
-
-        # Altri drop-in della unit (es. override.conf di "systemctl --user
-        # edit") che rendono inefficaci queste impostazioni o ne vengono
-        # sostituiti. Solo avviso: la personalizzazione è dell'utente.
-        for override in foreign_overrides(tcp=endpoint.is_tcp):
-            self.save_notes.append(override.describe())
-
+        # daemon-reload e override estranei (es. override.conf di
+        # "systemctl --user edit"): solo avvisi, verificati da
+        # _save_settings fuori dal thread della GUI dopo il salvataggio.
+        self._dropin_changed = changed
         self.quar_edit.setText(str(path))
         return path
 
     def _save_settings(self) -> None:
+        if self._save_running:
+            return  # verifiche del salvataggio precedente ancora in corso
         self.save_notes = []
         try:
             endpoint = self._endpoint_from_form()
@@ -2610,6 +2789,23 @@ class SettingsPage(QWidget):
 
         rt_dirs = [self.rt_dirs_list.item(i).text() for i in range(self.rt_dirs_list.count())]
         self.settings.setValue("realtime_paths", rt_dirs)
+
+        # systemctl --user daemon-reload (timeout 10 s) fuori dal thread della
+        # GUI: le impostazioni sono già salvate, l'esito dà solo avvisi.
+        self._save_running = True
+        self.save_btn.setEnabled(False)
+        changed, tcp = self._dropin_changed, endpoint.is_tcp
+        run_off_gui_thread(lambda: dropin_followup(changed, tcp), self._save_settings_done)
+
+    def _save_settings_done(self, result) -> None:
+        self._save_running = False
+        self.save_btn.setEnabled(True)
+        if isinstance(result, Exception):
+            self.save_notes.append(
+                f"Impossibile completare l'aggiornamento del timer di sistema: {result}"
+            )
+        else:
+            self.save_notes.extend(dropin_notes(*result, what="le nuove impostazioni"))
 
         self.settings_saved.emit()
 
@@ -2918,9 +3114,13 @@ class MainWindow(QMainWindow):
         self._schedule_grace_until = time.monotonic() + SCHEDULE_STARTUP_GRACE_S
         self._schedule_late_noted = False
         self._schedule_skip_noted = False
-        self._schedule_missing_noted = False
-        self._schedule_excludes_noted = False
+        # Scansione programmata non completata (ScanWorker.aborted):
+        # notifica e cronologia una volta sola finché una scansione non
+        # arriva alla fine, non a ogni nuovo tentativo al minuto.
+        self._schedule_aborted_noted = False
+        self._bg_aborted: str | None = None
         self._double_schedule_noted = False
+        self._double_schedule_checking = False
         self.bg_worker = None
         # Log della scansione programmata scritto man mano (vedi
         # _bg_log_write): memoria costante e niente log perso se la GUI
@@ -3309,6 +3509,24 @@ X-GNOME-Autostart-enabled=true
         except (TypeError, ValueError):
             return None
 
+    def _double_schedule_checked(self, state) -> None:
+        self._double_schedule_checking = False
+        if state is not True or self._double_schedule_noted:
+            return
+        # Ricontrollato qui: la pianificazione interna può essere stata
+        # disattivata mentre systemctl rispondeva.
+        if not self.settings.value("schedule_enabled", False, type=bool):
+            return
+        self._double_schedule_noted = True
+        self.tray_icon.showMessage(
+            APP_NAME,
+            "Sono attive sia la pianificazione interna sia il timer di sistema "
+            "klamav-scan.timer: la home verrebbe scansionata due volte. "
+            "Vedi la pagina Pianificazione.",
+            _app_icon(),
+            10000,
+        )
+
     def _load_schedule(self) -> None:
         enabled = self.settings.value("schedule_enabled", False, type=bool)
         if not enabled:
@@ -3319,16 +3537,10 @@ X-GNOME-Autostart-enabled=true
         # Entrambe le pianificazioni attive (il timer può essere stato
         # abilitato da terminale dopo quella interna): una volta per
         # sessione, senza bloccare nulla.
-        if not self._double_schedule_noted and timer_enabled() is True:
-            self._double_schedule_noted = True
-            self.tray_icon.showMessage(
-                APP_NAME,
-                "Sono attive sia la pianificazione interna sia il timer di sistema "
-                "klamav-scan.timer: la home verrebbe scansionata due volte. "
-                "Vedi la pagina Pianificazione.",
-                _app_icon(),
-                10000,
-            )
+        # systemctl --user fuori dal thread della GUI (timeout 10 s).
+        if not self._double_schedule_noted and not self._double_schedule_checking:
+            self._double_schedule_checking = True
+            run_off_gui_thread(timer_enabled, self._double_schedule_checked)
 
         # Prima attivazione: si fissa la base a "adesso" invece di
         # scansionare subito (l'utente ha appena scelto un intervallo, non
@@ -3402,60 +3614,34 @@ X-GNOME-Autostart-enabled=true
             return
 
         target_str = self.settings.value("schedule_target", str(Path.home()))
-        target = Path(target_str).expanduser()
-        if not target.exists():
-            # Prima: ritorno silenzioso, e la scansione non partiva mai
-            # senza che nessuno lo sapesse.
-            if not self._schedule_missing_noted:
-                self._schedule_missing_noted = True
-                self.tray_icon.showMessage(
-                    APP_NAME,
-                    f"Scansione programmata non eseguita: {target_str} non esiste. "
-                    "Controlla la cartella in Pianificazione.",
-                    _icon("dialog-warning"),
-                    8000,
-                )
-            return
-
-        # Stessa rivalidazione della CLI (_prepare_exclusions): le forme
-        # salvate si risolvono di nuovo qui, perché un symlink può essere
-        # stato ripuntato dopo il salvataggio. Un'esclusione che adesso
-        # contiene la radice farebbe percorrere zero file alla scansione,
-        # che risulterebbe pulita senza aver controllato nulla. Gli avvisi
-        # restano non bloccanti: sono già stati mostrati al salvataggio.
+        # Esistenza della cartella ed esclusioni (dell'utente e la
+        # quarantena) si verificano in ScanWorker.run() (strict_roots), come
+        # fa la CLI: una cartella mancante o un'esclusione che nel frattempo
+        # contiene la radice fermano la scansione con aborted, che arriva in
+        # notifica e in Cronologia una volta sola, invece di farle percorrere
+        # zero file. Lì e non qui perché resolve() e stat() su un mount di
+        # rete irraggiungibile bloccherebbero la GUI.
         excludes = load_schedule_excludes(self.settings)
-        for raw in excludes:
-            decision = decide_exclusion(raw, roots={"pianificazione interna": target})
-            if not decision.usable:
-                # Come per il target mancante: una volta per scadenza,
-                # non a ogni controllo al minuto.
-                if not self._schedule_excludes_noted:
-                    self._schedule_excludes_noted = True
-                    self.tray_icon.showMessage(
-                        APP_NAME,
-                        f"Scansione programmata non eseguita: {decision.error} "
-                        "Controlla le cartelle escluse in Pianificazione.",
-                        _icon("dialog-warning"),
-                        8000,
-                    )
-                return
 
         self._schedule_late_noted = False
         self._schedule_skip_noted = False
-        self._schedule_missing_noted = False
-        self._schedule_excludes_noted = False
+        self._bg_aborted = None
 
-        self.tray_icon.showMessage(
-            APP_NAME, "Avvio scansione automatica in background...", _app_icon(), 3000
-        )
+        # Dopo una scansione non completata il controllo al minuto la
+        # ritenta: l'avvio si annuncia solo la prima volta.
+        if not self._schedule_aborted_noted:
+            self.tray_icon.showMessage(
+                APP_NAME, "Avvio scansione automatica in background...", _app_icon(), 3000
+            )
         self.scheduler_page.update_progress(f"In corso dal {datetime.now():%H:%M} — avvio…")
         self._bg_log_close()
         self._bg_log_path = None
         self.bg_worker = ScanWorker(
             endpoint=self._clamd_endpoint(),
-            # resolve(): le esclusioni sono confrontate in forma canonica
-            # (_iter_files usa is_relative_to letterale), come nella CLI.
-            target=target.resolve(),
+            # Risolta dal worker (strict_roots): le esclusioni sono
+            # confrontate in forma canonica, come nella CLI.
+            target=Path(target_str),
+            strict_roots=True,
             quarantine_dir=Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))),
             auto_quarantine=self.settings.value("auto_quarantine", False, type=bool),
             exclude_dirs=excludes,
@@ -3467,6 +3653,7 @@ X-GNOME-Autostart-enabled=true
         # scansioni programmate con risultati mai ispezionabili).
         self.bg_worker.result_ready.connect(self._on_bg_result)
         self.bg_worker.progress.connect(self._on_bg_progress)
+        self.bg_worker.aborted.connect(self._on_bg_aborted)
         self.bg_worker.finished_scan.connect(self._on_bg_finished)
         self.bg_worker.quarantined.connect(self._on_quarantine_changed)
         self.bg_worker.quarantine_outcome.connect(self._on_bg_quarantine_outcome)
@@ -3524,6 +3711,12 @@ X-GNOME-Autostart-enabled=true
         if line is not None:
             self._bg_log_write(line)
 
+    def _on_bg_aborted(self, message: str) -> None:
+        # Arriva prima di finished_scan (connessioni queued, stesso
+        # emettitore): _on_bg_finished lo trova già impostato.
+        self._bg_aborted = message
+        self._bg_log_write(f"ERRORE — {message}")
+
     def _on_bg_progress(self, scanned: int, infections: int, errors: int, too_large: int) -> None:
         # Visibilità della scansione background: label in Pianificazione +
         # tooltip della tray (già throttled lato worker a 150ms).
@@ -3536,12 +3729,27 @@ X-GNOME-Autostart-enabled=true
         )
 
     def _on_bg_finished(self, scanned: int, infections: int, errors: int, too_large: int = 0) -> None:
-        status = f"Scansione automatica completata: {infections} infetti trovati, {errors} errori."
-        if too_large:
-            status += f" {too_large} file non verificati (troppo grandi)."
-        self.tray_icon.showMessage(
-            APP_NAME, status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000
-        )
+        aborted, self._bg_aborted = self._bg_aborted, None
+        # Una scansione non completata non è "completata, 0 infetti": prima
+        # clamd irraggiungibile produceva proprio quella notifica.
+        first_abort = aborted is not None and not self._schedule_aborted_noted
+        if aborted is None:
+            self._schedule_aborted_noted = False
+            status = f"Scansione automatica completata: {infections} infetti trovati, {errors} errori."
+            if too_large:
+                status += f" {too_large} file non verificati (troppo grandi)."
+            self.tray_icon.showMessage(
+                APP_NAME, status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000
+            )
+        elif first_abort:
+            self._schedule_aborted_noted = True
+            self.tray_icon.showMessage(
+                APP_NAME,
+                f"Scansione programmata non completata: {aborted} "
+                "Verrà ritentata finché il problema non è risolto.",
+                _icon("dialog-warning"),
+                8000,
+            )
         self._reset_tray_tooltip()
 
         # Log persistente: il dettaglio di infetti/errori/non-verificati
@@ -3562,17 +3770,20 @@ X-GNOME-Autostart-enabled=true
         except OSError:
             pass
 
-        target_str = self.settings.value("schedule_target", str(Path.home()))
-        self.history_manager.add_entry(
-            "Programmata",
-            target_str,
-            scanned,
-            infections,
-            errors,
-            too_large=too_large,
-            log_file=str(log_path) if log_path else None,
-        )
-        self.history_page.refresh()
+        # I tentativi successivi di una scansione che non si completa non
+        # riempiono la cronologia: basta la prima voce.
+        if aborted is None or first_abort:
+            target_str = self.settings.value("schedule_target", str(Path.home()))
+            self.history_manager.add_entry(
+                "Programmata" if aborted is None else "Programmata (non completata)",
+                target_str,
+                scanned,
+                infections,
+                errors,
+                too_large=too_large,
+                log_file=str(log_path) if log_path else None,
+            )
+            self.history_page.refresh()
 
         finished_at = datetime.now().strftime("%H:%M")
         summary = (
@@ -3580,6 +3791,8 @@ X-GNOME-Autostart-enabled=true
             f"{infections} infetti, {errors} errori"
             + (f", {too_large} non verificati" if too_large else "")
         )
+        if aborted is not None:
+            summary = f"Ultimo tentativo: {finished_at} — non completata: {aborted}"
         if log_path:
             summary += f"\nLog: {log_path}"
         self.scheduler_page.update_progress(summary)
@@ -3588,7 +3801,7 @@ X-GNOME-Autostart-enabled=true
         # interrotta dalla chiusura della GUI viene recuperata al prossimo
         # avvio) e con clamd attivo: con il demone fermo la scansione
         # "finisce" subito senza aver verificato nulla, e va ritentata.
-        if not self.clamd_health.is_down:
+        if aborted is None and not self.clamd_health.is_down:
             self.settings.setValue("schedule_last_run", time.time())
             self.settings.sync()
         self._update_next_run_label()

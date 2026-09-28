@@ -24,6 +24,7 @@ from klamav_py.quarantine_location import (
     fstype_of,
     hidden_paths_from_unit,
     parse_mountinfo,
+    root_inside,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -270,3 +271,39 @@ def test_default_coincide_con_execstart_della_unit():
 
 def test_default_quarantine_dir(home):
     assert default_quarantine_dir(home) == home / DEFAULT_QUARANTINE_SUBDIR
+
+
+# -- radici di scansione ulteriori (pianificazione interna) --------------
+
+def test_radice_dentro_la_quarantena_rifiutata(home, tmp_path):
+    # Il caso aperto della 0.1.11: la quarantena fuori dalla home che
+    # contiene la cartella della pianificazione interna la escludeva per
+    # intero, e la scansione programmata della GUI percorreva zero file.
+    target = tmp_path / "dati" / "progetti"
+    target.mkdir(parents=True)
+    d = _decide(str(tmp_path / "dati"), home, roots={"pianificazione interna": target})
+    assert not d.usable and "pianificazione interna" in d.error and str(target) in d.error
+
+
+def test_radice_uguale_alla_quarantena_rifiutata(home, tmp_path):
+    (tmp_path / "dati").mkdir()
+    d = _decide(str(tmp_path / "dati"), home, roots={"pianificazione interna": tmp_path / "dati"})
+    assert not d.usable
+
+
+def test_radice_fuori_dalla_quarantena_accettata(home, tmp_path):
+    (tmp_path / "dati").mkdir()
+    d = _decide(str(home / "Quarantena"), home, roots={"pianificazione interna": tmp_path / "dati"})
+    assert d.usable
+
+
+def test_radice_confrontata_risolta(home, tmp_path):
+    (tmp_path / "dati" / "progetti").mkdir(parents=True)
+    link = tmp_path / "scorciatoia"
+    link.symlink_to(tmp_path / "dati" / "progetti")
+    assert root_inside((tmp_path / "dati").resolve(), {"x": link}) is not None
+    assert root_inside((tmp_path / "altro").resolve(), {"x": link}) is None
+
+
+def test_senza_radici_comportamento_invariato(home, tmp_path):
+    assert _decide(str(tmp_path / "dati"), home).usable

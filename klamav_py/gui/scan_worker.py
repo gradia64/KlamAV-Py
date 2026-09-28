@@ -19,7 +19,9 @@ from PySide6.QtCore import QThread, Signal
 
 from ..clamd_client import ClamdEndpoint, ClamdError, ClamdUnavailable
 from ..quarantine import Quarantine
+from ..quarantine_location import root_inside
 from ..quarantine_policy import QuarantinePolicy
+from ..scan_exclusions import decide as decide_exclusion
 
 # Intervallo minimo (secondi) tra due aggiornamenti di stato inviati alla
 # UI. Su scansioni veloci (centinaia/migliaia di file al secondo) emettere
@@ -58,6 +60,13 @@ class ScanWorker(QThread):
     # anche quando la quarantena era fallita.
     quarantine_outcome = Signal(str, str, str)
     error = Signal(str)
+    # Scansione non eseguita o interrotta da un errore bloccante (radice
+    # dentro un'esclusione, clamd irraggiungibile, errore di protocollo):
+    # emesso prima di finished_scan, che arriva comunque. Chi non mostra
+    # i messaggi di error (scansione programmata) lo usa per non
+    # registrare come "pulita" una scansione che non ha controllato
+    # tutto.
+    aborted = Signal(str)
     finished_scan = Signal(int, int, int, int)  # (scansionati, infezioni, errori, troppo_grandi)
     # Segnali di pausa: emessi dal worker quando entra/esce EFFETTIVAMENTE
     # dalla pausa. Un pause() richiesto mentre un file grosso è ancora in
@@ -74,6 +83,7 @@ class ScanWorker(QThread):
         quarantine_dir: Optional[Path] = None,
         auto_quarantine: bool = False,
         exclude_dirs: Iterable["str | Path"] = (),
+        strict_roots: bool = False,
         client_factory: Optional[Callable[..., Any]] = None,
         policy: Optional[QuarantinePolicy] = None,
         parent=None,
@@ -91,6 +101,11 @@ class ScanWorker(QThread):
         # scansione, come fa la CLI per il timer. Tupla: copia immutabile,
         # niente condivisione con la lista del chiamante fra thread.
         self.exclude_dirs = tuple(exclude_dirs)
+        # Scansione programmata: ogni destinazione dev'essere una directory
+        # esistente, e si percorre nella forma risolta (come la CLI), perché
+        # le esclusioni si confrontano in forma canonica. Il controllo sta
+        # qui e non nel chiamante per non fare stat() nel thread della GUI.
+        self.strict_roots = strict_roots
         # Factory iniettabile per i test (finto client senza clamd reale):
         # None = produzione, ClamdClient vero. I test della pausa hanno
         # bisogno di un client che produca risultati a ritmo controllato,
@@ -149,6 +164,58 @@ class ScanWorker(QThread):
             self.resumed.emit()
         return duration
 
+    def _blocking_problem(self, quarantine_root: Optional[Path]) -> Optional[str]:
+        """
+        Motivo per non avviare la scansione, o None. Con strict_roots
+        verifica anche le destinazioni e le sostituisce con la loro forma
+        risolta.
+
+        _iter_files non percorre una radice che sta dentro un'esclusione:
+        senza questo controllo la scansione finirebbe con zero file e
+        nessun errore, cioè pulita senza aver controllato nulla. La regola
+        è quella del salvataggio (scan_exclusions, quarantine_location),
+        rivalutata qui perché un symlink può essere stato ripuntato nel
+        frattempo, e qui invece che nel chiamante perché resolve() e
+        stat() su un mount di rete irraggiungibile bloccherebbero il
+        thread della GUI.
+
+        Solo le radici che sono directory: un file viene scansionato
+        comunque (_iter_files non applica le esclusioni ai file), e un
+        file del Real-Time sparito nel frattempo non è un errore.
+        """
+        if self.strict_roots:
+            for t in self.targets:
+                if not Path(t).expanduser().is_absolute():
+                    # Risolto sulla cwd, arbitraria per una GUI lanciata dal
+                    # menu: meglio un errore che una cartella a caso.
+                    return f"La cartella da scansionare «{t}» non è un percorso assoluto."
+        resolved = [Path(t).expanduser().resolve() for t in self.targets]
+        if self.strict_roots:
+            for original, path in zip(self.targets, resolved):
+                if not path.is_dir():
+                    what = "non è una directory" if path.exists() else "non esiste"
+                    return f"La cartella da scansionare «{original}» {what}."
+            # Da qui la traversata usa la forma risolta (effetto voluto).
+            self.targets = resolved
+            self.target = resolved[0]
+        dirs = [p for p in resolved if p.is_dir()]
+        # Etichette per i messaggi: il percorso è già nel testo della regola.
+        if len(dirs) == 1:
+            roots = {"cartella da scansionare": dirs[0]}
+        else:
+            roots = {f"cartella da scansionare n. {i}": p for i, p in enumerate(dirs, 1)}
+        if not roots:
+            return None
+        if quarantine_root is not None:
+            problem = root_inside(quarantine_root, roots)
+            if problem:
+                return f"Cartella di quarantena: {problem}"
+        for raw in self.exclude_dirs:
+            decision = decide_exclusion(str(raw), roots=roots)
+            if not decision.usable:
+                return f"Cartella esclusa: {decision.error}"
+        return None
+
     def run(self) -> None:
         # Il client si costruisce solo da ClamdEndpoint.new_client(): socket
         # Unix o TCP, qui non fa differenza.
@@ -180,6 +247,18 @@ class ScanWorker(QThread):
         infections = 0
         errors = 0
         too_large = 0
+
+        try:
+            blocked = self._blocking_problem(quarantine_root)
+        except OSError as exc:
+            blocked = f"impossibile verificare le cartelle escluse: {exc}"
+        if blocked:
+            message = f"Scansione non eseguita. {blocked}"
+            self.error.emit(message)
+            self.aborted.emit(message)
+            self.progress.emit(scanned, infections, errors, too_large)
+            self.finished_scan.emit(scanned, infections, errors, too_large)
+            return
 
         # Gate temporale condiviso tra l'aggiornamento "sto scansionando
         # X" e l'aggiornamento dei contatori: un'unica cadenza per
@@ -305,9 +384,13 @@ class ScanWorker(QThread):
         except ClamdUnavailable as exc:
             # Una sola segnalazione invece di una riga ERROR per file: la
             # scansione è incompleta, non "con errori".
-            self.error.emit(f"clamd non raggiungibile su {exc.where}: {exc}. Scansione incompleta.")
+            message = f"clamd non raggiungibile su {exc.where}: {exc}. Scansione incompleta."
+            self.error.emit(message)
+            self.aborted.emit(message)
         except (ClamdError, OSError) as exc:
-            self.error.emit(f"Errore di comunicazione con clamd ({self.endpoint.describe()}): {exc}")
+            message = f"Errore di comunicazione con clamd ({self.endpoint.describe()}): {exc}"
+            self.error.emit(message)
+            self.aborted.emit(message)
 
         # Emissione finale non soggetta a throttling: garantisce che i
         # contatori mostrati combacino sempre col totale reale, anche se

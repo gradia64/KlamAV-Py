@@ -5,6 +5,66 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## 0.1.12 — 2026-09-28
+
+### Modificato
+- **Controlli più severi al salvataggio.** Le Impostazioni rifiutano una
+  cartella di quarantena che contiene la cartella della scansione
+  programmata interna, e la Pianificazione rifiuta una cartella da
+  scansionare che sta dentro la quarantena: in entrambi i casi la
+  scansione programmata non avrebbe controllato nulla. Con la
+  pianificazione interna attiva, la cartella da scansionare deve essere
+  un percorso assoluto di una cartella esistente: un file o un percorso
+  relativo venivano salvati, e la scansione poi non partiva o non
+  escludeva nulla.
+- Una scansione manuale della cartella di quarantena ora dà un errore
+  invece di terminare con zero file.
+
+### Corretto
+- **Scansioni programmate che risultavano pulite senza aver controllato
+  nulla.** Una quarantena che contiene la cartella della scansione
+  programmata interna la escludeva per intero; lo stesso succedeva con
+  un'esclusione diventata non valida dopo il salvataggio (per esempio un
+  link simbolico ripuntato su una cartella che contiene quella da
+  scansionare). Ora la scansione ricontrolla quarantena ed esclusioni
+  prima di partire e, se il caso si presenta, non parte e lo segnala.
+- La scansione programmata interna con clamd irraggiungibile risultava
+  "completata: 0 infetti". Ora una scansione non completata lo dice nella
+  notifica e in Cronologia ("Programmata (non completata)"), non conta
+  come eseguita e viene ritentata, con una sola notifica e una sola voce
+  in Cronologia finché il problema non si risolve. Vale anche per una
+  cartella da scansionare che non esiste più, che prima produceva solo
+  una notifica.
+- Una quarantena interrotta (crash, spegnimento) fra lo spostamento del
+  file e l'aggiornamento dell'indice lasciava il file in quarantena senza
+  voce, non ripristinabile dalla finestra; con la cartella di quarantena
+  su un altro disco l'originale infetto poteva restare nella sua cartella
+  sotto un nome nascosto. Ora l'operazione viene completata o annullata
+  al successivo avvio di KlamAV-Py o della CLI.
+- **Blocchi dell'interfaccia.** Non bloccano più la finestra:
+  - il controllo delle cartelle escluse e della cartella da scansionare
+    nella pagina Pianificazione, mentre si scrive il percorso o si salva,
+    quando una cartella è su un mount di rete irraggiungibile. Durante il
+    controllo il pulsante di salvataggio resta disattivato;
+  - la stessa verifica all'avvio di ogni scansione programmata;
+  - le chiamate a `systemctl --user` (stato e disattivazione del timer di
+    sistema, ricarica delle unit dopo il salvataggio di Impostazioni e
+    Pianificazione): con il gestore utente di systemd lento o bloccato la
+    finestra poteva restare ferma fino a 10 secondi.
+- Con clamd via TCP su localhost, l'aggiornamento del database era
+  disabilitato quando freshclam usa una `DatabaseDirectory` diversa da
+  `/var/lib/clamav`, con un messaggio che parlava di un container. Ora si
+  usa la cartella indicata in `freshclam.conf`.
+- Il controllo aggiornamenti ignorava i suffissi di pre-release: con
+  installata una versione candidata (per esempio 0.1.13-rc1) la versione
+  finale non veniva segnalata.
+
+### Aggiunto
+- Test su quarantena interrotta, validazioni e chiamate a systemctl fuori
+  dal thread dell'interfaccia, confronto delle versioni. Il test di
+  regressione del crash dei QThread ora riproduce la gara in modo
+  deterministico e non viene più saltato. Totale: 756 test.
+
 ## 0.1.11 — 2026-09-27
 
 ### Modificato

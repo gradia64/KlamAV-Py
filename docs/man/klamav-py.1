@@ -6,7 +6,7 @@
 .\" Consistency with build_parser() and with the Italian page is checked
 .\" by tests/test_manpage.py.
 .\"
-.TH KLAMAV-PY 1 "2026-09-27" "KlamAV-Py 0.1.11" "User Commands"
+.TH KLAMAV-PY 1 "2026-09-28" "KlamAV-Py 0.1.12" "User Commands"
 .
 .SH NAME
 klamav-py \- command-line virus scanning through the ClamAV daemon
@@ -226,6 +226,14 @@ writes.
 An unreadable index is renamed to
 .I index.json.corrupt-*
 and never deleted, so that it can be recovered by hand.
+Each quarantine in progress is recorded in a hidden file
+.I .<name>.intent
+(and
+.I .<name>.copy
+if the file is copied from another file system): if the operation is
+interrupted, for example by a crash, the next start of the CLI or the
+GUI completes it or rolls it back, leaving the original file in place in
+that case.
 .
 .SH SECURITY
 .SS Quarantine directory

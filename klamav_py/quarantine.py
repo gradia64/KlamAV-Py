@@ -12,6 +12,9 @@ File di servizio nella directory (tutti 0600, directory 0700):
   .index.json.<uuid>.tmp      temporaneo della scrittura atomica
   index.json.corrupt-<...>    indice illeggibile messo da parte (mai
                               cancellato: serve a recuperare a mano)
+  .<nome>.intent              intento di una quarantena in corso (vedi
+                              _write_intent e recover_interrupted)
+  .<nome>.copy                la stessa quarantena procede per copia
 """
 
 from __future__ import annotations
@@ -35,6 +38,15 @@ from .private_files import ensure_private_dir, open_private_fd, write_private_te
 # indice plausibile e non va caricato in memoria per intero.
 MAX_INDEX_BYTES = 16 * 1024 * 1024
 COPY_CHUNK = 1024 * 1024
+INTENT_SUFFIX = ".intent"
+# Accanto all'intento, creato prima di iniziare una copia fra filesystem:
+# dice al recupero quale delle due strade era stata presa. Il dispositivo
+# non basta: un rename fra due mount dello stesso filesystem (bind mount)
+# dà EXDEV con lo stesso st_dev.
+COPY_MARK_SUFFIX = ".copy"
+# Una quarantena per copia (EXDEV) crea la copia 0600 e la porta a 0400
+# solo dopo fsync: 0400 è il segno che la copia è completa.
+_COMPLETE_COPY_MODE = 0o400
 
 
 @dataclass
@@ -88,9 +100,13 @@ class Quarantine:
         # questo attributo (il recupero può averlo fatto un'altra istanza,
         # es. il worker Real-Time): usa corrupt_backups().
         self.last_recovery: Optional[Tuple[Path, str]] = None
+        # Operazioni riprese da recover_interrupted() in questa istanza:
+        # (file in quarantena, esito) per la diagnostica.
+        self.recovered: List[Tuple[Path, str]] = []
         with self._index_lock():
             if not self.index_path.exists():
                 self._write_index([])
+            self._recover_interrupted_locked()
 
     # -- lock e indice ---------------------------------------------------
 
@@ -210,6 +226,149 @@ class Quarantine:
             )
         return p
 
+    # -- intento e recupero ----------------------------------------------
+
+    def _intent_path(self, dest: Path) -> Path:
+        return self.dir / f".{dest.name}{INTENT_SUFFIX}"
+
+    def _copy_mark_path(self, dest: Path) -> Path:
+        return self.dir / f".{dest.name}{COPY_MARK_SUFFIX}"
+
+    def _write_intent(self, dest: Path, record: dict) -> int:
+        """
+        Registra una quarantena in corso PRIMA di toccare il file, e ritorna
+        il descrittore che ne tiene il lock (flock) fino alla fine.
+
+        Senza intento, un crash fra lo spostamento (o la copia) e la
+        scrittura dell'indice lasciava il file in quarantena senza voce,
+        cioè non ripristinabile dalla UI; con la copia fra filesystem
+        poteva restare anche l'originale infetto, sotto un nome nascosto
+        nella sua directory. recover_interrupted() completa o annulla
+        l'operazione. Il lock distingue un'operazione in corso (in un altro
+        processo: GUI, CLI, timer) da una interrotta: il kernel lo rilascia
+        alla morte del processo.
+        """
+        path = self._intent_path(dest)
+        fd = open_private_fd(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            data = json.dumps(record).encode("utf-8")
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        except BaseException:
+            os.close(fd)
+            path.unlink(missing_ok=True)
+            raise
+        return fd
+
+    def _clear_intent(self, dest: Path, fd: int) -> None:
+        # Prima l'unlink, poi la chiusura (che rilascia il lock): nessun
+        # altro processo vede l'intento senza lock mentre esiste ancora.
+        self._copy_mark_path(dest).unlink(missing_ok=True)
+        self._intent_path(dest).unlink(missing_ok=True)
+        os.close(fd)
+
+    def recover_interrupted(self) -> List[Tuple[Path, str]]:
+        """Completa o annulla le quarantene interrotte (vedi _write_intent).
+        Eseguita anche alla creazione dell'istanza."""
+        with self._index_lock():
+            return self._recover_interrupted_locked()
+
+    def _recover_interrupted_locked(self) -> List[Tuple[Path, str]]:
+        done = []
+        for intent in sorted(self.dir.glob(f".*{INTENT_SUFFIX}")):
+            try:
+                fd = os.open(intent, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            except OSError:
+                continue
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    continue  # operazione in corso in un altro processo
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    continue
+                dest_name = intent.name[1:-len(INTENT_SUFFIX)]
+                mark = self.dir / f".{dest_name}{COPY_MARK_SUFFIX}"
+                outcome = self._recover_one(os.read(fd, 64 * 1024), copying=mark.exists())
+                mark.unlink(missing_ok=True)
+                intent.unlink(missing_ok=True)
+                if outcome is not None:
+                    done.append(outcome)
+            finally:
+                os.close(fd)
+        self.recovered.extend(done)
+        return done
+
+    def _recover_one(self, raw: bytes, copying: bool) -> Optional[Tuple[Path, str]]:
+        """Esito del recupero di un intento, o None se non c'era niente da
+        fare (l'operazione non aveva ancora toccato il file)."""
+        try:
+            record = json.loads(raw.decode("utf-8"))
+            dest = self.dir / Path(record["quarantined_path"]).name
+            original = Path(record["original_path"])
+            staging = Path(record["staging"])
+            identity = (int(record["dev"]), int(record["ino"]))
+            entry = QuarantineEntry(
+                original_path=str(original),
+                quarantined_path=str(dest),
+                signature=record.get("signature"),
+                timestamp=float(record["timestamp"]),
+                original_mode=record.get("original_mode"),
+            )
+        except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+            # Intento scritto a metà: il crash è avvenuto prima del fsync,
+            # quindi prima di toccare il file.
+            return None
+
+        try:
+            dest_st = os.lstat(dest)
+        except FileNotFoundError:
+            return None  # interrotta prima dello spostamento o già annullata
+        if not stat.S_ISREG(dest_st.st_mode):
+            return None
+
+        def same(p: Path) -> bool:
+            try:
+                st = os.lstat(p)
+            except OSError:
+                return False
+            return (st.st_dev, st.st_ino) == identity
+
+        if not copying:
+            # dest esiste solo se il rename è avvenuto. Un inode diverso è
+            # la sostituzione gestita da _handle_substitution, interrotta:
+            # nessuna voce, resta visibile in orphans().
+            if (dest_st.st_dev, dest_st.st_ino) != identity:
+                return (dest, "lasciato per il recupero manuale: non è il file verificato")
+            # Manca al più il passaggio a sola lettura.
+            fd = os.open(dest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            try:
+                os.fchmod(fd, 0o400)
+            finally:
+                os.close(fd)
+        else:
+            if stat.S_IMODE(dest_st.st_mode) != _COMPLETE_COPY_MODE or same(original):
+                # Copia incompleta, oppure completa ma l'originale non è
+                # ancora stato tolto: si annulla e l'originale resta dov'è,
+                # come se la quarantena non fosse partita (la prossima
+                # scansione lo rileva di nuovo). Rifare qui lo spostamento
+                # dell'originale vorrebbe dire ripeterne le verifiche.
+                dest.unlink(missing_ok=True)
+                return (dest, "annullata: il file originale è rimasto al suo posto")
+            if same(staging):
+                # Originale già rinominato col nome temporaneo ma non
+                # cancellato: la copia completa è in quarantena.
+                staging.unlink()
+
+        entries = self._load_index()
+        if not any(e.quarantined_path == str(dest) for e in entries):
+            entries.append(entry)
+            self._write_index(entries)
+        return (dest, "completata")
+
     # -- quarantena ------------------------------------------------------
 
     @staticmethod
@@ -254,7 +413,7 @@ class Quarantine:
             f"(possibile tentativo di evasione): operazione annullata, {detail}"
         )
 
-    def _copy_across_filesystems(self, src_fd: int, st, path: Path, dest: Path) -> None:
+    def _copy_across_filesystems(self, src_fd: int, st, path: Path, dest: Path, staging: Path) -> None:
         """Quarantena di un file su un altro filesystem (EXDEV).
 
         Stesse garanzie del rename:
@@ -265,6 +424,7 @@ class Quarantine:
             l'inode con lstat, e solo allora lo si elimina. Così non si
             cancella mai per percorso un oggetto diverso da quello letto.
         """
+        os.close(open_private_fd(self._copy_mark_path(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL))
         out = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                       0o600)
         try:
@@ -275,14 +435,14 @@ class Quarantine:
                 while view:
                     view = view[os.write(out, view):]
             os.fsync(out)
-            os.fchmod(out, 0o400)
+            # Dopo il fsync: 0400 segna la copia completa per il recupero.
+            os.fchmod(out, _COMPLETE_COPY_MODE)
         except BaseException:
             os.close(out)
             dest.unlink(missing_ok=True)
             raise
         os.close(out)
 
-        staging = path.with_name(f".klamav-quarantena-{uuid.uuid4().hex}")
         try:
             os.rename(path, staging)
         except OSError as exc:
@@ -337,44 +497,60 @@ class Quarantine:
             timestamp = time.time()
             # Nome non prevedibile e senza il nome originale in chiaro.
             dest = self.dir / f"{int(timestamp)}_{uuid.uuid4().hex[:16]}"
+            # Nome temporaneo dell'originale nella quarantena per copia:
+            # deciso qui perché finisca nell'intento.
+            staging = path.with_name(f".klamav-quarantena-{uuid.uuid4().hex}")
+            entry = QuarantineEntry(
+                original_path=str(path),
+                quarantined_path=str(dest),
+                signature=signature,
+                timestamp=timestamp,
+                original_mode=original_mode,
+            )
+            intent_fd = self._write_intent(dest, {
+                **asdict(entry), "staging": str(staging), "dev": st.st_dev, "ino": st.st_ino,
+            })
+        except BaseException:
+            os.close(fd)
+            raise
 
-            try:
-                # rename() opera sulla voce di directory: se fra l'open e
-                # qui 'path' è stato sostituito, sposta la voce nuova. Da
-                # qui la verifica dell'inode subito dopo.
-                os.rename(path, dest)
-            except OSError as exc:
-                if exc.errno != errno.EXDEV:
-                    raise QuarantineError(
-                        f"impossibile spostare {path} in quarantena: {exc}"
-                    ) from exc
-                self._copy_across_filesystems(fd, st, path, dest)
-            else:
-                # lstat(), NON stat(): stat() segue i symlink e rendeva il
-                # controllo aggirabile con un symlink verso un hardlink del
-                # file infetto (stesso inode). Vedi
-                # tests/test_quarantine_evasion.py.
-                moved_st = os.lstat(dest)
-                if (moved_st.st_dev, moved_st.st_ino) != (st.st_dev, st.st_ino):
-                    self._handle_substitution(dest, path, moved_st)
-                # Read-only, dal descrittore: Path.chmod() seguirebbe un
-                # eventuale symlink fuori dalla quarantena.
-                os.fchmod(fd, 0o400)
+        try:
+            self._move_into_quarantine(fd, st, path, dest, staging)
+            with self._index_lock():
+                entries = self._load_index()
+                entries.append(entry)
+                self._write_index(entries)
         finally:
             os.close(fd)
-
-        entry = QuarantineEntry(
-            original_path=str(path),
-            quarantined_path=str(dest),
-            signature=signature,
-            timestamp=timestamp,
-            original_mode=original_mode,
-        )
-        with self._index_lock():
-            entries = self._load_index()
-            entries.append(entry)
-            self._write_index(entries)
+            self._clear_intent(dest, intent_fd)
         return entry
+
+    def _move_into_quarantine(self, fd: int, st, path: Path, dest: Path, staging: Path) -> None:
+        """Spostamento (o copia fra filesystem) con verifica dell'inode.
+        Un'eccezione lascia tutto com'era, salvo quanto documentato in
+        _handle_substitution."""
+        try:
+            # rename() opera sulla voce di directory: se fra l'open e
+            # qui 'path' è stato sostituito, sposta la voce nuova. Da
+            # qui la verifica dell'inode subito dopo.
+            os.rename(path, dest)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise QuarantineError(
+                    f"impossibile spostare {path} in quarantena: {exc}"
+                ) from exc
+            self._copy_across_filesystems(fd, st, path, dest, staging)
+            return
+        # lstat(), NON stat(): stat() segue i symlink e rendeva il
+        # controllo aggirabile con un symlink verso un hardlink del
+        # file infetto (stesso inode). Vedi
+        # tests/test_quarantine_evasion.py.
+        moved_st = os.lstat(dest)
+        if (moved_st.st_dev, moved_st.st_ino) != (st.st_dev, st.st_ino):
+            self._handle_substitution(dest, path, moved_st)
+        # Read-only, dal descrittore: Path.chmod() seguirebbe un
+        # eventuale symlink fuori dalla quarantena.
+        os.fchmod(fd, 0o400)
 
     def restore(self, quarantined_path: str, destination: Optional[Path] = None) -> Path:
         with self._index_lock():
@@ -498,6 +674,8 @@ class Quarantine:
             if name.startswith(f"{self.index_path.name}.corrupt-"):
                 continue
             if name.startswith(f".{self.index_path.name}.") and name.endswith(".tmp"):
+                continue
+            if name.startswith(".") and name.endswith((INTENT_SUFFIX, COPY_MARK_SUFFIX)):
                 continue
             if p.is_file() and not p.is_symlink():
                 result.append(p)

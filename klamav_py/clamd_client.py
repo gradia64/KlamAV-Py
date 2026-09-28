@@ -529,7 +529,7 @@ class ClamdClient:
 
                 try:
                     result = self._session.scan_one(target)
-                except TimeoutError as exc:
+                except TimeoutError:
                     # Un timeout è quasi sempre transitorio o legato a un
                     # file che ha richiesto un'analisi eccezionalmente
                     # lunga: vale UN secondo tentativo su sessione
