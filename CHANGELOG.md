@@ -27,7 +27,18 @@ sono in `docs/CHANGELOG-archive.md`.
   "completata: 0 infetti". Ora una scansione non completata lo dice nella
   notifica e in Cronologia ("Programmata (non completata)"), non conta
   come eseguita e viene ritentata, con una sola notifica e una sola voce
-  in Cronologia finché il problema non si risolve.
+  in Cronologia finché il problema non si risolve. Vale anche per una
+  cartella da scansionare che non esiste più, che prima produceva solo
+  una notifica.
+- La pagina Pianificazione controlla le cartelle escluse e la cartella da
+  scansionare in background: una cartella su un mount di rete
+  irraggiungibile non blocca più la finestra mentre si scrive il percorso
+  o si salva. Durante il controllo il pulsante di salvataggio resta
+  disattivato.
+- Con la pianificazione interna attiva, la cartella da scansionare deve
+  essere un percorso assoluto di una cartella esistente: un file o un
+  percorso relativo venivano salvati, e la scansione poi non partiva o
+  non escludeva nulla.
 
 ## 0.1.11 — 2026-09-27
 

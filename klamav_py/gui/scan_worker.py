@@ -83,6 +83,7 @@ class ScanWorker(QThread):
         quarantine_dir: Optional[Path] = None,
         auto_quarantine: bool = False,
         exclude_dirs: Iterable["str | Path"] = (),
+        strict_roots: bool = False,
         client_factory: Optional[Callable[..., Any]] = None,
         policy: Optional[QuarantinePolicy] = None,
         parent=None,
@@ -100,6 +101,11 @@ class ScanWorker(QThread):
         # scansione, come fa la CLI per il timer. Tupla: copia immutabile,
         # niente condivisione con la lista del chiamante fra thread.
         self.exclude_dirs = tuple(exclude_dirs)
+        # Scansione programmata: ogni destinazione dev'essere una directory
+        # esistente, e si percorre nella forma risolta (come la CLI), perché
+        # le esclusioni si confrontano in forma canonica. Il controllo sta
+        # qui e non nel chiamante per non fare stat() nel thread della GUI.
+        self.strict_roots = strict_roots
         # Factory iniettabile per i test (finto client senza clamd reale):
         # None = produzione, ClamdClient vero. I test della pausa hanno
         # bisogno di un client che produca risultati a ritmo controllato,
@@ -158,9 +164,11 @@ class ScanWorker(QThread):
             self.resumed.emit()
         return duration
 
-    def _blocking_exclusion(self, quarantine_root: Optional[Path]) -> Optional[str]:
+    def _blocking_problem(self, quarantine_root: Optional[Path]) -> Optional[str]:
         """
-        Motivo per non avviare la scansione, o None.
+        Motivo per non avviare la scansione, o None. Con strict_roots
+        verifica anche le destinazioni e le sostituisce con la loro forma
+        risolta.
 
         _iter_files non percorre una radice che sta dentro un'esclusione:
         senza questo controllo la scansione finirebbe con zero file e
@@ -175,7 +183,22 @@ class ScanWorker(QThread):
         comunque (_iter_files non applica le esclusioni ai file), e un
         file del Real-Time sparito nel frattempo non è un errore.
         """
-        dirs = [p for p in (Path(t).expanduser().resolve() for t in self.targets) if p.is_dir()]
+        if self.strict_roots:
+            for t in self.targets:
+                if not Path(t).expanduser().is_absolute():
+                    # Risolto sulla cwd, arbitraria per una GUI lanciata dal
+                    # menu: meglio un errore che una cartella a caso.
+                    return f"La cartella da scansionare «{t}» non è un percorso assoluto."
+        resolved = [Path(t).expanduser().resolve() for t in self.targets]
+        if self.strict_roots:
+            for original, path in zip(self.targets, resolved):
+                if not path.is_dir():
+                    what = "non è una directory" if path.exists() else "non esiste"
+                    return f"La cartella da scansionare «{original}» {what}."
+            # Da qui la traversata usa la forma risolta (effetto voluto).
+            self.targets = resolved
+            self.target = resolved[0]
+        dirs = [p for p in resolved if p.is_dir()]
         # Etichette per i messaggi: il percorso è già nel testo della regola.
         if len(dirs) == 1:
             roots = {"cartella da scansionare": dirs[0]}
@@ -226,7 +249,7 @@ class ScanWorker(QThread):
         too_large = 0
 
         try:
-            blocked = self._blocking_exclusion(quarantine_root)
+            blocked = self._blocking_problem(quarantine_root)
         except OSError as exc:
             blocked = f"impossibile verificare le cartelle escluse: {exc}"
         if blocked:

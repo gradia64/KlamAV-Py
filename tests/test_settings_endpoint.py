@@ -43,6 +43,14 @@ def load_fake_clamd():
 fake = load_fake_clamd()
 
 
+def _inline(fn, callback):
+    try:
+        result = fn()
+    except Exception as exc:  # come run_off_gui_thread
+        result = exc
+    callback(result)
+
+
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
@@ -57,6 +65,10 @@ def env(app, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
     for fmt in (QSettings.NativeFormat, QSettings.IniFormat):
         QSettings.setPath(fmt, QSettings.UserScope, str(config))
+    # Validazioni della Pianificazione in linea invece che in un thread:
+    # i test verificano l'esito subito dopo la chiamata. Il percorso con il
+    # thread vero è in test_settings_exclusions::test_validazione_fuori_dal_thread_gui.
+    monkeypatch.setattr(mw, "run_off_gui_thread", _inline)
     monkeypatch.setattr(mw, "DEFAULT_QUARANTINE_DIR", home / ".local/share/klamav-py/quarantine")
     monkeypatch.setattr(
         mw, "decide_quarantine_dir",

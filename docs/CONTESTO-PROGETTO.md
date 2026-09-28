@@ -116,7 +116,9 @@ quando clamd, via TCP, usa un database diverso da quello locale.
 **Dopo la 0.1.11.** Su `main`, in attesa della 0.1.12: la pianificazione
 interna rivalida le esclusioni a ogni avvio, come la CLI (`6a7a326`); la
 rivalidazione è poi passata in `ScanWorker.run()`, estesa alla quarantena,
-e le scansioni programmate non completate non risultano più pulite.
+e le scansioni programmate non completate non risultano più pulite. La
+pagina Pianificazione non tocca più il filesystem nel thread della GUI, e la
+cartella interna è validata come directory al salvataggio.
 
 ---
 
@@ -207,6 +209,18 @@ nulla fa perdere tempo.
   una directory sia le esclusioni dell'utente (`scan_exclusions.decide`)
   sia la quarantena (`quarantine_location.root_inside`); un file come radice
   non si controlla, perché `_iter_files` non gli applica le esclusioni.
+- **Controlli sul filesystem fuori dal thread della GUI.** La pagina
+  Pianificazione valuta esclusioni, cartella interna e quarantena con
+  `gui/off_thread.run_off_gui_thread` (thread daemon, risultato consegnato
+  con un segnale queued), una valutazione per tipo alla volta; il
+  salvataggio disattiva il pulsante finché la validazione non risponde e
+  prosegue con i valori letti al clic. Thread daemon e non QThread: un
+  controllo bloccato su un mount di rete non deve impedire l'uscita.
+- **Cartella della pianificazione interna**: al salvataggio, con la
+  pianificazione interna attiva, dev'essere un percorso assoluto di una
+  directory esistente. A ogni scansione la verifica il worker
+  (`strict_roots`), che la risolve prima della traversata; una cartella
+  mancante è una scansione non completata come le altre.
 - **Quarantena e radici della GUI**: `quarantine_location.decide` accetta
   `roots`; le Impostazioni passano home e `schedule_target`, la
   Pianificazione controlla la regola inversa al salvataggio.
@@ -261,19 +275,6 @@ nulla fa perdere tempo.
 Già tracciati: segnalarli di nuovo è utile solo se si aggiunge uno scenario,
 una riproduzione o una correzione migliore.
 
-- **Syscall sul filesystem nel thread GUI, parte residua.** La
-  rivalidazione prima di ogni scansione programmata è passata in
-  `ScanWorker.run()`, ma `_refresh_exclusions` rivaluta ancora le voci a
-  ogni tasto nel campo target della Pianificazione, e il salvataggio le
-  valida nel thread principale: un'esclusione su un mount di rete `hard`
-  non raggiungibile bloccherebbe l'interfaccia in quei momenti.
-- **Target della pianificazione interna non validato come directory** al
-  salvataggio: un file scritto a mano produce blocchi e avvisi incoerenti con
-  la CLI.
-- **Scansione programmata con target mancante senza traccia in
-  cronologia**: solo la notifica. Le scansioni non completate per esclusioni
-  non valide o clamd irraggiungibile compaiono invece come «Programmata (non
-  completata)».
 - **`LOCAL_DB_DIR` fisso su `/var/lib/clamav`** in `db_update_policy.py`: un
   `DatabaseDirectory` personalizzato con TCP su loopback disabilita
   l'aggiornamento con un messaggio fuorviante. Esito comunque sicuro.

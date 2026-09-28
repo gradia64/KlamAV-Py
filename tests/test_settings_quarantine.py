@@ -28,6 +28,14 @@ from klamav_py.systemd_dropin import HEADER, dropin_path  # noqa: E402
 MOUNTS_EXT4 = "22 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
 
 
+def _inline(fn, callback):
+    try:
+        result = fn()
+    except Exception as exc:  # come run_off_gui_thread
+        result = exc
+    callback(result)
+
+
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
@@ -67,6 +75,10 @@ def env(app, tmp_path, monkeypatch):
         QSettings.setPath(fmt, QSettings.UserScope, str(config))
 
     default = home / ".local/share/klamav-py/quarantine"
+    # Validazioni della Pianificazione in linea invece che in un thread:
+    # i test verificano l'esito subito dopo la chiamata. Il percorso con il
+    # thread vero è in test_settings_exclusions::test_validazione_fuori_dal_thread_gui.
+    monkeypatch.setattr(mw, "run_off_gui_thread", _inline)
     monkeypatch.setattr(mw, "DEFAULT_QUARANTINE_DIR", default)
     # tmp_path sta sotto /tmp: senza neutralizzare le radici volatili ogni
     # directory di prova verrebbe (giustamente) rifiutata.

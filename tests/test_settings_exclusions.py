@@ -26,6 +26,14 @@ import klamav_py.gui.main_window as mw  # noqa: E402
 from klamav_py.systemd_dropin import HEADER, dropin_path  # noqa: E402
 
 
+def _inline(fn, callback):
+    try:
+        result = fn()
+    except Exception as exc:  # come run_off_gui_thread
+        result = exc
+    callback(result)
+
+
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
@@ -42,6 +50,10 @@ def env(app, tmp_path, monkeypatch):
     for fmt in (QSettings.NativeFormat, QSettings.IniFormat):
         QSettings.setPath(fmt, QSettings.UserScope, str(config))
 
+    # Validazioni della Pianificazione in linea invece che in un thread:
+    # i test verificano l'esito subito dopo la chiamata. Il percorso con il
+    # thread vero è in test_settings_exclusions::test_validazione_fuori_dal_thread_gui.
+    monkeypatch.setattr(mw, "run_off_gui_thread", _inline)
     monkeypatch.setattr(mw, "DEFAULT_QUARANTINE_DIR", home / ".local/share/klamav-py/quarantine")
 
     calls = SimpleNamespace(timer=False, disable=0, reload=0, shown=[], answers=[])
@@ -263,8 +275,26 @@ def test_scansione_programmata_passa_le_esclusioni(env, monkeypatch):
     fake.settings = _settings()
     mw.MainWindow._run_scheduled_scan(fake)
     assert len(creati) == 1
-    assert creati[0]["target"] == (env.home / "Documenti").resolve()
+    # Forma salvata: esistenza e risoluzione le verifica il worker
+    # (strict_roots), fuori dal thread della GUI.
+    assert creati[0]["target"] == mw.Path("~/Documenti")
+    assert creati[0]["strict_roots"] is True
     assert creati[0]["exclude_dirs"] == ["~/Documenti/archivio"]
+
+
+def test_scansione_programmata_cartella_mancante_nessun_stat_nel_thread_gui(env, monkeypatch):
+    # Prima: target.exists() nel thread della GUI e, se mancava, solo una
+    # notifica senza traccia in Cronologia. Ora il worker parte comunque e
+    # la segnala con aborted (vedi test_scan_worker_exclude).
+    creati = []
+    FakeWorker, fake = _fake_window(creati)
+    monkeypatch.setattr(mw, "ScanWorker", FakeWorker)
+    s = _settings()
+    s.setValue("schedule_target", str(env.home / "sparita"))
+    s.sync()
+    fake.settings = _settings()
+    mw.MainWindow._run_scheduled_scan(fake)
+    assert len(creati) == 1 and creati[0]["target"] == env.home / "sparita"
 
 
 def test_scansione_programmata_esclusione_non_validata_nel_thread_gui(env, monkeypatch):
@@ -489,3 +519,91 @@ def test_daemon_reload_fallito_e_solo_un_avviso(env, monkeypatch):
     page._save_schedule()
     assert _kinds(env) == ["warning"] and "Access denied" in env.calls.shown[0][1]
     assert mw.load_schedule_excludes(_settings()) == [str(env.home / "vm")]
+
+
+# -- validazioni fuori dal thread della GUI ------------------------------
+
+def test_validazione_fuori_dal_thread_gui(env, monkeypatch):
+    # Una voce su un mount di rete irraggiungibile blocca resolve()/stat():
+    # la pagina deve restare reattiva e applicare l'esito quando arriva.
+    import threading
+    import time as _time
+
+    from PySide6.QtCore import QCoreApplication
+
+    from klamav_py.gui import off_thread
+
+    monkeypatch.setattr(mw, "run_off_gui_thread", off_thread.run_off_gui_thread)
+    page = _page(env, [str(env.home / "vm")])
+    _attendi(lambda: not page._refresh_running)
+
+    sblocca = threading.Event()
+    thread_usati = []
+    vera = mw.decide_exclusion
+
+    def lenta(raw, **kw):
+        thread_usati.append(threading.current_thread())
+        sblocca.wait(10)
+        return vera(raw, **kw)
+
+    monkeypatch.setattr(mw, "decide_exclusion", lenta)
+    inizio = _time.monotonic()
+    page.target_edit.setText(str(env.home / "Documenti"))
+    page.target_edit.setText(str(env.home / "Documenti") + "/")  # secondo tasto
+    assert _time.monotonic() - inizio < 1  # nessun blocco nel thread GUI
+    assert page.excl_list.item(0).toolTip() == ""  # esito non ancora arrivato
+    QCoreApplication.processEvents()
+    assert page._refresh_again  # il secondo tasto non ha aperto un altro thread
+    assert len(thread_usati) == 1 and thread_usati[0] is not threading.main_thread()
+
+    sblocca.set()
+    _attendi(lambda: "pianificazione interna" in page.excl_list.item(0).toolTip())
+    _attendi(lambda: not page._refresh_running)
+
+    # Salvataggio: stesso percorso, il pulsante resta disattivato finché
+    # la validazione non risponde.
+    sblocca.clear()
+    page._save_schedule()
+    assert not page.save_btn.isEnabled()
+    page._save_schedule()  # doppio clic: ignorato
+    sblocca.set()
+    _attendi(lambda: page.save_btn.isEnabled())
+    assert _settings().value("schedule_target") == str(env.home / "Documenti") + "/"
+
+
+def _attendi(condizione, timeout=5.0):
+    import time as _time
+
+    from PySide6.QtCore import QCoreApplication
+
+    fine = _time.monotonic() + timeout
+    while not condizione():
+        assert _time.monotonic() < fine, "esito mai arrivato"
+        QCoreApplication.processEvents()
+        _time.sleep(0.01)
+
+
+@pytest.mark.parametrize("abilitata", [True, False])
+def test_cartella_interna_mancante_al_salvataggio(env, abilitata):
+    page = _page(env)
+    page.enable_check.setChecked(abilitata)
+    page.target_edit.setText(str(env.home / "sparita"))
+    page._save_schedule()
+    if abilitata:
+        assert _kinds(env) == ["warning"] and "non esiste" in env.calls.shown[0][1]
+        assert _settings().value("schedule_target") == str(env.home)
+    else:
+        # Pianificazione interna spenta: si salvano le esclusioni per il
+        # timer senza pretendere una cartella che non verrà usata.
+        assert _kinds(env) == [] and _settings().value("schedule_target") == str(env.home / "sparita")
+
+
+def test_cartella_interna_file_o_relativa_rifiutata(env):
+    (env.home / "nota.txt").write_text("x")
+    for testo, atteso in ((str(env.home / "nota.txt"), "non è una directory"), ("relativa", "assoluto")):
+        env.calls.shown.clear()
+        page = _page(env)
+        page.enable_check.setChecked(True)
+        page.target_edit.setText(testo)
+        page._save_schedule()
+        assert _kinds(env) == ["warning"] and atteso in env.calls.shown[0][1]

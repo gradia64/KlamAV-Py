@@ -177,3 +177,42 @@ def test_clamd_irraggiungibile_segnalato_come_aborted(tmp_path):
 
     got = _run_capture(target=tmp_path, client_factory=Down)
     assert len(got["aborted"]) == 1 and "non raggiungibile" in got["aborted"][0]
+
+
+# -- strict_roots (scansione programmata) --------------------------------
+
+def test_strict_cartella_mancante(tmp_path):
+    got = _run_capture(target=tmp_path / "sparita", strict_roots=True)
+    assert Client.visti == [] and "non esiste" in got["aborted"][0]
+
+
+def test_strict_cartella_file(tmp_path):
+    (tmp_path / "f").write_text("x")
+    got = _run_capture(target=tmp_path / "f", strict_roots=True)
+    assert Client.visti == [] and "non è una directory" in got["aborted"][0]
+
+
+def test_strict_percorso_relativo(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rel").mkdir()
+    got = _run_capture(target="rel", strict_roots=True)
+    assert Client.visti == [] and "assoluto" in got["aborted"][0]
+
+
+def test_strict_radice_risolta_prima_della_traversata(tmp_path, monkeypatch):
+    # Senza risoluzione la quarantena (confrontata risolta) non verrebbe
+    # sfoltita percorrendo un collegamento alla radice.
+    percorsi = []
+
+    class Rec(Client):
+        def scan_stream(self, target, *, exclude_dirs, **kw):
+            percorsi.append(target)
+            return iter(())
+
+    (tmp_path / "vera").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "vera")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    got = _run_capture(target=tmp_path / "link", strict_roots=True, client_factory=Rec)
+    assert got["aborted"] == [] and percorsi == [(tmp_path / "vera").resolve()]
+    got = _run_capture(target="~/link", strict_roots=True, client_factory=Rec)
+    assert got["aborted"] == [] and percorsi[-1] == (tmp_path / "vera").resolve()
