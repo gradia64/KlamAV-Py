@@ -5,6 +5,16 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## Non rilasciato
+
+### Corretto
+- Scansione programmata interna: le cartelle escluse sono ricontrollate a
+  ogni avvio, come già fa la CLI per il timer di sistema. Un'esclusione
+  valida al salvataggio poteva diventarlo dopo (per esempio un link
+  simbolico ripuntato su una cartella che contiene quella da
+  scansionare), e la scansione terminava pulita senza aver controllato
+  nessun file. Ora non parte e lo segnala con una notifica.
+
 ## 0.1.11 — 2026-09-27
 
 ### Modificato
