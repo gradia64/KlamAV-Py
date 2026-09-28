@@ -589,6 +589,32 @@ def schedule_roots(target: str, home: Path | None = None) -> dict[str, Path]:
     return roots
 
 
+def dropin_followup(changed: bool, tcp: bool) -> tuple[str | None, list]:
+    """
+    Dopo la scrittura del drop-in: daemon-reload se è cambiato e override
+    estranei della unit. Chiama systemctl --user (timeout 10 s): la GUI la
+    esegue con run_off_gui_thread. Ritorna (motivo del reload fallito o
+    None, override estranei).
+    """
+    problem = daemon_reload() if changed else None
+    return problem, foreign_overrides(tcp=tcp)
+
+
+def dropin_notes(problem: str | None, overrides: list, *, what: str) -> list[str]:
+    """Avvisi non bloccanti del salvataggio, dal risultato di dropin_followup.
+    Un override.conf (systemctl --user edit) che ridefinisce ExecStart viene
+    dopo il nostro drop-in e vince: solo avviso, il file è dell'utente."""
+    notes = []
+    if problem:
+        notes.append(
+            f"La scansione programmata di sistema userà {what} "
+            "dal prossimo avvio della sessione "
+            f"(systemctl --user daemon-reload non riuscito: {problem})."
+        )
+    notes.extend(o.describe() for o in overrides)
+    return notes
+
+
 def validate_schedule(
     raws: list[str],
     roots: dict[str, Path],
@@ -1737,6 +1763,9 @@ class SchedulerPage(QWidget):
         self._refresh_again = False
         self._put_running = False
         self._save_running = False
+        self._timer_refresh_running = False
+        self._timer_refresh_again = False
+        self.timer_state: bool | None = None
 
         # Scroll area come in SettingsPage: con il gruppo delle cartelle
         # escluse l'altezza minima supera quella della finestra predefinita
@@ -1914,10 +1943,34 @@ class SchedulerPage(QWidget):
         super().showEvent(event)
         self.refresh_system_timer()
 
-    def refresh_system_timer(self) -> bool | None:
-        """Aggiorna la label sul timer di sistema e ne restituisce lo stato
-        (None: sconosciuto, per esempio senza manager systemd utente)."""
-        state = timer_enabled()
+    def refresh_system_timer(self) -> None:
+        """Aggiorna la label sul timer di sistema. systemctl --user (fino a
+        10 s di timeout) e la lettura degli override girano fuori dal thread
+        della GUI; lo stato arriva in self.timer_state (None: sconosciuto,
+        per esempio senza manager systemd utente)."""
+        if self._timer_refresh_running:
+            self._timer_refresh_again = True
+            return
+        self._timer_refresh_running = True
+        self._timer_refresh_again = False
+        try:
+            tcp = load_endpoint(self.settings).is_tcp
+        except ValueError:
+            tcp = False
+
+        def check():
+            state = timer_enabled()
+            return state, (foreign_overrides(tcp=tcp) if state is True else [])
+
+        run_off_gui_thread(check, self._timer_state_done)
+
+    def _timer_state_done(self, result) -> None:
+        self._timer_refresh_running = False
+        if self._timer_refresh_again:
+            self.refresh_system_timer()
+            return
+        state, overrides = (None, []) if isinstance(result, Exception) else result
+        self.timer_state = state
         if state is True:
             text = (
                 "La scansione programmata di sistema (klamav-scan.timer) è attiva: "
@@ -1926,16 +1979,10 @@ class SchedulerPage(QWidget):
             )
             if self.settings.value("schedule_enabled", False, type=bool):
                 text += " Al momento sono attive entrambe: la home viene scansionata due volte."
-            try:
-                tcp = load_endpoint(self.settings).is_tcp
-            except ValueError:
-                tcp = False
-            overrides = foreign_overrides(tcp=tcp)
             if overrides:
                 text += "\n\nAttenzione: " + " ".join(o.describe() for o in overrides)
             self.system_timer_label.setText(text)
         self.system_timer_label.setVisible(state is True)
-        return state
 
     def set_next_run(self, text: str) -> None:
         self.next_run_label.setText(text)
@@ -2078,14 +2125,16 @@ class SchedulerPage(QWidget):
             self.excl_list.takeItem(self.excl_list.row(item))
         self._update_exclusion_buttons()
 
-    def _sync_system_dropin(self, excludes: list[str], timer_disabled: bool = False) -> bool:
+    def _sync_system_dropin(
+        self, excludes: list[str], timer_disabled: bool = False
+    ) -> tuple[bool, bool] | None:
         """
         Rigenera il drop-in di klamav-scan.service con le nuove esclusioni e
         con quarantena ed endpoint già salvati nelle Impostazioni (stato
-        completo, vedi render_dropin). False, con un avviso, se il
-        salvataggio va annullato. Il daemon-reload fallito e gli override
-        estranei sono solo avvisi (in self._save_notes), come nelle
-        Impostazioni.
+        completo, vedi render_dropin). None, con un avviso, se il
+        salvataggio va annullato; altrimenti (drop-in cambiato, endpoint
+        TCP), per il daemon-reload e il controllo degli override estranei
+        che _save_write esegue fuori dal thread della GUI.
         """
         title = "Pianificazione Scansioni"
         try:
@@ -2096,7 +2145,7 @@ class SchedulerPage(QWidget):
                 f"Impostazioni di connessione a clamd non valide ({exc}): correggile "
                 "nelle Impostazioni.\n\nLa pianificazione non è stata salvata.",
             )
-            return False
+            return None
         quarantine = Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))).expanduser()
         try:
             changed = sync_dropin(render_dropin(
@@ -2110,21 +2159,8 @@ class SchedulerPage(QWidget):
             if timer_disabled:
                 tail += " Il timer di sistema era già stato disattivato."
             QMessageBox.warning(self, title, f"{reason}\n\n{tail}")
-            return False
-        if changed:
-            problem = daemon_reload()
-            if problem:
-                self._save_notes.append(
-                    "La scansione programmata di sistema userà le nuove esclusioni "
-                    "dal prossimo avvio della sessione "
-                    f"(systemctl --user daemon-reload non riuscito: {problem})."
-                )
-        # Un override.conf (systemctl --user edit) che ridefinisce ExecStart
-        # viene dopo il nostro drop-in e vince: le esclusioni appena salvate
-        # non arriverebbero al timer. Solo avviso: il file è dell'utente.
-        for override in foreign_overrides(tcp=endpoint.is_tcp):
-            self._save_notes.append(override.describe())
-        return True
+            return None
+        return changed, endpoint.is_tcp
 
 
     def _load_settings(self) -> None:
@@ -2165,15 +2201,21 @@ class SchedulerPage(QWidget):
         raws = self.excluded_dirs()
         roots = schedule_roots(target_text)
         quarantine_raw = self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))
-        require_target = self.enable_check.isChecked()
-        run_off_gui_thread(
-            lambda: validate_schedule(raws, roots, target_text, quarantine_raw, require_target),
-            lambda result: self._save_validated(result, target_text),
-        )
+        enabled = self.enable_check.isChecked()
 
-    def _save_validated(self, result, target_text: str) -> None:
+        def check():
+            # Lo stato del timer serve solo se si attiva la pianificazione
+            # interna: systemctl --user può impiegare fino a 10 s.
+            state = timer_enabled() if enabled else None
+            return validate_schedule(raws, roots, target_text, quarantine_raw, enabled), state
+
+        run_off_gui_thread(check, lambda result: self._save_validated(result, target_text))
+
+    def _save_end(self) -> None:
         self._save_running = False
         self.save_btn.setEnabled(True)
+
+    def _save_validated(self, result, target_text: str) -> None:
         title = "Pianificazione Scansioni"
         # Prima della domanda sul timer: un salvataggio che fallirebbe per
         # la validazione non deve aver già disattivato klamav-scan.timer.
@@ -2183,56 +2225,68 @@ class SchedulerPage(QWidget):
                 f"Impossibile verificare la pianificazione: {result}\n\n"
                 "La pianificazione non è stata salvata.",
             )
+            self._save_end()
             return
-        excludes, problems = result
+        (excludes, problems), timer_state = result
         if problems:
             QMessageBox.warning(
                 self, title,
                 "\n\n".join(problems) + "\n\nLa pianificazione non è stata salvata.",
             )
+            self._save_end()
             return
 
         enabled = self.enable_check.isChecked()
-        timer_disabled = False
-        if enabled and timer_enabled() is True:
-            # Tre esiti, non due: chi apre questa pagina solo per le cartelle
-            # escluse (che valgono anche per il timer) deve poter salvare
-            # senza scegliere la pianificazione interna.
-            answer = QMessageBox.question(
-                self,
-                title,
-                "La scansione programmata di sistema (klamav-scan.timer) è attiva. "
-                "Le due pianificazioni sono alternative: con entrambe la home verrebbe "
-                "scansionata due volte.\n\n"
-                "Sì: disattiva il timer di sistema e usa questa pianificazione.\n"
-                "No: mantieni il timer; questa pianificazione resta disattivata.\n\n"
-                "In entrambi i casi le cartelle escluse vengono salvate e valgono "
-                "per tutte e due.",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                QMessageBox.Cancel,
+        if not (enabled and timer_state is True):
+            self._save_write(excludes, target_text, enabled, timer_disabled=False)
+            return
+        # Tre esiti, non due: chi apre questa pagina solo per le cartelle
+        # escluse (che valgono anche per il timer) deve poter salvare
+        # senza scegliere la pianificazione interna.
+        answer = QMessageBox.question(
+            self,
+            title,
+            "La scansione programmata di sistema (klamav-scan.timer) è attiva. "
+            "Le due pianificazioni sono alternative: con entrambe la home verrebbe "
+            "scansionata due volte.\n\n"
+            "Sì: disattiva il timer di sistema e usa questa pianificazione.\n"
+            "No: mantieni il timer; questa pianificazione resta disattivata.\n\n"
+            "In entrambi i casi le cartelle escluse vengono salvate e valgono "
+            "per tutte e due.",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if answer == QMessageBox.Yes:
+            run_off_gui_thread(
+                disable_timer,
+                lambda problem: self._save_timer_disabled(problem, excludes, target_text),
             )
-            if answer == QMessageBox.Yes:
-                problem = disable_timer()
-                if problem:
-                    QMessageBox.warning(
-                        self,
-                        title,
-                        "Non è stato possibile disattivare klamav-scan.timer, quindi la "
-                        f"pianificazione non è stata salvata:\n{problem}",
-                    )
-                    return
-                timer_disabled = True
-            elif answer == QMessageBox.No:
-                enabled = False
-            else:
-                return
+        elif answer == QMessageBox.No:
+            self._save_write(excludes, target_text, False, timer_disabled=False)
+        else:
+            self._save_end()
 
+    def _save_timer_disabled(self, problem, excludes: list[str], target_text: str) -> None:
+        if problem:
+            QMessageBox.warning(
+                self,
+                "Pianificazione Scansioni",
+                "Non è stato possibile disattivare klamav-scan.timer, quindi la "
+                f"pianificazione non è stata salvata:\n{problem}",
+            )
+            self._save_end()
+            return
+        self._save_write(excludes, target_text, True, timer_disabled=True)
+
+    def _save_write(self, excludes: list[str], target_text: str, enabled: bool, timer_disabled: bool) -> None:
         # Il timer di sistema usa la stessa lista: drop-in prima di QSettings,
         # e se non si può scrivere non si salva NULLA (GUI e timer
         # escluderebbero cartelle diverse senza che nessuno lo sappia).
-        self._save_notes: list[str] = []
-        if not self._sync_system_dropin(excludes, timer_disabled=timer_disabled):
+        synced = self._sync_system_dropin(excludes, timer_disabled=timer_disabled)
+        if synced is None:
+            self._save_end()
             return
+        changed, tcp = synced
 
         self.enable_check.setChecked(enabled)
         self.settings.setValue("schedule_enabled", enabled)
@@ -2241,12 +2295,24 @@ class SchedulerPage(QWidget):
         self.settings.setValue("schedule_target", target_text)
         self.settings.setValue(SCHEDULE_EXCLUDES_KEY, excludes)
 
-        if self._save_notes:
+        # Il daemon-reload fallito e gli override estranei sono solo avvisi,
+        # come nelle Impostazioni: le impostazioni sono già salvate.
+        run_off_gui_thread(lambda: dropin_followup(changed, tcp), self._save_done)
+
+    def _save_done(self, result) -> None:
+        title = "Pianificazione Scansioni"
+        notes = (
+            [f"Impossibile completare l'aggiornamento del timer di sistema: {result}"]
+            if isinstance(result, Exception)
+            else dropin_notes(*result, what="le nuove esclusioni")
+        )
+        if notes:
             QMessageBox.warning(
                 self, title,
-                "Pianificazione salvata, con queste note:\n\n" + "\n\n".join(self._save_notes),
+                "Pianificazione salvata, con queste note:\n\n" + "\n\n".join(notes),
             )
 
+        self._save_end()
         self.schedule_saved.emit()
         self.refresh_system_timer()
 
@@ -2270,6 +2336,9 @@ class SettingsPage(QWidget):
         # Worker del controllo aggiornamenti: None quando nessun controllo
         # è in corso. Vedi _check_updates / _release_update_check_worker.
         self._update_check_worker: UpdateCheckWorker | None = None
+        # Salvataggio in attesa del daemon-reload (vedi _save_settings).
+        self._save_running = False
+        self._dropin_changed = False
 
         # FIX SOVRAPPOSIZIONE WIDGET: il contenuto della pagina (parecchi
         # widget a dimensione fissa: QLineEdit/QPushButton alti 36px,
@@ -2506,6 +2575,7 @@ class SettingsPage(QWidget):
         save_btn.setFixedHeight(36)
         save_btn.setIcon(QIcon.fromTheme("document-save"))
         save_btn.clicked.connect(self._save_settings)
+        self.save_btn = save_btn
 
         buttons_row.addWidget(reset_btn)
         buttons_row.addWidget(save_btn)
@@ -2689,25 +2759,16 @@ class SettingsPage(QWidget):
             )
             return None
 
-        if changed:
-            problem = daemon_reload()
-            if problem:
-                self.save_notes.append(
-                    "La scansione programmata di sistema userà le nuove impostazioni "
-                    "dal prossimo avvio della sessione "
-                    f"(systemctl --user daemon-reload non riuscito: {problem})."
-                )
-
-        # Altri drop-in della unit (es. override.conf di "systemctl --user
-        # edit") che rendono inefficaci queste impostazioni o ne vengono
-        # sostituiti. Solo avviso: la personalizzazione è dell'utente.
-        for override in foreign_overrides(tcp=endpoint.is_tcp):
-            self.save_notes.append(override.describe())
-
+        # daemon-reload e override estranei (es. override.conf di
+        # "systemctl --user edit"): solo avvisi, verificati da
+        # _save_settings fuori dal thread della GUI dopo il salvataggio.
+        self._dropin_changed = changed
         self.quar_edit.setText(str(path))
         return path
 
     def _save_settings(self) -> None:
+        if self._save_running:
+            return  # verifiche del salvataggio precedente ancora in corso
         self.save_notes = []
         try:
             endpoint = self._endpoint_from_form()
@@ -2728,6 +2789,23 @@ class SettingsPage(QWidget):
 
         rt_dirs = [self.rt_dirs_list.item(i).text() for i in range(self.rt_dirs_list.count())]
         self.settings.setValue("realtime_paths", rt_dirs)
+
+        # systemctl --user daemon-reload (timeout 10 s) fuori dal thread della
+        # GUI: le impostazioni sono già salvate, l'esito dà solo avvisi.
+        self._save_running = True
+        self.save_btn.setEnabled(False)
+        changed, tcp = self._dropin_changed, endpoint.is_tcp
+        run_off_gui_thread(lambda: dropin_followup(changed, tcp), self._save_settings_done)
+
+    def _save_settings_done(self, result) -> None:
+        self._save_running = False
+        self.save_btn.setEnabled(True)
+        if isinstance(result, Exception):
+            self.save_notes.append(
+                f"Impossibile completare l'aggiornamento del timer di sistema: {result}"
+            )
+        else:
+            self.save_notes.extend(dropin_notes(*result, what="le nuove impostazioni"))
 
         self.settings_saved.emit()
 
@@ -3042,6 +3120,7 @@ class MainWindow(QMainWindow):
         self._schedule_aborted_noted = False
         self._bg_aborted: str | None = None
         self._double_schedule_noted = False
+        self._double_schedule_checking = False
         self.bg_worker = None
         # Log della scansione programmata scritto man mano (vedi
         # _bg_log_write): memoria costante e niente log perso se la GUI
@@ -3430,6 +3509,24 @@ X-GNOME-Autostart-enabled=true
         except (TypeError, ValueError):
             return None
 
+    def _double_schedule_checked(self, state) -> None:
+        self._double_schedule_checking = False
+        if state is not True or self._double_schedule_noted:
+            return
+        # Ricontrollato qui: la pianificazione interna può essere stata
+        # disattivata mentre systemctl rispondeva.
+        if not self.settings.value("schedule_enabled", False, type=bool):
+            return
+        self._double_schedule_noted = True
+        self.tray_icon.showMessage(
+            APP_NAME,
+            "Sono attive sia la pianificazione interna sia il timer di sistema "
+            "klamav-scan.timer: la home verrebbe scansionata due volte. "
+            "Vedi la pagina Pianificazione.",
+            _app_icon(),
+            10000,
+        )
+
     def _load_schedule(self) -> None:
         enabled = self.settings.value("schedule_enabled", False, type=bool)
         if not enabled:
@@ -3440,16 +3537,10 @@ X-GNOME-Autostart-enabled=true
         # Entrambe le pianificazioni attive (il timer può essere stato
         # abilitato da terminale dopo quella interna): una volta per
         # sessione, senza bloccare nulla.
-        if not self._double_schedule_noted and timer_enabled() is True:
-            self._double_schedule_noted = True
-            self.tray_icon.showMessage(
-                APP_NAME,
-                "Sono attive sia la pianificazione interna sia il timer di sistema "
-                "klamav-scan.timer: la home verrebbe scansionata due volte. "
-                "Vedi la pagina Pianificazione.",
-                _app_icon(),
-                10000,
-            )
+        # systemctl --user fuori dal thread della GUI (timeout 10 s).
+        if not self._double_schedule_noted and not self._double_schedule_checking:
+            self._double_schedule_checking = True
+            run_off_gui_thread(timer_enabled, self._double_schedule_checked)
 
         # Prima attivazione: si fissa la base a "adesso" invece di
         # scansionare subito (l'utente ha appena scelto un intervallo, non

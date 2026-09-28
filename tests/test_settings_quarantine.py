@@ -306,7 +306,8 @@ def test_disattivare_la_pianificazione_non_chiede_nulla(env):
 def test_label_timer(env):
     page = _scheduler()
     env.calls.timer = True
-    assert page.refresh_system_timer() is True
+    page.refresh_system_timer()
+    assert page.timer_state is True
     assert not page.system_timer_label.isHidden()
     env.calls.timer = None
     page.refresh_system_timer()

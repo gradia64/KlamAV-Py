@@ -607,3 +607,138 @@ def test_cartella_interna_file_o_relativa_rifiutata(env):
         page.target_edit.setText(testo)
         page._save_schedule()
         assert _kinds(env) == ["warning"] and atteso in env.calls.shown[0][1]
+
+
+# -- systemctl --user fuori dal thread della GUI -------------------------
+
+def _systemctl_lento(monkeypatch, nome, risposta):
+    """Sostituisce mw.<nome> con una versione che si blocca finché il test
+    non la sblocca, e registra il thread da cui è chiamata."""
+    import threading
+
+    from klamav_py.gui import off_thread
+
+    monkeypatch.setattr(mw, "run_off_gui_thread", off_thread.run_off_gui_thread)
+    sblocca = threading.Event()
+    thread_usati = []
+
+    def lenta(*a, **k):
+        thread_usati.append(threading.current_thread())
+        sblocca.wait(10)
+        return risposta() if callable(risposta) else risposta
+
+    monkeypatch.setattr(mw, nome, lenta)
+    return sblocca, thread_usati
+
+
+def test_salvataggio_con_timer_lento_non_blocca_la_gui(env, monkeypatch):
+    import threading
+    import time as _time
+
+    sblocca, thread_usati = _systemctl_lento(monkeypatch, "timer_enabled", True)
+    env.calls.answers.append(True)  # "Sì": disattiva il timer
+    page = _page(env)
+    page.enable_check.setChecked(True)
+    inizio = _time.monotonic()
+    page._save_schedule()
+    assert _time.monotonic() - inizio < 1
+    assert not page.save_btn.isEnabled() and _kinds(env) == []
+    sblocca.set()
+    _attendi(lambda: page.save_btn.isEnabled())
+    assert thread_usati and all(t is not threading.main_thread() for t in thread_usati)
+    assert _kinds(env) == ["question"] and env.calls.disable == 1
+    assert _settings().value("schedule_enabled", type=bool) is True
+
+
+def test_disattivazione_e_reload_fuori_dal_thread_gui(env, monkeypatch):
+    import threading
+
+    from klamav_py.gui import off_thread
+
+    monkeypatch.setattr(mw, "run_off_gui_thread", off_thread.run_off_gui_thread)
+    env.calls.timer = True
+    env.calls.answers.append(True)
+    thread_usati = []
+    monkeypatch.setattr(mw, "disable_timer", lambda: thread_usati.append(threading.current_thread()))
+    monkeypatch.setattr(mw, "daemon_reload", lambda: thread_usati.append(threading.current_thread()))
+    page = _page(env, [str(env.home / "vm")])
+    page.enable_check.setChecked(True)
+    page._save_schedule()
+    _attendi(lambda: page.save_btn.isEnabled() and len(thread_usati) == 2)
+    assert all(t is not threading.main_thread() for t in thread_usati)
+    assert env.dropin.exists()
+
+
+def test_label_timer_fuori_dal_thread_gui(env, monkeypatch):
+    sblocca, thread_usati = _systemctl_lento(monkeypatch, "timer_enabled", True)
+    page = mw.SchedulerPage()
+    page.refresh_system_timer()
+    page.refresh_system_timer()  # mentre il primo è in corso: accodato
+    assert page.system_timer_label.isHidden() and page._timer_refresh_again
+    sblocca.set()
+    _attendi(lambda: page.timer_state is True and not page._timer_refresh_running)
+    assert not page.system_timer_label.isHidden()
+    assert len(thread_usati) == 2  # il secondo controllo, non due in parallelo
+
+
+def test_impostazioni_reload_fuori_dal_thread_gui(env, monkeypatch):
+    import time as _time
+
+    from klamav_py.quarantine_location import decide
+
+    # tmp_path sta sotto /tmp: radici volatili neutralizzate, come negli
+    # altri test delle Impostazioni.
+    monkeypatch.setattr(
+        mw, "decide_quarantine_dir",
+        lambda raw, **kw: decide(raw, unit_hidden=(), mountinfo="22 1 8:1 / / rw - ext4 /dev/sda1 rw\n",
+                                 volatile_roots=(), **kw),
+    )
+    sblocca, thread_usati = _systemctl_lento(monkeypatch, "daemon_reload", "Access denied")
+    salvate = []
+    page = mw.SettingsPage()
+    page.settings_saved.connect(lambda: salvate.append(list(page.save_notes)))
+    page.quar_edit.setText(str(env.home / "Quarantena"))
+    inizio = _time.monotonic()
+    page._save_settings()
+    assert _time.monotonic() - inizio < 1
+    assert env.calls.shown == []
+    assert salvate == [] and not page.save_btn.isEnabled()
+    page._save_settings()  # doppio clic durante il reload: ignorato
+    sblocca.set()
+    _attendi(lambda: salvate)
+    assert len(thread_usati) == 1 and "Access denied" in salvate[0][0]
+    assert page.save_btn.isEnabled()
+
+
+def test_avviso_doppia_pianificazione_fuori_dal_thread_gui(env, monkeypatch):
+    import threading
+
+    chiamate, messaggi = [], []
+
+    def run(fn, callback):
+        chiamate.append(fn)
+        callback(True)
+
+    monkeypatch.setattr(mw, "run_off_gui_thread", run)
+    monkeypatch.setattr(mw, "timer_enabled", lambda: pytest.fail("chiamata nel thread GUI"))
+    s = _settings()
+    s.setValue("schedule_enabled", True)
+    s.sync()
+    fake = SimpleNamespace(
+        settings=_settings(),
+        tray_icon=SimpleNamespace(showMessage=lambda *a, **k: messaggi.append(a)),
+        _double_schedule_noted=False,
+        _double_schedule_checking=False,
+    )
+    fake._double_schedule_checked = lambda state: mw.MainWindow._double_schedule_checked(fake, state)
+    # Solo la parte dell'avviso di _load_schedule: il resto usa widget veri.
+    monkeypatch.setattr(mw.MainWindow, "_schedule_last_run", lambda self: 0.0)
+    fake._schedule_last_run = lambda: 0.0
+    fake._update_next_run_label = lambda: None
+    fake._check_schedule = lambda: None
+    fake.schedule_timer = SimpleNamespace(isActive=lambda: True)
+    monkeypatch.setattr(mw.QTimer, "singleShot", staticmethod(lambda *a: None))
+    mw.MainWindow._load_schedule(fake)
+    mw.MainWindow._load_schedule(fake)
+    assert chiamate == [mw.timer_enabled] and len(messaggi) == 1
+    assert threading.current_thread() is threading.main_thread()

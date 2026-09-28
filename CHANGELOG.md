@@ -35,6 +35,11 @@ sono in `docs/CHANGELOG-archive.md`.
   irraggiungibile non blocca più la finestra mentre si scrive il percorso
   o si salva. Durante il controllo il pulsante di salvataggio resta
   disattivato.
+- Le chiamate a `systemctl --user` (stato e disattivazione del timer di
+  sistema, ricarica delle unit dopo il salvataggio di Impostazioni e
+  Pianificazione) non bloccano più la finestra: con il gestore utente di
+  systemd lento o bloccato l'interfaccia poteva restare ferma fino a 10
+  secondi.
 - Con la pianificazione interna attiva, la cartella da scansionare deve
   essere un percorso assoluto di una cartella esistente: un file o un
   percorso relativo venivano salvati, e la scansione poi non partiva o

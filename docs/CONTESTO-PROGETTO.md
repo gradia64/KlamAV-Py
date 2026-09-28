@@ -118,7 +118,8 @@ interna rivalida le esclusioni a ogni avvio, come la CLI (`6a7a326`); la
 rivalidazione è poi passata in `ScanWorker.run()`, estesa alla quarantena,
 e le scansioni programmate non completate non risultano più pulite. La
 pagina Pianificazione non tocca più il filesystem nel thread della GUI, e la
-cartella interna è validata come directory al salvataggio.
+cartella interna è validata come directory al salvataggio. Anche le chiamate
+a `systemctl --user` sono uscite dal thread della GUI.
 
 ---
 
@@ -216,6 +217,12 @@ nulla fa perdere tempo.
   salvataggio disattiva il pulsante finché la validazione non risponde e
   prosegue con i valori letti al clic. Thread daemon e non QThread: un
   controllo bloccato su un mount di rete non deve impedire l'uscita.
+  Stesso meccanismo per `systemctl --user` (timeout 10 s): stato del timer
+  nella label e nel salvataggio, `disable_timer()`, `daemon_reload()` dopo
+  la scrittura del drop-in (Pianificazione e Impostazioni, con
+  `dropin_followup`/`dropin_notes`) e avviso di doppia pianificazione. Il
+  drop-in e le QSettings si scrivono nel thread della GUI (file locali);
+  reload fallito e override estranei restano avvisi mostrati dopo.
 - **Cartella della pianificazione interna**: al salvataggio, con la
   pianificazione interna attiva, dev'essere un percorso assoluto di una
   directory esistente. A ogni scansione la verifica il worker
@@ -278,8 +285,6 @@ una riproduzione o una correzione migliore.
 - **`LOCAL_DB_DIR` fisso su `/var/lib/clamav`** in `db_update_policy.py`: un
   `DatabaseDirectory` personalizzato con TCP su loopback disabilita
   l'aggiornamento con un messaggio fuorviante. Esito comunque sicuro.
-- **`systemctl --user` sincrono nel thread GUI** (`timer_enabled()`,
-  `refresh_system_timer()`), timeout 10 s.
 - **`_copy_across_filesystems`**: un crash fra copia e rename lascia un orfano
   0400 in quarantena e il file infetto al suo posto. Esito sicuro, tenuto
   come nota di comportamento.
