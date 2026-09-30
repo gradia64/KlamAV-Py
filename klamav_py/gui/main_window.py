@@ -20,6 +20,7 @@ import time
 import json
 import html
 from collections import deque
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from PySide6.QtCore import Qt, QSize, QSettings, Signal, QTimer, QFileSystemWatcher, QThread
@@ -1787,6 +1788,15 @@ class HistoryPage(QWidget):
             self.refresh()
 
 
+@dataclass(frozen=True)
+class _ScheduleForm:
+    """Valori della pagina Pianificazione letti al clic su Salva."""
+    enabled: bool
+    interval: int
+    unit: str
+    target: str
+
+
 class SchedulerPage(QWidget):
     schedule_saved = Signal()
 
@@ -2230,31 +2240,38 @@ class SchedulerPage(QWidget):
 
         La validazione tocca il filesystem e gira fuori dal thread della
         GUI; il salvataggio prosegue in _save_validated con i valori letti
-        qui, non con quelli che l'utente scrive nel frattempo.
+        qui (_ScheduleForm), non con quelli che l'utente cambia nel
+        frattempo. Rileggere la casella dopo la validazione salvava la
+        pianificazione interna attiva con una cartella mai validata come
+        tale e senza la domanda sul timer di sistema.
         """
         if self._save_running:
             return
         self._save_running = True
         self.save_btn.setEnabled(False)
-        target_text = self.target_edit.text()
+        form = _ScheduleForm(
+            enabled=self.enable_check.isChecked(),
+            interval=self.interval_spin.value(),
+            unit=self.unit_combo.currentText(),
+            target=self.target_edit.text(),
+        )
         raws = self.excluded_dirs()
-        roots = schedule_roots(target_text)
+        roots = schedule_roots(form.target)
         quarantine_raw = self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))
-        enabled = self.enable_check.isChecked()
 
         def check():
             # Lo stato del timer serve solo se si attiva la pianificazione
             # interna: systemctl --user può impiegare fino a 10 s.
-            state = timer_enabled() if enabled else None
-            return validate_schedule(raws, roots, target_text, quarantine_raw, enabled), state
+            state = timer_enabled() if form.enabled else None
+            return validate_schedule(raws, roots, form.target, quarantine_raw, form.enabled), state
 
-        run_off_gui_thread(check, lambda result: self._save_validated(result, target_text))
+        run_off_gui_thread(check, lambda result: self._save_validated(result, form))
 
     def _save_end(self) -> None:
         self._save_running = False
         self.save_btn.setEnabled(True)
 
-    def _save_validated(self, result, target_text: str) -> None:
+    def _save_validated(self, result, form: "_ScheduleForm") -> None:
         title = "Pianificazione Scansioni"
         # Prima della domanda sul timer: un salvataggio che fallirebbe per
         # la validazione non deve aver già disattivato klamav-scan.timer.
@@ -2275,9 +2292,8 @@ class SchedulerPage(QWidget):
             self._save_end()
             return
 
-        enabled = self.enable_check.isChecked()
-        if not (enabled and timer_state is True):
-            self._save_write(excludes, target_text, enabled, timer_disabled=False)
+        if not (form.enabled and timer_state is True):
+            self._save_write(excludes, form, timer_disabled=False)
             return
         # Tre esiti, non due: chi apre questa pagina solo per le cartelle
         # escluse (che valgono anche per il timer) deve poter salvare
@@ -2298,14 +2314,14 @@ class SchedulerPage(QWidget):
         if answer == QMessageBox.Yes:
             run_off_gui_thread(
                 disable_timer,
-                lambda problem: self._save_timer_disabled(problem, excludes, target_text),
+                lambda problem: self._save_timer_disabled(problem, excludes, form),
             )
         elif answer == QMessageBox.No:
-            self._save_write(excludes, target_text, False, timer_disabled=False)
+            self._save_write(excludes, replace(form, enabled=False), timer_disabled=False)
         else:
             self._save_end()
 
-    def _save_timer_disabled(self, problem, excludes: list[str], target_text: str) -> None:
+    def _save_timer_disabled(self, problem, excludes: list[str], form: "_ScheduleForm") -> None:
         if problem:
             QMessageBox.warning(
                 self,
@@ -2315,9 +2331,9 @@ class SchedulerPage(QWidget):
             )
             self._save_end()
             return
-        self._save_write(excludes, target_text, True, timer_disabled=True)
+        self._save_write(excludes, form, timer_disabled=True)
 
-    def _save_write(self, excludes: list[str], target_text: str, enabled: bool, timer_disabled: bool) -> None:
+    def _save_write(self, excludes: list[str], form: "_ScheduleForm", timer_disabled: bool) -> None:
         # Il timer di sistema usa la stessa lista: drop-in prima di QSettings,
         # e se non si può scrivere non si salva NULLA (GUI e timer
         # escluderebbero cartelle diverse senza che nessuno lo sappia).
@@ -2327,11 +2343,13 @@ class SchedulerPage(QWidget):
             return
         changed, tcp = synced
 
-        self.enable_check.setChecked(enabled)
-        self.settings.setValue("schedule_enabled", enabled)
-        self.settings.setValue("schedule_interval", self.interval_spin.value())
-        self.settings.setValue("schedule_unit", self.unit_combo.currentText())
-        self.settings.setValue("schedule_target", target_text)
+        # La casella mostra ciò che è stato salvato, anche se nel frattempo
+        # l'utente l'aveva cambiata.
+        self.enable_check.setChecked(form.enabled)
+        self.settings.setValue("schedule_enabled", form.enabled)
+        self.settings.setValue("schedule_interval", form.interval)
+        self.settings.setValue("schedule_unit", form.unit)
+        self.settings.setValue("schedule_target", form.target)
         self.settings.setValue(SCHEDULE_EXCLUDES_KEY, excludes)
 
         # Il daemon-reload fallito e gli override estranei sono solo avvisi,

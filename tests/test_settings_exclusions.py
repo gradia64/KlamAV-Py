@@ -743,3 +743,65 @@ def test_avviso_doppia_pianificazione_fuori_dal_thread_gui(env, monkeypatch):
     mw.MainWindow._load_schedule(fake)
     assert chiamate == [mw.timer_enabled] and len(messaggi) == 1
     assert threading.current_thread() is threading.main_thread()
+
+
+# -- valori letti al clic ------------------------------------------------
+
+def _trattenuto(monkeypatch):
+    """run_off_gui_thread che trattiene il lavoro finché il test non lo
+    esegue: l'utente può cambiare i widget durante la validazione."""
+    in_attesa = []
+    monkeypatch.setattr(mw, "run_off_gui_thread", lambda fn, cb: in_attesa.append((fn, cb)))
+
+    def esegui():
+        while in_attesa:
+            fn, cb = in_attesa.pop(0)
+            esegui.corrente = getattr(fn, "__qualname__", "")
+            _inline(fn, cb)
+    esegui.corrente = ""
+    return esegui
+
+
+def test_casella_spuntata_durante_la_validazione_non_conta(env, monkeypatch):
+    # Prima _save_validated rileggeva la casella: si salvava la
+    # pianificazione interna attiva con una cartella mai validata
+    # (require_target era falso) e senza la domanda sul timer di sistema,
+    # cioè con la doppia pianificazione.
+    env.calls.timer = True
+    chiamate_timer = []
+    esegui = _trattenuto(monkeypatch)
+    # Solo le chiamate dalla validazione del salvataggio: la label dello
+    # stato del timer lo interroga comunque.
+    monkeypatch.setattr(
+        mw, "timer_enabled", lambda: chiamate_timer.append(esegui.corrente) or True
+    )
+    page = _page(env)
+    page.enable_check.setChecked(False)
+    page.interval_spin.setValue(6)
+    page.target_edit.setText(str(env.home / "sparita"))
+    page._save_schedule()
+
+    page.enable_check.setChecked(True)
+    page.interval_spin.setValue(48)
+    page.target_edit.setText(str(env.home / "Documenti"))
+    esegui()
+
+    assert not [c for c in chiamate_timer if "_save_schedule" in c]
+    assert _kinds(env) == [] and env.calls.disable == 0
+    s = _settings()
+    assert s.value("schedule_enabled", type=bool) is False
+    assert s.value("schedule_interval", type=int) == 6
+    assert s.value("schedule_target") == str(env.home / "sparita")
+    assert page.enable_check.isChecked() is False  # mostra ciò che è salvato
+
+
+def test_casella_tolta_durante_la_validazione_non_conta(env, monkeypatch):
+    esegui = _trattenuto(monkeypatch)
+    page = _page(env)
+    page.enable_check.setChecked(True)
+    page.target_edit.setText(str(env.home / "Documenti"))
+    page._save_schedule()
+    page.enable_check.setChecked(False)
+    esegui()
+    assert _settings().value("schedule_enabled", type=bool) is True
+    assert _settings().value("schedule_target") == str(env.home / "Documenti")
