@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import QThread, Signal
 
+from ..acknowledged import AckRegistry, PendingReport, ScanAcknowledgements
 from ..clamd_client import (
     ClamdEndpoint,
     ClamdError,
@@ -71,6 +72,13 @@ class ScanWorker(QThread):
     # più alta, già contata in ScanTotals.unreadable_dirs. Non è un errore
     # di scansione, vedi clamd_client._iter_files.
     unreadable_dir = Signal(str, str)
+    # Rilevamento «solo segnalazione» (policy) di cui l'utente ha già preso
+    # visione (percorso, firma): non è un infetto, niente result_ready.
+    acknowledged = Signal(str, str)
+    # Rilevamento «solo segnalazione» nuovo (PendingReport), emesso dopo
+    # result_ready e quarantine_outcome: la pagina Segnalazioni lo offre per
+    # la presa visione o l'eliminazione.
+    report_only_found = Signal(object)
     # Scansione non eseguita o interrotta da un errore bloccante (radice
     # dentro un'esclusione, clamd irraggiungibile, errore di protocollo):
     # emesso prima di finished_scan, che arriva comunque. Chi non mostra
@@ -97,6 +105,7 @@ class ScanWorker(QThread):
         strict_roots: bool = False,
         client_factory: Optional[Callable[..., Any]] = None,
         policy: Optional[QuarantinePolicy] = None,
+        acknowledgements: Optional[AckRegistry] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -125,6 +134,9 @@ class ScanWorker(QThread):
         # Regola "solo segnalazione" (firme euristiche, archivi di posta):
         # la stessa della CLI. Iniettabile per i test.
         self.policy = policy if policy is not None else QuarantinePolicy()
+        # Registro delle prese visione; None = quello predefinito. Letto
+        # solo al primo rilevamento «solo segnalazione».
+        self.acknowledgements = acknowledgements
         self._stop_requested = False
         # Stato di pausa. Letti/scritti da thread diversi (UI e worker):
         # l'assegnazione di un bool è atomica sotto GIL e threading.Event
@@ -267,9 +279,11 @@ class ScanWorker(QThread):
         errors = 0
         too_large = 0
         unreadable_dirs = 0
+        acknowledged = 0
+        acks = ScanAcknowledgements(self.acknowledgements)
 
         def totals() -> ScanTotals:
-            return ScanTotals(scanned, infections, errors, too_large, unreadable_dirs)
+            return ScanTotals(scanned, infections, errors, too_large, unreadable_dirs, acknowledged)
 
         try:
             blocked = self._blocking_problem(quarantine_root)
@@ -361,6 +375,26 @@ class ScanWorker(QThread):
 
                 scanned += 1
 
+                # La policy prima di tutto: decide la quarantena automatica
+                # e quali rilevamenti possono avere una presa visione. Il
+                # registro si consulta solo dopo il suo «solo segnalazione»,
+                # così una presa visione non nasconde mai un rilevamento da
+                # quarantena.
+                decision = None
+                pending = None
+                if result.infected:
+                    decision = self.policy.decide(Path(result.path), result.signature)
+                    if not decision.quarantine:
+                        identity = acks.identify(Path(result.path))
+                        if acks.already_evaluated(identity, result.signature):
+                            acknowledged += 1
+                            self.acknowledged.emit(result.path, result.signature or "")
+                            continue
+                        pending = PendingReport(
+                            result.path, result.signature or "", decision.reason or "",
+                            identity, time.time(),
+                        )
+
                 if result.too_large:
                     # Non è un malfunzionamento: il file supera
                     # StreamMaxLength (clamd.conf) e semplicemente non è
@@ -373,7 +407,6 @@ class ScanWorker(QThread):
 
                 outcome = None
                 if result.infected and self.auto_quarantine and quarantine is not None:
-                    decision = self.policy.decide(Path(result.path), result.signature)
                     if not decision.quarantine:
                         outcome = ("report_only", decision.reason or "")
                     else:
@@ -405,6 +438,9 @@ class ScanWorker(QThread):
                     # quando arriva l'esito che la completa.
                     self.quarantine_outcome.emit(result.path, *outcome)
 
+                if pending is not None:
+                    self.report_only_found.emit(pending)
+
                 now = time.monotonic()
                 if now - last_emit >= PROGRESS_THROTTLE_SECONDS:
                     self.progress.emit(totals())
@@ -426,6 +462,10 @@ class ScanWorker(QThread):
             message = f"Errore di comunicazione con clamd ({self.endpoint.describe()}): {exc}"
             self.error.emit(message)
             self.aborted.emit(message)
+
+        acks.finish()
+        for problem in acks.problems:
+            self.error.emit(f"Prese visione: {problem}")
 
         # Emissione finale non soggetta a throttling: garantisce che i
         # contatori mostrati combacino sempre col totale reale, anche se

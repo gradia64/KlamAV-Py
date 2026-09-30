@@ -43,6 +43,22 @@ la finestra, salvo quando riceve percorsi da scansionare.
 percorsi di
 .B \-\-scan\-target
 all'istanza già attiva e termina subito.
+.PP
+I rilevamenti segnalati ma non spostati (firme euristiche e archivi di
+posta, vedere
+.BR klamav-py (1))
+compaiono nella pagina Segnalazioni.
+Dopo averne verificato uno si può eliminarlo, solo se il percorso è
+ancora lo stesso file regolare rilevato, oppure registrarne la presa
+visione: le scansioni successive, anche quella programmata di sistema,
+non ne contano più il contenuto fra gli infetti.
+La stessa pagina elenca le prese visione e le revoca.
+Dopo aver eliminato un messaggio di un archivio di posta gestito da
+Akonadi (KMail) può servire
+.BR "akonadictl fsck" .
+Le cartelle che non si possono leggere durante una scansione sono
+elencate e contate a parte rispetto agli errori; una cartella da
+scansionare che non si può leggere ferma la scansione.
 .
 .SH OPZIONI
 .BR \-\-socket ,
@@ -121,6 +137,10 @@ o, con TCP,
 .BR PrivateNetwork ,
 vengono segnalati al salvataggio e nella pagina Pianificazione, perché
 rendono inefficaci queste impostazioni o ne vengono sostituiti.
+.TP
+.I \%~/.local/share/klamav-py/acknowledged.json
+Registro delle prese visione, condiviso con
+.BR klamav-py (1).
 .TP
 .I \%/usr/share/applications/klamav-py.desktop
 Voce di menu; il suo nome è anche l'identificativo dell'applicazione

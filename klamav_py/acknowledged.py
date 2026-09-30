@@ -355,6 +355,19 @@ class AckSnapshot:
         return False
 
 
+@dataclass(frozen=True)
+class PendingReport:
+    """Rilevamento «solo segnalazione» nuovo, per la pagina Segnalazioni
+    della GUI. identity è il contenuto riletto subito dopo il rilevamento:
+    la presa visione registra QUELLO, non il contenuto del file al momento
+    del clic; None se non si è potuto rileggere (niente azioni)."""
+    path: str
+    signature: str
+    reason: str
+    identity: Optional[FileIdentity]
+    found_at: float
+
+
 class ScanAcknowledgements:
     """
     Consultazione del registro durante una scansione, condivisa da CLI e

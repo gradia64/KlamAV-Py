@@ -15,6 +15,7 @@ Riscrittura minimale, in Python, dell'idea alla base di KlamAV 0.22 (frontend a 
 - Monitoraggio Real-Time RICORSIVO delle cartelle configurate (QFileSystemWatcher, con espansione delle sottocartelle, riconciliazione periodica dei watch persi e tetto configurabile per non esaurire fs.inotify.max_user_watches).
 - Pausa/Ripresa delle scansioni, guard "una scansione alla volta".
 - Pre-check dimensionale: i file oltre StreamMaxLength sono segnalati "non verificati" senza sprecare la sessione clamd.
+- Presa visione delle segnalazioni non spostate (firme euristiche, archivi di posta): dopo averle verificate non vengono più contate fra gli infetti, finché il contenuto non cambia.
 - Integrazione menu contestuale Dolphin, autostart, system tray, single-instance con IPC.
 - Controllo aggiornamenti dell'applicazione tramite GitHub Releases, manuale o all'avvio.
 
@@ -128,7 +129,22 @@ La directory passata a `--quarantine` è sempre esclusa automaticamente dall'att
 - `--version` — stampa la versione ed esce (opzione globale, non del sottocomando scan).
 - `--no-persistent` / `--session-batch-size N` — controllo della sessione persistente (vedi sezione dedicata).
 
-Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore di esecuzione (clamd irraggiungibile, path inesistente) — utile per OnFailure= in systemd o per script di monitoraggio.
+Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore di esecuzione (clamd irraggiungibile, path inesistente o non leggibile) — utile per OnFailure= in systemd o per script di monitoraggio. Una sottocartella non leggibile non cambia il codice: compare su stderr come `CARTELLA NON LEGGIBILE` e ha un contatore a parte nel riepilogo; se è attesa (cartelle create con sudo, bind mount di container) va esclusa con `--exclude`.
+
+## Segnalazioni non spostate e presa visione
+
+Le firme euristiche (`Heuristics.*`) e i file negli archivi di posta sono solo segnalati, mai spostati in automatico: spostare un messaggio rompe l'archivio del client di posta. Una segnalazione del genere però si ripeteva a ogni scansione, e con il timer di sistema ogni notte arrivava la stessa notifica, finché smetteva di essere guardata.
+
+Dopo aver verificato il file, eliminalo oppure registra la presa visione:
+
+```bash
+journalctl --user -u klamav-scan.service | grep INFETTO
+klamav-py --acknowledge ~/.local/share/local-mail/trash/new/1695.R42.host
+klamav-py --list-acknowledged        # prefisso dell'hash, firma, percorso, date
+klamav-py --unacknowledge 3f2a9c01be47   # per prefisso dell'hash o per percorso
+```
+
+`--acknowledge` riscansiona il file con clamd e registra la presa visione solo se è ancora infetto con un rilevamento «solo segnalazione». Le scansioni successive stampano `GIÀ VALUTATO` e non lo contano fra gli infetti: una segnalazione **nuova** esce ancora con 1 e notifica. La chiave è lo SHA-256 del contenuto più la firma, non il percorso: un messaggio che passa da `new/` a `cur/` resta valutato, un contenuto cambiato torna segnalato, e una presa visione non nasconde mai un rilevamento che andrebbe in quarantena. Le voci che nessuna scansione ritrova da 90 giorni vengono tolte. Registro in `~/.local/share/klamav-py/acknowledged.json` (0600), condiviso con la GUI, dove la pagina **Segnalazioni** offre le stesse azioni (e l'eliminazione, solo se il file è ancora quello rilevato; per un maildir gestito da Akonadi può servire poi `akonadictl fsck`).
 
 ## Sessione persistente, pre-check dimensionale, ricostruzione
 
@@ -158,13 +174,14 @@ A fine scansione la CLI stampa un riepilogo degli errori raggruppati per tipo (e
 
 ## GUI: panoramica dell'interfaccia
 
-Applicazione PySide6 a finestra unica con barra laterale e stile ispirato a KDE Plasma (usa sempre i colori della palette di sistema, mai colori hardcoded, tranne per gli stati semantici come "infetto"). Sette sezioni:
+Applicazione PySide6 a finestra unica con barra laterale e stile ispirato a KDE Plasma (usa sempre i colori della palette di sistema, mai colori hardcoded, tranne per gli stati semantici come "infetto"). Otto sezioni:
 
 - **Scansione** — scansione manuale su un percorso a scelta, in un QThread separato (ScanWorker): la finestra resta reattiva anche su directory grandi, e la barra di stato mostra il file in elaborazione in tempo reale (con elisione del testo per non far crescere il layout su percorsi lunghi). I contatori distinguono scansionati / infetti / errori / non verificati (troppo grandi), e solo infetti/errori/non-verificati producono righe in lista.
 - **Sospendi / Riprendi.** La pausa ha granularità di file intero: il file in streaming viene completato, poi il worker si ferma (il pulsante segue i segnali del worker, non il click, quindi lo stato mostrato è sempre quello effettivo). "Interrompi" resta attivo anche in pausa. Dopo una pausa più lunga di ~25s (vicino all'IdleTimeout di clamd, 30s di default) la sessione viene ricreata proattivamente alla ripresa, per non produrre un errore finto sul primo file. Con la finestra minimizzata in tray, il tooltip dell'icona mostra i contatori della scansione in corso e lo stato di pausa.
 - **Quarantena manuale di default.** La casella "Metti in quarantena automaticamente i file infetti" è disattivata di default: i file segnalati restano dove sono e li sposti tu con "Metti in quarantena i selezionati" — comodo per valutare un falso positivo prima di spostare qualcosa. "Copia log" copia negli appunti tutte le righe della lista (infetti, errori, non verificati).
 - **Cronologia** — registro persistente (~/.local/share/klamav-py/history.json, ultime 1000 voci; la directory è 0700 e i file 0600, perché elencano percorsi e file infetti) con data/ora, tipo, percorso, scansionati, infetti, errori e non verificati. Le scansioni programmate indicizzano anche il log dettagliato su disco (tooltip sulla riga): il dettaglio infetti/errori di una scansione in background, che non passa da nessuna lista UI, resta così sempre ispezionabile.
 - **Quarantena** — legge lo stesso indice JSON usato dalla CLI (index.json nella directory di quarantena): i due strumenti sono intercambiabili sugli stessi dati. Ripristino nella posizione originale (con ripristino dei permessi originali, rifiuto esplicito se il percorso è stato nel frattempo rioccupato) o eliminazione definitiva.
+- **Segnalazioni** — i file rilevati ma lasciati al loro posto (firme euristiche, archivi di posta) nelle scansioni della sessione, con "Ho verificato, non segnalare più" (presa visione, vedi "Segnalazioni non spostate e presa visione") ed "Elimina…" con conferma; sotto, le prese visione registrate, revocabili.
 - **Aggiornamenti** — scarica le definizioni virus lanciando `freshclam --stdout` tramite pkexec (autenticazione PolicyKit), fermando il demone clamav-freshclam/freshclam di sistema per evitare conflitti di lock sul file di log e riavviandolo alla fine. Dalla 0.1.7 il riavvio avviene anche se l'aggiornamento viene interrotto (logout, segnale), e riguarda solo i servizi che erano attivi prima: un demone fermato di proposito resta fermo. Output mostrato in tempo reale. Scegliendo "Esci" durante l'aggiornamento, l'app si chiude appena termina invece di interromperlo. Di default parte automaticamente 1.5s dopo l'avvio dell'app (disattivabile in Impostazioni).
 - **Real-Time** — log delle scansioni automatiche sulle cartelle monitorate (configurabili in Impostazioni). Usa QFileSystemWatcher: creazione/modifica di un file → scansione dopo un debounce di 3s (per non scansionare file ancora in scrittura), e i file infetti vengono sempre messi in quarantena automaticamente. I file troppo grandi sono etichettati "Non verificato", non "Sicuro" (vedi scelte di design).
 - **Pianificazione** — scansione ricorrente (ogni N ore o giorni) su una cartella a scelta, tramite QTimer interno: richiede l'app in esecuzione (anche minimizzata in tray). Durante l'esecuzione la pagina mostra lo stato e i contatori live; il tooltip della tray riflette l'avanzamento; a fine scansione il log dettagliato viene scritto in ~/.local/share/klamav-py/logs/scheduled-<timestamp>.log (rotazione: ultime 10 esecuzioni) e referenziato in Cronologia. Non è un timer di sistema come quello del pacchetto .deb, che funziona anche a GUI chiusa (vedi "Scansioni pianificate: i tre meccanismi").

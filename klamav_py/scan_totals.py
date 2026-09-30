@@ -25,6 +25,9 @@ class ScanTotals:
     # Sottocartelle che non si sono potute leggere (vedi
     # clamd_client._iter_files): copertura mancante, ma fuori da «errori».
     unreadable_dirs: int = 0
+    # Rilevamenti «solo segnalazione» già valutati dall'utente
+    # (acknowledged.py): non contano fra gli infetti.
+    acknowledged: int = 0
 
     def as_entry(self) -> dict:
         return asdict(self)

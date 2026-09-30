@@ -236,7 +236,8 @@ def _fake_window(creati, messaggi=None):
             creati.append(kw)
             for name in (
                 "result_ready", "progress", "finished_scan", "quarantined",
-                "quarantine_outcome", "aborted", "unreadable_dir",
+                "quarantine_outcome", "aborted", "unreadable_dir", "acknowledged",
+                "report_only_found",
             ):
                 setattr(self, name, _Signal())
 
@@ -261,6 +262,7 @@ def _fake_window(creati, messaggi=None):
         _on_bg_result=None, _on_bg_progress=None, _on_bg_finished=None,
         _on_quarantine_changed=None, _on_bg_quarantine_outcome=None,
         _on_bg_aborted=None, _on_bg_unreadable_dir=None,
+        _on_bg_acknowledged=None, _on_bg_report_only=None,
     )
     return FakeWorker, fake
 

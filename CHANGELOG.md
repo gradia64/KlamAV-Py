@@ -16,6 +16,23 @@ sono in `docs/CHANGELOG-archive.md`.
   darebbero sempre gli stessi errori e nasconderebbero quelli nuovi. Se
   sono attese, basta escluderle. Il codice di uscita della CLI non cambia.
 
+### Aggiunto
+- **Presa visione delle segnalazioni non spostate.** Le firme euristiche e
+  i file negli archivi di posta sono solo segnalati, e la stessa
+  segnalazione tornava a ogni scansione: con il timer di sistema, la
+  stessa notifica ogni notte (il caso d'origine: due email di phishing
+  rimaste nel cestino di KMail). Dopo aver verificato il file si può
+  registrarne la presa visione, con `klamav-py --acknowledge PERCORSO` o
+  dalla nuova pagina Segnalazioni: le scansioni successive lo riportano
+  come «già valutato» e non lo contano fra gli infetti, finché il
+  contenuto non cambia. Una segnalazione nuova notifica come prima, e una
+  presa visione non nasconde mai un file che andrebbe in quarantena.
+  `--list-acknowledged` e `--unacknowledge` elencano e revocano; le voci
+  non più ritrovate da 90 giorni si tolgono da sole.
+- Pagina **Segnalazioni** nella finestra: i file solo segnalati dalle
+  scansioni della sessione, con presa visione ed eliminazione (solo se il
+  file è ancora quello rilevato), e l'elenco delle prese visione.
+
 ### Corretto
 - **Scansione pulita di una cartella che non si può leggere.** Una
   cartella da scansionare di un altro utente, o senza permesso di

@@ -61,8 +61,16 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from ..acknowledged import (
+    HASH_PREFIX_LEN,
+    AckRegistry,
+    PendingReport,
+    RegistryError,
+    delete_if_same,
+)
 from ..clamd_client import DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult
 from ..quarantine import Quarantine, peek_entries
+from ..quarantine_policy import REASON_MAIL_STORE
 from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
 from ..scan_exclusions import decide as decide_exclusion
 from ..scan_totals import ScanTotals
@@ -334,6 +342,17 @@ UNREADABLE_DIRS_HINT = (
 )
 
 
+REPORTS_HINT = (
+    "Alcuni file sono stati solo segnalati e lasciati al loro posto: dopo averli "
+    "verificati, puoi eliminarli o registrarne la presa visione dalla pagina Segnalazioni."
+)
+
+
+def _acknowledged_line(path: str, signature: str) -> str:
+    """Riga di log per una segnalazione già valutata (acknowledged.py)."""
+    return f"GIÀ VALUTATO — {path} ({signature})"
+
+
 def _unreadable_dir_line(path: str, reason: str) -> str:
     """Riga di log per una cartella non leggibile, uguale nella lista della
     pagina Scansione e nel log delle scansioni programmate."""
@@ -348,6 +367,8 @@ def _totals_summary(totals: ScanTotals) -> str:
         text += f", {totals.too_large} non verificati"
     if totals.unreadable_dirs:
         text += f", {totals.unreadable_dirs} cartelle non leggibili"
+    if totals.acknowledged:
+        text += f", {totals.acknowledged} già valutati"
     return text
 
 
@@ -957,6 +978,7 @@ class ScanPage(QWidget):
         self.results_list.clear()
         self._omitted_errors = self._omitted_too_large = 0
         self._non_infected_rows = 0
+        self._new_reports = 0
         self.progress.setVisible(True)
         self._set_status_text("Scansione in corso…")
         self._scanned = self._infections = self._errors = self._too_large = 0
@@ -991,6 +1013,8 @@ class ScanPage(QWidget):
         self.worker.quarantine_outcome.connect(self._on_quarantine_outcome)
         self.worker.error.connect(self._on_error)
         self.worker.unreadable_dir.connect(self._on_unreadable_dir)
+        self.worker.acknowledged.connect(self._on_acknowledged)
+        self.worker.report_only_found.connect(self._on_report_only)
         self.worker.finished_scan.connect(self._on_finished)
         # I segnali paused/resumed (non le richieste pause()/resume())
         # comandano lo stato del pulsante: il worker li emette quando
@@ -1147,6 +1171,19 @@ class ScanPage(QWidget):
         item.setIcon(QIcon.fromTheme("data-error"))
         self.results_list.addItem(item)
 
+    def _on_acknowledged(self, path: str, signature: str) -> None:
+        item = QListWidgetItem(_acknowledged_line(path, signature))
+        item.setIcon(QIcon.fromTheme("emblem-checked"))
+        item.setForeground(_mid_color(self))
+        self.results_list.addItem(item)
+        self.results_list.scrollToBottom()
+
+    def _on_report_only(self, report: PendingReport) -> None:
+        self._new_reports = getattr(self, "_new_reports", 0) + 1
+        main_window = self.window()
+        if hasattr(main_window, "reports_page"):
+            main_window.reports_page.add_report(report)
+
     def _on_unreadable_dir(self, path: str, reason: str) -> None:
         # Fuori dal tetto MAX_RESULT_ROWS: se ne riporta solo la cartella
         # più alta (os.walk non scende in una cartella illeggibile), quindi
@@ -1243,6 +1280,8 @@ class ScanPage(QWidget):
             status_text += f" {too_large} non verificati (troppo grandi)."
         if totals.unreadable_dirs:
             status_text += f" {totals.unreadable_dirs} cartelle non leggibili."
+        if totals.acknowledged:
+            status_text += f" {totals.acknowledged} già valutati."
         self._set_status_text(status_text)
 
         omessi_err = getattr(self, "_omitted_errors", 0)
@@ -1280,7 +1319,9 @@ class ScanPage(QWidget):
             f"Non verificati (troppo grandi): {too_large}\n"
             + (f"Cartelle non leggibili: {totals.unreadable_dirs} "
                f"({UNREADABLE_DIRS_HINT})\n" if totals.unreadable_dirs else "")
+            + (f"Segnalazioni già valutate: {totals.acknowledged}\n" if totals.acknowledged else "")
             + f"Esito: {esito}"
+            + (f"\n\n{REPORTS_HINT}" if getattr(self, "_new_reports", 0) else "")
         )
 
         self.history.add_entry("Manuale", self.path_edit.text(), totals)
@@ -1450,6 +1491,226 @@ class QuarantinePage(QWidget):
             QMessageBox.warning(self, "Eliminazione fallita", str(exc))
             return
         self.refresh()
+
+
+class ReportsPage(QWidget):
+    """
+    Segnalazioni non spostate (firme euristiche, archivi di posta: vedi
+    quarantine_policy) e prese visione (acknowledged.py).
+
+    Le segnalazioni arrivano dalle scansioni di questa sessione (manuale,
+    programmata interna, Real-Time) con due azioni: la presa visione, che
+    registra il contenuto riletto subito dopo il rilevamento (non quello
+    del file al momento del clic), e l'eliminazione, solo se il percorso è
+    ancora lo stesso file regolare. Il caso d'origine è la posta nel
+    cestino, dove l'azione giusta è eliminare e prima l'unico modo era
+    cercare il file a mano nel maildir.
+    """
+
+    def __init__(self, registry: AckRegistry | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self.registry = registry if registry is not None else AckRegistry()
+        self._pending: list[PendingReport] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(15)
+
+        title = QLabel("Segnalazioni")
+        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            "File rilevati ma lasciati al loro posto (firme euristiche e archivi di posta). "
+            "Dopo averli verificati puoi eliminarli, oppure registrare la presa visione: le "
+            "scansioni successive, anche quella di sistema, non li contano più fra gli infetti "
+            "finché il contenuto non cambia."
+        )
+        desc.setStyleSheet("font-size: 14px; color: palette(mid);")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        self.pending_table = QTableWidget(0, 3)
+        self.pending_table.setHorizontalHeaderLabels(["File", "Firma", "Rilevato"])
+        self.pending_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.pending_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.pending_table.setTextElideMode(Qt.ElideMiddle)
+        self.pending_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.pending_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.pending_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.pending_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.pending_table, 1)
+
+        self.ack_button = QPushButton("Ho verificato, non segnalare più")
+        self.ack_button.setIcon(QIcon.fromTheme("dialog-ok-apply"))
+        self.ack_button.clicked.connect(self._acknowledge_selected)
+        self.delete_button = QPushButton("Elimina…")
+        self.delete_button.setIcon(QIcon.fromTheme("edit-delete"))
+        self.delete_button.clicked.connect(self._delete_selected)
+        pending_row = QHBoxLayout()
+        pending_row.addWidget(self.ack_button)
+        pending_row.addWidget(self.delete_button)
+        pending_row.addStretch()
+        layout.addLayout(pending_row)
+
+        ack_title = QLabel("Prese visione")
+        ack_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        layout.addWidget(ack_title)
+
+        self.ack_table = QTableWidget(0, 5)
+        self.ack_table.setHorizontalHeaderLabels(
+            ["Impronta", "Firma", "Primo percorso", "Presa visione", "Ultimo riscontro"]
+        )
+        self.ack_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.ack_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.ack_table.setTextElideMode(Qt.ElideMiddle)
+        self.ack_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.ack_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.ack_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.ack_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.ack_table, 1)
+
+        refresh_button = QPushButton("Aggiorna")
+        refresh_button.setIcon(QIcon.fromTheme("view-refresh"))
+        refresh_button.clicked.connect(self.refresh_acknowledged)
+        self.revoke_button = QPushButton("Revoca")
+        self.revoke_button.setIcon(QIcon.fromTheme("edit-undo"))
+        self.revoke_button.clicked.connect(self._revoke_selected)
+        ack_row = QHBoxLayout()
+        ack_row.addWidget(refresh_button)
+        ack_row.addWidget(self.revoke_button)
+        ack_row.addStretch()
+        layout.addLayout(ack_row)
+
+        self._refresh_pending()
+        self.refresh_acknowledged()
+
+    # -- segnalazioni da valutare ------------------------------------------
+
+    def add_report(self, report: PendingReport) -> None:
+        """Una riga per file e firma: una nuova scansione dello stesso file
+        sostituisce la riga, con l'identità appena riletta."""
+        self._pending = [
+            r for r in self._pending
+            if (r.path, r.signature) != (report.path, report.signature)
+        ]
+        self._pending.append(report)
+        self._refresh_pending()
+
+    def pending(self) -> list[PendingReport]:
+        return list(self._pending)
+
+    def _refresh_pending(self) -> None:
+        self.pending_table.setRowCount(len(self._pending))
+        for row, report in enumerate(self._pending):
+            when = datetime.fromtimestamp(report.found_at).strftime("%Y-%m-%d %H:%M")
+            item = QTableWidgetItem(report.path)
+            if report.identity is None:
+                item.setToolTip("Il file non si è potuto rileggere dopo il rilevamento: "
+                                "nessuna azione possibile da qui.")
+            else:
+                item.setToolTip(f"{report.path}\n{report.reason}")
+            self.pending_table.setItem(row, 0, item)
+            self.pending_table.setItem(row, 1, QTableWidgetItem(report.signature))
+            self.pending_table.setItem(row, 2, QTableWidgetItem(when))
+
+    def _selected_reports(self) -> list[PendingReport]:
+        rows = sorted({i.row() for i in self.pending_table.selectedIndexes()})
+        return [self._pending[r] for r in rows if r < len(self._pending)]
+
+    def _acknowledge_selected(self) -> None:
+        title = "Presa visione"
+        reports = self._selected_reports()
+        if not reports:
+            QMessageBox.information(self, title, "Seleziona una o più segnalazioni.")
+            return
+        done = []
+        for report in reports:
+            if report.identity is None:
+                QMessageBox.warning(
+                    self, title,
+                    f"{report.path}: il file non si è potuto rileggere dopo il rilevamento, "
+                    "la presa visione non è registrabile. Rilancia la scansione.",
+                )
+                continue
+            try:
+                self.registry.acknowledge(report.identity.sha256, report.signature, Path(report.path))
+            except (RegistryError, OSError) as exc:
+                QMessageBox.warning(self, title, f"{report.path}: {exc}")
+                continue
+            done.append((report.identity.sha256, report.signature))
+        # Lo stesso contenuto in altri percorsi è ora valutato anch'esso.
+        self._pending = [
+            r for r in self._pending
+            if r.identity is None or (r.identity.sha256, r.signature) not in done
+        ]
+        self._refresh_pending()
+        self.refresh_acknowledged()
+
+    def _delete_selected(self) -> None:
+        title = "Elimina file"
+        reports = self._selected_reports()
+        if len(reports) != 1:
+            QMessageBox.information(self, title, "Seleziona una segnalazione alla volta.")
+            return
+        (report,) = reports
+        if report.identity is None:
+            QMessageBox.warning(
+                self, title,
+                f"{report.path}: il file non si è potuto rileggere dopo il rilevamento, "
+                "quindi non si può verificare che sia ancora lo stesso. Non eliminato.",
+            )
+            return
+        text = f"Eliminare definitivamente {report.path}?\n\nNon passa dal cestino."
+        if report.reason == REASON_MAIL_STORE:
+            text += (
+                "\n\nÈ un file di un archivio di posta: se è gestito da Akonadi (KMail), "
+                "dopo l'eliminazione può servire «akonadictl fsck»."
+            )
+        if QMessageBox.question(self, title, text) != QMessageBox.Yes:
+            return
+        try:
+            delete_if_same(Path(report.path), report.identity)
+        except (RegistryError, OSError) as exc:
+            QMessageBox.warning(self, title, str(exc))
+            return
+        self._pending = [r for r in self._pending if r is not report]
+        self._refresh_pending()
+
+    # -- prese visione -----------------------------------------------------
+
+    def refresh_acknowledged(self) -> None:
+        try:
+            entries = self.registry.entries()
+        except OSError as exc:
+            entries = []
+            QMessageBox.warning(self, "Prese visione", f"Registro non leggibile: {exc}")
+        self._ack_entries = entries
+        self.ack_table.setRowCount(len(entries))
+        for row, e in enumerate(entries):
+            values = (
+                e.sha256[:HASH_PREFIX_LEN],
+                e.signature,
+                e.first_path,
+                datetime.fromtimestamp(e.acknowledged_at).strftime("%Y-%m-%d"),
+                datetime.fromtimestamp(e.last_seen).strftime("%Y-%m-%d"),
+            )
+            for col, value in enumerate(values):
+                self.ack_table.setItem(row, col, QTableWidgetItem(value))
+            self.ack_table.item(row, 0).setToolTip(e.sha256)
+            self.ack_table.item(row, 2).setToolTip(e.first_path)
+
+    def _revoke_selected(self) -> None:
+        rows = sorted({i.row() for i in self.ack_table.selectedIndexes()})
+        keys = [self._ack_entries[r].key for r in rows if r < len(self._ack_entries)]
+        if not keys:
+            QMessageBox.information(self, "Revoca", "Seleziona una o più prese visione.")
+            return
+        try:
+            self.registry.revoke(keys)
+        except OSError as exc:
+            QMessageBox.warning(self, "Revoca", f"Registro non scrivibile: {exc}")
+        self.refresh_acknowledged()
 
 
 class UpdatePage(QWidget):
@@ -1717,10 +1978,10 @@ class HistoryPage(QWidget):
         layout.addWidget(desc)
         layout.addSpacing(10)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(
             ["Data e Ora", "Tipo", "Percorso", "Scansionati", "Infetti", "Errori", "Non verificati",
-             "Cartelle non leggibili"]
+             "Cartelle non leggibili", "Già valutati"]
         )
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1770,10 +2031,10 @@ class HistoryPage(QWidget):
             # get() con default 0: le voci scritte prima dell'introduzione
             # del campo too_large non avevano questa chiave.
             self.table.setItem(row, 6, QTableWidgetItem(str(entry.get("too_large", 0))))
-            # Idem per unreadable_dirs (0.1.13).
-            self.table.setItem(
-                row, 7, QTableWidgetItem(str(ScanTotals.from_entry(entry).unreadable_dirs))
-            )
+            # Idem per unreadable_dirs e acknowledged (0.1.13).
+            totals = ScanTotals.from_entry(entry)
+            self.table.setItem(row, 7, QTableWidgetItem(str(totals.unreadable_dirs)))
+            self.table.setItem(row, 8, QTableWidgetItem(str(totals.acknowledged)))
 
             # Il log dettagliato (se esiste) è raggiungibile dal tooltip
             # sulla riga: senza questo, il riferimento nel JSON sarebbe
@@ -3124,6 +3385,7 @@ class MainWindow(QMainWindow):
         self._add_sidebar_item("Scansione", "edit-find", "document-search")
         self._add_sidebar_item("Cronologia", "view-history", "document-open-recent")
         self._add_sidebar_item("Quarantena", "emblem-virus", "emblem-lock", "user-trash", "edit-delete")
+        self._add_sidebar_item("Segnalazioni", "dialog-warning", "emblem-important")
         self._add_sidebar_item("Aggiornamenti", "system-software-update", "view-refresh")
         self._add_sidebar_item("Real-Time", "view-history", "chronometer")
         self._add_sidebar_item("Pianificazione", "view-time-schedule", "task-recurring")
@@ -3138,6 +3400,7 @@ class MainWindow(QMainWindow):
         self.scan_page = ScanPage(self._clamd_endpoint(), quarantine, self.history_manager)
         self.history_page = HistoryPage(self.history_manager)
         self.quarantine_page = QuarantinePage(quarantine)
+        self.reports_page = ReportsPage()
         self.update_page = UpdatePage(self._clamd_endpoint)
         self.realtime_page = RealTimePage()
         self.scheduler_page = SchedulerPage()
@@ -3150,6 +3413,7 @@ class MainWindow(QMainWindow):
         self.content_stack.addWidget(self.scan_page)
         self.content_stack.addWidget(self.history_page)
         self.content_stack.addWidget(self.quarantine_page)
+        self.content_stack.addWidget(self.reports_page)
         self.content_stack.addWidget(self.update_page)
         self.content_stack.addWidget(self.realtime_page)
         self.content_stack.addWidget(self.scheduler_page)
@@ -3177,6 +3441,9 @@ class MainWindow(QMainWindow):
         # arriva alla fine, non a ogni nuovo tentativo al minuto.
         self._schedule_aborted_noted = False
         self._bg_aborted: str | None = None
+        # Segnalazioni «solo segnalazione» nuove della scansione programmata
+        # in corso: la notifica finale rimanda alla pagina Segnalazioni.
+        self._bg_new_reports = 0
         self._double_schedule_noted = False
         self._double_schedule_checking = False
         self.bg_worker = None
@@ -3694,6 +3961,7 @@ X-GNOME-Autostart-enabled=true
         self.scheduler_page.update_progress(f"In corso dal {datetime.now():%H:%M} — avvio…")
         self._bg_log_close()
         self._bg_log_path = None
+        self._bg_new_reports = 0
         self.bg_worker = ScanWorker(
             endpoint=self._clamd_endpoint(),
             # Risolta dal worker (strict_roots): le esclusioni sono
@@ -3713,6 +3981,8 @@ X-GNOME-Autostart-enabled=true
         self.bg_worker.progress.connect(self._on_bg_progress)
         self.bg_worker.aborted.connect(self._on_bg_aborted)
         self.bg_worker.unreadable_dir.connect(self._on_bg_unreadable_dir)
+        self.bg_worker.acknowledged.connect(self._on_bg_acknowledged)
+        self.bg_worker.report_only_found.connect(self._on_bg_report_only)
         self.bg_worker.finished_scan.connect(self._on_bg_finished)
         self.bg_worker.quarantined.connect(self._on_quarantine_changed)
         self.bg_worker.quarantine_outcome.connect(self._on_bg_quarantine_outcome)
@@ -3784,6 +4054,13 @@ X-GNOME-Autostart-enabled=true
     def _on_bg_unreadable_dir(self, path: str, reason: str) -> None:
         self._bg_log_write(_unreadable_dir_line(path, reason))
 
+    def _on_bg_acknowledged(self, path: str, signature: str) -> None:
+        self._bg_log_write(_acknowledged_line(path, signature))
+
+    def _on_bg_report_only(self, report: PendingReport) -> None:
+        self._bg_new_reports += 1
+        self.reports_page.add_report(report)
+
     def _on_bg_progress(self, totals: ScanTotals) -> None:
         # Visibilità della scansione background: label in Pianificazione +
         # tooltip della tray (già throttled lato worker a 150ms).
@@ -3806,6 +4083,8 @@ X-GNOME-Autostart-enabled=true
             if totals.unreadable_dirs:
                 status += (f" {totals.unreadable_dirs} cartelle non leggibili "
                            "(elenco nel log; se sono attese, escludile).")
+            if getattr(self, "_bg_new_reports", 0):
+                status += " Alcuni file sono stati solo segnalati: vedi la pagina Segnalazioni."
             self.tray_icon.showMessage(
                 APP_NAME, status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000
             )
@@ -4250,6 +4529,8 @@ X-GNOME-Autostart-enabled=true
         )
         self.realtime_worker.result_ready.connect(self._on_realtime_result)
         self.realtime_worker.finished_scan.connect(self._on_realtime_finished)
+        self.realtime_worker.acknowledged.connect(self._on_realtime_acknowledged)
+        self.realtime_worker.report_only_found.connect(self.reports_page.add_report)
         self.realtime_worker.quarantined.connect(self._on_quarantine_changed)
         self.realtime_worker.quarantine_outcome.connect(self._on_realtime_quarantine_outcome)
         self.realtime_worker.start()
@@ -4287,7 +4568,9 @@ X-GNOME-Autostart-enabled=true
             icon = _icon("emblem-virus")
         elif outcome == "report_only":
             title = f"{APP_NAME} - File sospetto"
-            text = f"{name}: rilevato ma NON messo in quarantena ({detail}). Verificalo manualmente."
+            text = (f"{name}: rilevato ma NON messo in quarantena ({detail}). "
+                    "Verificalo: puoi eliminarlo o registrarne la presa visione dalla "
+                    "pagina Segnalazioni.")
             icon = _icon("dialog-warning", "emblem-virus")
         else:
             title = f"{APP_NAME} - MINACCIA RILEVATA!"
@@ -4300,6 +4583,10 @@ X-GNOME-Autostart-enabled=true
             self.realtime_page.add_outcome_entry(f"NON messo in quarantena — {detail}", warning=True)
         else:
             self.realtime_page.add_outcome_entry(f"quarantena FALLITA — {detail}", warning=True)
+
+    def _on_realtime_acknowledged(self, path: str, signature: str) -> None:
+        # Nessuna notifica: l'utente l'ha già valutato.
+        self.realtime_page.add_log_entry(Path(path).name, False, status="Già valutato")
 
     def _on_realtime_finished(self, totals: ScanTotals) -> None:
         self.history_manager.add_entry("Real-Time", self._current_realtime_target, totals)
