@@ -15,6 +15,14 @@ File di servizio nella directory (tutti 0600, directory 0700):
   .<nome>.intent              intento di una quarantena in corso (vedi
                               _write_intent e recover_interrupted)
   .<nome>.copy                la stessa quarantena procede per copia
+  .<nome>.intent.corrupt-<...> intento non valido messo da parte (mai
+                              cancellato, come index.json.corrupt-*)
+
+Fiducia: .intent ha la stessa fiducia di index.json. Si valida con le
+stesse regole prima di usarne un campo (_entry_problem), e i percorsi che
+il recupero tocca fuori dalla quarantena devono avere la forma che
+quarantine_file scrive. Un intento non valido non deve far sollevare il
+costruttore: la GUI non si avvierebbe più e la CLI uscirebbe con 1.
 """
 
 from __future__ import annotations
@@ -22,7 +30,9 @@ from __future__ import annotations
 import errno
 import fcntl
 import json
+import math
 import os
+import re
 import stat
 import time
 import uuid
@@ -64,6 +74,37 @@ class QuarantineEntry:
 
 _ENTRY_FIELDS = {f.name for f in fields(QuarantineEntry)}
 _REQUIRED_FIELDS = {"original_path", "quarantined_path", "timestamp"}
+# Nome temporaneo dell'originale nella quarantena per copia, come lo
+# scrive quarantine_file: l'unico che il recupero può cancellare.
+_STAGING_NAME = re.compile(r"\.klamav-quarantena-[0-9a-f]{32}")
+INTENT_CORRUPT_INFIX = f"{INTENT_SUFFIX}.corrupt-"
+
+
+def _is_int(value) -> bool:
+    # bool è una sottoclasse di int: True non è un permesso né un inode.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _entry_problem(item) -> Optional[str]:
+    """Motivo per cui un dizionario non è una voce valida (dell'indice o
+    di un intento), o None. Regole condivise fra _parse_index e il
+    recupero: l'intento ha la stessa fiducia dell'indice."""
+    if not isinstance(item, dict) or not _REQUIRED_FIELDS <= item.keys():
+        return "voce malformata"
+    for key in ("original_path", "quarantined_path"):
+        value = item[key]
+        if not isinstance(value, str) or not value or "\0" in value:
+            return f"{key} non valido"
+    timestamp = item["timestamp"]
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) \
+            or not math.isfinite(timestamp):
+        return "timestamp non valido"
+    if not isinstance(item.get("signature"), (str, type(None))):
+        return "signature non valida"
+    mode = item.get("original_mode")
+    if mode is not None and not (_is_int(mode) and 0 <= mode <= 0o7777):
+        return "original_mode non valido"
+    return None
 
 
 class QuarantineError(RuntimeError):
@@ -71,6 +112,10 @@ class QuarantineError(RuntimeError):
 
 
 class _CorruptIndex(Exception):
+    pass
+
+
+class _InvalidIntent(Exception):
     pass
 
 
@@ -165,19 +210,14 @@ class Quarantine:
 
         entries = []
         for n, item in enumerate(raw):
-            if not isinstance(item, dict) or not _REQUIRED_FIELDS <= item.keys():
-                raise _CorruptIndex(f"voce {n} malformata")
+            problem = _entry_problem(item)
+            if problem is not None:
+                raise _CorruptIndex(f"voce {n}: {problem}")
             # Campi sconosciuti ignorati invece di far fallire tutto: un
             # indice scritto da una versione più recente resta leggibile
             # dopo un downgrade.
             known = {k: v for k, v in item.items() if k in _ENTRY_FIELDS}
             known.setdefault("signature", None)
-            if not (isinstance(known["original_path"], str)
-                    and isinstance(known["quarantined_path"], str)
-                    and isinstance(known["timestamp"], (int, float))
-                    and isinstance(known["signature"], (str, type(None)))
-                    and isinstance(known.get("original_mode"), (int, type(None)))):
-                raise _CorruptIndex(f"voce {n}: tipi non validi")
             entries.append(QuarantineEntry(**known))
         return entries
 
@@ -292,7 +332,15 @@ class Quarantine:
                     continue
                 dest_name = intent.name[1:-len(INTENT_SUFFIX)]
                 mark = self.dir / f".{dest_name}{COPY_MARK_SUFFIX}"
-                outcome = self._recover_one(os.read(fd, 64 * 1024), copying=mark.exists())
+                try:
+                    outcome = self._recover_one(os.read(fd, 64 * 1024), copying=mark.exists())
+                except Exception as exc:  # noqa: BLE001 - mai dal costruttore
+                    # Intento non valido o errore imprevisto: l'intento si
+                    # mette da parte (mai cancellato) e dest, se c'è, resta
+                    # dov'è, visibile in orphans(). Il segno di copia resta
+                    # accanto per chi recupera a mano.
+                    done.append(self._set_aside_intent(intent, dest_name, exc))
+                    continue
                 mark.unlink(missing_ok=True)
                 intent.unlink(missing_ok=True)
                 if outcome is not None:
@@ -302,26 +350,56 @@ class Quarantine:
         self.recovered.extend(done)
         return done
 
+    def _set_aside_intent(self, intent: Path, dest_name: str, exc: Exception) -> Tuple[Path, str]:
+        backup = self.dir / (
+            f"{intent.name}.corrupt-"
+            f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        )
+        try:
+            os.rename(intent, backup)
+            where = f"intento messo da parte in {backup.name}"
+        except OSError as rename_exc:
+            where = f"intento lasciato al suo posto ({rename_exc})"
+        return (self.dir / dest_name, f"non recuperata: {exc}; {where}")
+
     def _recover_one(self, raw: bytes, copying: bool) -> Optional[Tuple[Path, str]]:
         """Esito del recupero di un intento, o None se non c'era niente da
-        fare (l'operazione non aveva ancora toccato il file)."""
+        fare (l'operazione non aveva ancora toccato il file).
+
+        _InvalidIntent per un intento completo ma non valido: lo si mette
+        da parte invece di usarne i campi (vedi docstring del modulo)."""
         try:
             record = json.loads(raw.decode("utf-8"))
-            dest = self.dir / Path(record["quarantined_path"]).name
-            original = Path(record["original_path"])
-            staging = Path(record["staging"])
-            identity = (int(record["dev"]), int(record["ino"]))
-            entry = QuarantineEntry(
-                original_path=str(original),
-                quarantined_path=str(dest),
-                signature=record.get("signature"),
-                timestamp=float(record["timestamp"]),
-                original_mode=record.get("original_mode"),
-            )
-        except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+        except (UnicodeDecodeError, ValueError):
             # Intento scritto a metà: il crash è avvenuto prima del fsync,
             # quindi prima di toccare il file.
             return None
+        problem = _entry_problem(record)
+        if problem is not None:
+            raise _InvalidIntent(problem)
+        original = Path(record["original_path"])
+        if not original.is_absolute():
+            raise _InvalidIntent("original_path non assoluto")
+        staging_raw = record.get("staging")
+        if not isinstance(staging_raw, str) or "\0" in staging_raw:
+            raise _InvalidIntent("staging non valido")
+        staging = Path(staging_raw)
+        # staging non è un percorso libero: è l'unico file fuori dalla
+        # quarantena che il recupero può cancellare.
+        if staging.parent != original.parent or not _STAGING_NAME.fullmatch(staging.name):
+            raise _InvalidIntent("staging fuori posto")
+        dev, ino = record.get("dev"), record.get("ino")
+        if not (_is_int(dev) and _is_int(ino) and dev >= 0 and ino >= 0):
+            raise _InvalidIntent("dev/ino non validi")
+        identity = (dev, ino)
+        dest = self.dir / Path(record["quarantined_path"]).name
+        entry = QuarantineEntry(
+            original_path=str(original),
+            quarantined_path=str(dest),
+            signature=record.get("signature"),
+            timestamp=float(record["timestamp"]),
+            original_mode=record.get("original_mode"),
+        )
 
         try:
             dest_st = os.lstat(dest)
@@ -337,6 +415,7 @@ class Quarantine:
                 return False
             return (st.st_dev, st.st_ino) == identity
 
+        outcome = "completata"
         if not copying:
             # dest esiste solo se il rename è avvenuto. Un inode diverso è
             # la sostituzione gestita da _handle_substitution, interrotta:
@@ -362,12 +441,19 @@ class Quarantine:
                 # Originale già rinominato col nome temporaneo ma non
                 # cancellato: la copia completa è in quarantena.
                 staging.unlink()
+            elif os.path.lexists(staging):
+                # Un'applicazione ha salvato con temporaneo+rename fra la
+                # copia e il rename in staging: in staging c'è il file
+                # NUOVO dell'utente. La copia infetta è legittima, staging
+                # non si tocca.
+                outcome = (f"completata; {staging} non è il file verificato, "
+                           "lasciato per il recupero manuale")
 
         entries = self._load_index()
         if not any(e.quarantined_path == str(dest) for e in entries):
             entries.append(entry)
             self._write_index(entries)
-        return (dest, "completata")
+        return (dest, outcome)
 
     # -- quarantena ------------------------------------------------------
 
@@ -676,6 +762,8 @@ class Quarantine:
             if name.startswith(f".{self.index_path.name}.") and name.endswith(".tmp"):
                 continue
             if name.startswith(".") and name.endswith((INTENT_SUFFIX, COPY_MARK_SUFFIX)):
+                continue
+            if name.startswith(".") and INTENT_CORRUPT_INFIX in name:
                 continue
             if p.is_file() and not p.is_symlink():
                 result.append(p)
