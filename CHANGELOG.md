@@ -29,6 +29,15 @@ sono in `docs/CHANGELOG-archive.md`.
   quarantena o far cancellare un file fuori dalla quarantena. Ora viene
   validato come l'indice e, se non è valido, messo da parte
   (`.<nome>.intent.corrupt-*`) senza toccare nulla.
+- Pianificazione: spuntare «Attiva» mentre il salvataggio verificava le
+  cartelle attivava la pianificazione interna senza verificarne la
+  cartella e senza chiedere del timer di sistema. Ora si salvano i valori
+  presenti al clic su Salva.
+- Una scansione programmata interna che non riesce a partire veniva
+  ritentata ogni minuto creando ogni volta un nuovo log: in dieci minuti
+  sparivano i log delle ultime scansioni vere, e le loro voci in
+  Cronologia puntavano a file inesistenti. Ora solo il primo tentativo
+  scrive un log.
 
 ---
 ## 0.1.12 — 2026-09-28

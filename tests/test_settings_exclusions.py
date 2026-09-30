@@ -805,3 +805,44 @@ def test_casella_tolta_durante_la_validazione_non_conta(env, monkeypatch):
     esegui()
     assert _settings().value("schedule_enabled", type=bool) is True
     assert _settings().value("schedule_target") == str(env.home / "Documenti")
+
+
+def test_tentativi_ripetuti_non_cancellano_i_log_delle_scansioni_vere(env, monkeypatch):
+    # Un log per tentativo al minuto: in dieci minuti la rotazione
+    # (MAX_BG_LOG_FILES) toglieva i log delle ultime scansioni vere, e le
+    # loro voci di Cronologia puntavano a file inesistenti.
+    import datetime as _dt
+    import itertools
+
+    logs = env.home / "logs"
+    logs.mkdir()
+    vecchi = [logs / f"scheduled-20260901-0000{i:02d}.log" for i in range(mw.MAX_BG_LOG_FILES - 1)]
+    for p in vecchi:
+        p.write_text("INFETTO — /home/x (Sig)\n")
+    monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", logs)
+
+    minuti = itertools.count()
+
+    class Orologio(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _dt.datetime(2026, 9, 30, 3, 0) + _dt.timedelta(minutes=next(minuti))
+
+    monkeypatch.setattr(mw, "datetime", Orologio)
+
+    fake, voci, _, _ = _finished_window(env)
+    fake._bg_log_fh = None
+    fake._bg_log_write = lambda line: mw.MainWindow._bg_log_write(fake, line)
+    fake._bg_log_close = lambda: mw.MainWindow._bg_log_close(fake)
+    for _ in range(3):
+        # Come _run_scheduled_scan a ogni tentativo.
+        fake._bg_log_close()
+        fake._bg_log_path = None
+        mw.MainWindow._on_bg_aborted(fake, "Scansione non eseguita. clamd non raggiungibile")
+        mw.MainWindow._on_bg_finished(fake, ScanTotals())
+
+    nuovi = sorted(set(logs.glob("scheduled-*.log")) - set(vecchi))
+    assert len(nuovi) == 1
+    assert all(p.exists() for p in vecchi)
+    ((_, _, _),) = voci
+    assert "clamd non raggiungibile" in nuovi[0].read_text()

@@ -3773,7 +3773,12 @@ X-GNOME-Autostart-enabled=true
         # Arriva prima di finished_scan (connessioni queued, stesso
         # emettitore): _on_bg_finished lo trova già impostato.
         self._bg_aborted = message
-        self._bg_log_write(f"ERRORE — {message}")
+        # Solo il primo tentativo scrive un log, quello indicato dalla voce
+        # di Cronologia. Un file per ogni tentativo al minuto faceva uscire
+        # dalla rotazione (MAX_BG_LOG_FILES) i log delle scansioni vere in
+        # dieci minuti, e le loro voci puntavano a file inesistenti.
+        if not self._schedule_aborted_noted:
+            self._bg_log_write(f"ERRORE — {message}")
 
     def _on_bg_unreadable_dir(self, path: str, reason: str) -> None:
         self._bg_log_write(_unreadable_dir_line(path, reason))
