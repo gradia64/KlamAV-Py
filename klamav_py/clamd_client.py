@@ -18,6 +18,7 @@ Riferimento protocollo: clamd(8), sezione "COMMANDS".
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import os
 import re
@@ -221,6 +222,46 @@ class ClamdUnavailable(ClamdError):
         self.where = where
 
 
+class UnreadableRoot(Exception):
+    """
+    La radice di una scansione è una directory che non si può leggere
+    (cartella di un altro utente, 0300, 0700 altrui).
+
+    os.walk ingoia gli errori di scandir: senza questo controllo la
+    traversata non produceva nulla e la scansione finiva «completata, 0
+    file, 0 errori», cioè pulita senza aver controllato nulla. Chi scansiona
+    la sonda prima (unreadable_root_problem) e la tratta come errore
+    bloccante; l'eccezione copre la corsa fra la sonda e la traversata.
+    Non è un OSError di proposito: i chiamanti leggono OSError come
+    «clamd non raggiungibile».
+    """
+
+    def __init__(self, path: Path, exc: OSError) -> None:
+        super().__init__(f"«{path}» non è leggibile: {exc.strerror or exc}")
+        self.path = path
+
+
+def unreadable_root_problem(path: Path) -> Optional[str]:
+    """Motivo per cui la radice `path`, se directory, non si può
+    percorrere, o None. Una sonda esplicita (scandir aperto e chiuso) e non
+    os.access: è la stessa operazione che fa os.walk, quindi vale anche con
+    ACL, LSM e filesystem di rete. Una directory vuota ma leggibile passa:
+    zero file lì è una scansione pulita legittima."""
+    if not path.is_dir():
+        return None
+    try:
+        with os.scandir(path):
+            pass
+    except OSError as exc:
+        return str(UnreadableRoot(path, exc))
+    return None
+
+
+# Una cartella sparita (ENOENT) o sostituita da un file (ENOTDIR) durante la
+# traversata non è copertura mancante, come un file sparito.
+_VANISHED_DIR_ERRNOS = {errno.ENOENT, errno.ENOTDIR}
+
+
 @dataclass
 class ScanResult:
     path: str
@@ -360,7 +401,11 @@ class ClamdClient:
         return self._send_simple_command("RELOAD")
 
     @staticmethod
-    def _iter_files(path: Path, exclude_dirs: Optional[Iterable[Path]]) -> Iterator[Path]:
+    def _iter_files(
+        path: Path,
+        exclude_dirs: Optional[Iterable[Path]],
+        on_unreadable_dir: Optional[Callable[[Path, OSError], None]] = None,
+    ) -> Iterator[Path]:
         """
         Traversata ricorsiva con PRUNING: le directory escluse non vengono
         nemmeno attraversate — a differenza di un filtro post-hoc su
@@ -377,8 +422,26 @@ class ClamdClient:
         (niente '~' non espanso). I symlink-directory non vengono seguiti
         (followlinks=False), quindi un'esclusione non è aggirabile
         attraverso un symlink dentro l'albero scansionato.
+
+        Cartelle non leggibili: os.walk senza onerror ingoiava gli errori
+        di scandir, e una sottocartella illeggibile era saltata in
+        silenzio mentre un file illeggibile produce un errore. Ora
+        on_unreadable_dir(cartella, errore) le riporta; os.walk non ci
+        scende, quindi si riporta solo la più alta. Le esclusioni sono
+        sfoltite prima dello scandir e non arrivano mai qui. Un errore
+        sulla radice stessa (corsa con la sonda di chi chiama) è
+        UnreadableRoot: bloccante, mai una scansione vuota.
         """
         exclude = [Path(e) for e in (exclude_dirs or [])]
+
+        def onerror(exc: OSError) -> None:
+            where = Path(exc.filename) if exc.filename is not None else path
+            if where == path:
+                raise UnreadableRoot(path, exc) from exc
+            if exc.errno in _VANISHED_DIR_ERRNOS:
+                return
+            if on_unreadable_dir is not None:
+                on_unreadable_dir(where, exc)
 
         if path.is_file():
             yield path
@@ -391,7 +454,7 @@ class ClamdClient:
         if any(path == e or path.is_relative_to(e) for e in exclude):
             return
 
-        for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(path, onerror=onerror, followlinks=False):
             dirnames.sort()
             base = Path(dirpath)
             # Pruning: rimuovere una dir da dirnames (modifica in-place,
@@ -417,6 +480,7 @@ class ClamdClient:
         on_file_start: Optional[Callable[[Path], None]] = None,
         exclude_dirs: Optional[Iterable[Path]] = None,
         max_stream_size: Optional[int] = DEFAULT_MAX_STREAM_SIZE,
+        on_unreadable_dir: Optional[Callable[[Path, OSError], None]] = None,
     ) -> Iterator[ScanResult]:
         """
         Invia il contenuto di un file (o ricorsivamente di una directory)
@@ -429,6 +493,12 @@ class ClamdClient:
         che vuole mostrare "sto scansionando X" invece di scoprirlo solo
         a risultato ottenuto (specie su file grossi che richiedono un
         po' per essere letti e inviati).
+
+        on_unreadable_dir(cartella, errore): sottocartella che non si può
+        leggere, vedi _iter_files. Non è un risultato: non entra negli
+        errori (le EACCES permanenti, come i bind mount di Docker,
+        nasconderebbero quelli veri) e ha un contatore suo nei chiamanti.
+        Una radice illeggibile solleva invece UnreadableRoot.
 
         exclude_dirs: directory da escludere dall'attraversamento ricorsivo
         (non vengono né attraversate né lette). È il filtro giusto per la
@@ -485,7 +555,7 @@ class ClamdClient:
         path = Path(path).resolve()
         try:
             if not persistent:
-                for target in self._iter_files(path, exclude_dirs):
+                for target in self._iter_files(path, exclude_dirs, on_unreadable_dir):
                     if self._should_skip_entry(target):
                         continue
                     if on_file_start:
@@ -500,7 +570,7 @@ class ClamdClient:
                         yield self._stream_failure_result(target, exc, max_stream_size)
                 return
 
-            for target in self._iter_files(path, exclude_dirs):
+            for target in self._iter_files(path, exclude_dirs, on_unreadable_dir):
                 # Prima di on_file_start: le entry saltate non devono
                 # nemmeno comparire come "sto scansionando X" nella UI.
                 if self._should_skip_entry(target):

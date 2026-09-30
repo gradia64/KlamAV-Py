@@ -15,8 +15,12 @@ solo segnalati, non spostati: vedi quarantine_policy.py. --report-only
 aggiunge directory, --quarantine-all disattiva la regola.
 
 Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore di
-esecuzione (clamd irraggiungibile, path inesistente, ecc.) — utile per
-`OnFailure=` in systemd o per script di monitoraggio.
+esecuzione (clamd irraggiungibile, path inesistente o non leggibile, ecc.)
+— utile per `OnFailure=` in systemd o per script di monitoraggio.
+
+Una sottocartella non leggibile non cambia il codice di uscita: una riga
+su stderr (e nel log degli errori) e un contatore a parte nel riepilogo.
+Sotto il timer quindi non notifica: si vede nel log e nel journal.
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ from .clamd_client import (
     ClamdEndpoint,
     ClamdError,
     ClamdUnavailable,
+    UnreadableRoot,
+    unreadable_root_problem,
 )
 from .private_files import open_private_for_write
 from .quarantine import Quarantine, QuarantineError
@@ -290,6 +296,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
     # mostrati nei risultati (es. /home/utente invece di un symlink):
     # su sistemi tipici sono identici.
     scan_root = scan_root_input.resolve()
+    # Prima della traversata e della connessione a clamd: os.walk non
+    # percorrerebbe una radice illeggibile, e l'uscita sarebbe 0 senza aver
+    # controllato nulla.
+    problem = unreadable_root_problem(scan_root)
+    if problem:
+        print(f"Percorso {problem}", file=sys.stderr)
+        return 2
     exclude_dirs = _prepare_exclusions(args.exclude, scan_root)
     if exclude_dirs is None:
         return 2
@@ -354,6 +367,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     errors = 0
     too_large = 0
     report_only = 0
+    unreadable_dirs = 0
     error_categories: Counter[str] = Counter()
     # Il log degli errori elenca percorsi di file dell'utente: 0600, niente
     # symlink, niente file preesistenti di altri utenti (es. pre-creato in
@@ -366,6 +380,17 @@ def cmd_scan(args: argparse.Namespace) -> int:
             print(f"Impossibile aprire il log degli errori: {exc}", file=sys.stderr)
             return 2
 
+    def on_unreadable_dir(path: Path, exc: OSError) -> None:
+        # Non è un errore di scansione (vedi clamd_client._iter_files): le
+        # EACCES permanenti (bind mount di Docker, cartelle create con sudo)
+        # darebbero sempre gli stessi errori e nasconderebbero quelli veri.
+        nonlocal unreadable_dirs
+        unreadable_dirs += 1
+        reason = exc.strerror or str(exc)
+        print(f"CARTELLA NON LEGGIBILE: {path} ({reason})", file=sys.stderr)
+        if log_fh:
+            log_fh.write(f"{path}\tcartella non leggibile: {reason}\n")
+
     try:
         for result in client.scan_stream(
             scan_root,
@@ -373,6 +398,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             session_batch_size=args.session_batch_size,
             exclude_dirs=exclude_dirs,
             max_stream_size=max_stream_size,
+            on_unreadable_dir=on_unreadable_dir,
         ):
             scanned += 1
             if result.infected:
@@ -404,6 +430,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
                     log_fh.write(f"{result.path}\t{result.signature}\n")
             elif not args.quiet:
                 print(f"OK: {result.path}")
+    except UnreadableRoot as exc:
+        # Permessi cambiati fra la sonda iniziale e la traversata.
+        print(f"Percorso {exc}", file=sys.stderr)
+        return 2
     except ClamdUnavailable as exc:
         # clamd sparito a scansione iniziata (i riavvii brevi sono già
         # assorbiti dai nuovi tentativi del client): quanto scansionato
@@ -436,6 +466,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
     print(f"\n{scanned} file scansionati, {infections} infetti, {errors} errori.")
     if too_large:
         print(f"{too_large} file oltre StreamMaxLength, non verificati (vedi clamd.conf).")
+    if unreadable_dirs:
+        print(
+            f"{unreadable_dirs} cartelle non leggibili, non controllate (elencate sopra): "
+            "se sono attese, escludile con --exclude."
+        )
     if report_only:
         print(f"{report_only} infetti solo segnalati e non spostati: verificali manualmente.")
 

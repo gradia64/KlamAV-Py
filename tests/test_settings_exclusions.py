@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageB
 
 import klamav_py.gui.main_window as mw  # noqa: E402
 from klamav_py.systemd_dropin import HEADER, dropin_path  # noqa: E402
+from klamav_py.scan_totals import ScanTotals  # noqa: E402
 
 
 def _inline(fn, callback):
@@ -235,7 +236,7 @@ def _fake_window(creati, messaggi=None):
             creati.append(kw)
             for name in (
                 "result_ready", "progress", "finished_scan", "quarantined",
-                "quarantine_outcome", "aborted",
+                "quarantine_outcome", "aborted", "unreadable_dir",
             ):
                 setattr(self, name, _Signal())
 
@@ -259,7 +260,7 @@ def _fake_window(creati, messaggi=None):
         _bg_aborted=None,
         _on_bg_result=None, _on_bg_progress=None, _on_bg_finished=None,
         _on_quarantine_changed=None, _on_bg_quarantine_outcome=None,
-        _on_bg_aborted=None,
+        _on_bg_aborted=None, _on_bg_unreadable_dir=None,
     )
     return FakeWorker, fake
 
@@ -344,7 +345,7 @@ def test_scansione_programmata_non_completata_non_risulta_pulita(env, monkeypatc
     fake, voci, messaggi, progressi = _finished_window(env)
     for _ in range(3):  # tentativi al minuto sulla stessa scadenza
         fake._bg_aborted = "Scansione non eseguita. Cartella esclusa: X"
-        mw.MainWindow._on_bg_finished(fake, 0, 0, 0)
+        mw.MainWindow._on_bg_finished(fake, ScanTotals())
     assert [v[0] for v in voci] == ["Programmata (non completata)"]
     assert len(messaggi) == 1
     assert messaggi[0][1].startswith("Scansione programmata non completata")
@@ -352,7 +353,7 @@ def test_scansione_programmata_non_completata_non_risulta_pulita(env, monkeypatc
     assert _settings().value("schedule_last_run") is None
 
     # Una scansione che arriva alla fine chiude la serie e conta.
-    mw.MainWindow._on_bg_finished(fake, 10, 0, 0)
+    mw.MainWindow._on_bg_finished(fake, ScanTotals(scanned=10))
     assert [v[0] for v in voci][-1] == "Programmata"
     assert "completata" in messaggi[-1][1]
     assert _settings().value("schedule_last_run") is not None

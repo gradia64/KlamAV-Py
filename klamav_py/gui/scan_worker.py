@@ -17,11 +17,18 @@ from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from ..clamd_client import ClamdEndpoint, ClamdError, ClamdUnavailable
+from ..clamd_client import (
+    ClamdEndpoint,
+    ClamdError,
+    ClamdUnavailable,
+    UnreadableRoot,
+    unreadable_root_problem,
+)
 from ..quarantine import Quarantine
 from ..quarantine_location import root_inside
 from ..quarantine_policy import QuarantinePolicy
 from ..scan_exclusions import decide as decide_exclusion
+from ..scan_totals import ScanTotals
 
 # Intervallo minimo (secondi) tra due aggiornamenti di stato inviati alla
 # UI. Su scansioni veloci (centinaia/migliaia di file al secondo) emettere
@@ -49,7 +56,7 @@ CLAMD_IDLE_SAFETY_SECONDS = 25.0
 class ScanWorker(QThread):
     result_ready = Signal(object)  # ScanResult, solo per infetti/errori/troppo-grandi
     scanning = Signal(str)  # path del file che si sta iniziando a scansionare (throttled)
-    progress = Signal(int, int, int, int)  # (scansionati, infezioni, errori, troppo_grandi), throttled
+    progress = Signal(object)  # ScanTotals, throttled
     quarantined = Signal(str)  # path originale del file appena messo in quarantena
     # Esito della quarantena automatica per ogni infetto, emesso SUBITO
     # DOPO il suo result_ready: (path, esito, dettaglio) con esito
@@ -60,6 +67,10 @@ class ScanWorker(QThread):
     # anche quando la quarantena era fallita.
     quarantine_outcome = Signal(str, str, str)
     error = Signal(str)
+    # Sottocartella non leggibile (percorso, motivo): una per cartella, la
+    # più alta, già contata in ScanTotals.unreadable_dirs. Non è un errore
+    # di scansione, vedi clamd_client._iter_files.
+    unreadable_dir = Signal(str, str)
     # Scansione non eseguita o interrotta da un errore bloccante (radice
     # dentro un'esclusione, clamd irraggiungibile, errore di protocollo):
     # emesso prima di finished_scan, che arriva comunque. Chi non mostra
@@ -67,7 +78,7 @@ class ScanWorker(QThread):
     # registrare come "pulita" una scansione che non ha controllato
     # tutto.
     aborted = Signal(str)
-    finished_scan = Signal(int, int, int, int)  # (scansionati, infezioni, errori, troppo_grandi)
+    finished_scan = Signal(object)  # ScanTotals
     # Segnali di pausa: emessi dal worker quando entra/esce EFFETTIVAMENTE
     # dalla pausa. Un pause() richiesto mentre un file grosso è ancora in
     # streaming ha effetto solo al confine tra due file: lo stato "In
@@ -182,6 +193,10 @@ class ScanWorker(QThread):
         Solo le radici che sono directory: un file viene scansionato
         comunque (_iter_files non applica le esclusioni ai file), e un
         file del Real-Time sparito nel frattempo non è un errore.
+
+        Una radice directory illeggibile ferma la scansione con o senza
+        strict_roots: os.walk non la percorrerebbe e la scansione finirebbe
+        pulita a zero file (vedi clamd_client.UnreadableRoot).
         """
         if self.strict_roots:
             for t in self.targets:
@@ -206,6 +221,10 @@ class ScanWorker(QThread):
             roots = {f"cartella da scansionare n. {i}": p for i, p in enumerate(dirs, 1)}
         if not roots:
             return None
+        for path in dirs:
+            problem = unreadable_root_problem(path)
+            if problem:
+                return f"La cartella da scansionare {problem}"
         if quarantine_root is not None:
             problem = root_inside(quarantine_root, roots)
             if problem:
@@ -247,6 +266,10 @@ class ScanWorker(QThread):
         infections = 0
         errors = 0
         too_large = 0
+        unreadable_dirs = 0
+
+        def totals() -> ScanTotals:
+            return ScanTotals(scanned, infections, errors, too_large, unreadable_dirs)
 
         try:
             blocked = self._blocking_problem(quarantine_root)
@@ -256,8 +279,8 @@ class ScanWorker(QThread):
             message = f"Scansione non eseguita. {blocked}"
             self.error.emit(message)
             self.aborted.emit(message)
-            self.progress.emit(scanned, infections, errors, too_large)
-            self.finished_scan.emit(scanned, infections, errors, too_large)
+            self.progress.emit(totals())
+            self.finished_scan.emit(totals())
             return
 
         # Gate temporale condiviso tra l'aggiornamento "sto scansionando
@@ -274,6 +297,11 @@ class ScanWorker(QThread):
             if now - last_emit >= PROGRESS_THROTTLE_SECONDS:
                 self.scanning.emit(str(p))
                 last_emit = now
+
+        def on_unreadable_dir(p: Path, exc: OSError) -> None:
+            nonlocal unreadable_dirs
+            unreadable_dirs += 1
+            self.unreadable_dir.emit(str(p), exc.strerror or str(exc))
 
         try:
             # Pattern while/next invece del for: la pausa va verificata
@@ -298,6 +326,7 @@ class ScanWorker(QThread):
                     t,
                     on_file_start=on_file_start,
                     exclude_dirs=exclude_dirs,
+                    on_unreadable_dir=on_unreadable_dir,
                 )
                 for t in self.targets
             )
@@ -378,9 +407,15 @@ class ScanWorker(QThread):
 
                 now = time.monotonic()
                 if now - last_emit >= PROGRESS_THROTTLE_SECONDS:
-                    self.progress.emit(scanned, infections, errors, too_large)
+                    self.progress.emit(totals())
                     last_emit = now
 
+        except UnreadableRoot as exc:
+            # La sonda in _blocking_problem era passata: permessi cambiati
+            # nel frattempo. Stesso esito della sonda.
+            message = f"Scansione non eseguita. La cartella da scansionare {exc}"
+            self.error.emit(message)
+            self.aborted.emit(message)
         except ClamdUnavailable as exc:
             # Una sola segnalazione invece di una riga ERROR per file: la
             # scansione è incompleta, non "con errori".
@@ -395,5 +430,5 @@ class ScanWorker(QThread):
         # Emissione finale non soggetta a throttling: garantisce che i
         # contatori mostrati combacino sempre col totale reale, anche se
         # l'ultimo tick periodico risale a prima dell'ultimo file scansionato.
-        self.progress.emit(scanned, infections, errors, too_large)
-        self.finished_scan.emit(scanned, infections, errors, too_large)
+        self.progress.emit(totals())
+        self.finished_scan.emit(totals())

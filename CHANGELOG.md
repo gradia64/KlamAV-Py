@@ -5,6 +5,32 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## Non rilasciato
+
+### Modificato
+- Le cartelle che non si possono leggere durante una scansione hanno un
+  contatore a parte, «cartelle non leggibili», nella finestra, nella
+  notifica della scansione programmata, in Cronologia e nel riepilogo
+  della CLI, con il percorso nella lista o nel log. Non contano fra gli
+  errori: una cartella creata con sudo o il bind mount di un container
+  darebbero sempre gli stessi errori e nasconderebbero quelli nuovi. Se
+  sono attese, basta escluderle. Il codice di uscita della CLI non cambia.
+
+### Corretto
+- **Scansione pulita di una cartella che non si può leggere.** Una
+  cartella da scansionare di un altro utente, o senza permesso di
+  lettura, terminava come «completata, 0 file, 0 errori». Ora la
+  scansione non parte e lo segnala (la CLI esce con 2); la scansione
+  programmata interna non conta come eseguita e viene ritentata. Prima
+  anche le sottocartelle illeggibili erano saltate in silenzio.
+- Un file di recupero della quarantena (`.<nome>.intent`) danneggiato o
+  modificato a mano poteva impedire l'avvio della finestra, far uscire la
+  CLI con il codice delle infezioni, rendere illeggibile l'indice della
+  quarantena o far cancellare un file fuori dalla quarantena. Ora viene
+  validato come l'indice e, se non è valido, messo da parte
+  (`.<nome>.intent.corrupt-*`) senza toccare nulla.
+
+---
 ## 0.1.12 — 2026-09-28
 
 ### Modificato

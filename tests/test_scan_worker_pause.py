@@ -43,6 +43,7 @@ from PySide6.QtWidgets import QApplication
 from klamav_py.clamd_client import ClamdEndpoint, ScanResult
 from klamav_py.gui import scan_worker as sw_module
 from klamav_py.gui.scan_worker import ScanWorker
+from klamav_py.scan_totals import ScanTotals
 
 
 @pytest.fixture(scope="module")
@@ -77,7 +78,8 @@ class BarrierClient:
     def reset_session(self):
         self.reset_session_calls += 1
 
-    def scan_stream(self, target, on_file_start=None, exclude_dirs=None, max_stream_size=None):
+    def scan_stream(self, target, on_file_start=None, exclude_dirs=None, max_stream_size=None,
+                    on_unreadable_dir=None):
         for i, f in enumerate(self.files, start=1):
             self.waiting_at_barrier = i
             self._release.wait(timeout=5)
@@ -160,7 +162,7 @@ def test_pause_stops_at_file_boundary(qapp, tmp_path):
 
     worker.wait(5000)
     assert wait_until(lambda: bool(finished))
-    assert finished[0] == (4, 4, 0, 0)  # (scansionati, infetti, errori, too_large)
+    assert finished[0] == (ScanTotals(scanned=4, infections=4),)
 
 
 def test_stop_while_paused(qapp, tmp_path):
@@ -188,7 +190,7 @@ def test_stop_while_paused(qapp, tmp_path):
     worker.wait(5000)
 
     assert bool(finished), "finished_scan non emesso dopo stop in pausa"
-    assert finished[0] == (2, 2, 0, 0)
+    assert finished[0] == (ScanTotals(scanned=2, infections=2),)
     assert len(results) == 2
     assert not worker.isRunning()
 
@@ -247,7 +249,7 @@ def test_no_session_reset_without_pause(qapp, tmp_path):
 
     worker.wait(5000)
     assert wait_until(lambda: bool(finished))
-    assert finished[0] == (2, 2, 0, 0)
+    assert finished[0] == (ScanTotals(scanned=2, infections=2),)
     # Senza pause() il ramo reset non deve mai attivarsi (soglia reale:
     # 25s; il flusso completo dura millisecondi).
     assert client.reset_session_calls == 0

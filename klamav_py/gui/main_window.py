@@ -64,6 +64,7 @@ from ..clamd_client import DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, Scan
 from ..quarantine import Quarantine
 from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
 from ..scan_exclusions import decide as decide_exclusion
+from ..scan_totals import ScanTotals
 from ..systemd_dropin import (
     DropinConflict, daemon_reload, disable_timer, foreign_overrides, render_dropin,
     sync_dropin, timer_enabled,
@@ -324,6 +325,29 @@ CLAMD_HEALTH_INTERVAL_MS = 60_000
 CLAMD_PING_TIMEOUT_S = 10.0
 # Distanza minima tra due ping forzati da errori del Real-Time.
 CLAMD_FORCED_PING_MIN_INTERVAL_S = 10.0
+
+
+UNREADABLE_DIRS_HINT = (
+    "non controllate; se sono attese, per esempio cartelle create con sudo o "
+    "bind mount di container, aggiungile alle cartelle escluse"
+)
+
+
+def _unreadable_dir_line(path: str, reason: str) -> str:
+    """Riga di log per una cartella non leggibile, uguale nella lista della
+    pagina Scansione e nel log delle scansioni programmate."""
+    return f"CARTELLA NON LEGGIBILE — {path}: {reason}"
+
+
+def _totals_summary(totals: ScanTotals) -> str:
+    """Contatori di una scansione programmata per la pagina Pianificazione."""
+    text = (f"{totals.scanned} file, {totals.infections} infetti, "
+            f"{totals.errors} errori")
+    if totals.too_large:
+        text += f", {totals.too_large} non verificati"
+    if totals.unreadable_dirs:
+        text += f", {totals.unreadable_dirs} cartelle non leggibili"
+    return text
 
 
 def _outcome_line(outcome: str, detail: str) -> str | None:
@@ -697,17 +721,13 @@ class HistoryManager:
         self,
         scan_type: str,
         target: str,
-        scanned: int,
-        infections: int,
-        errors: int,
-        too_large: int = 0,
+        totals: ScanTotals | None = None,
         log_file: str | None = None,
     ):
-        # too_large ha default 0 per compatibilità con le voci scritte
-        # dalle versioni precedenti (che non avevano il campo): la
-        # matematica scanned = clean + infections + errors + too_large
-        # resta leggibile anche per lo storico, dove il campo mancante
-        # significa "non controllato, scan precedente alla feature".
+        # I contatori sono i campi di ScanTotals. Le voci scritte da
+        # versioni precedenti non hanno i campi più recenti (too_large,
+        # unreadable_dirs): si leggono con ScanTotals.from_entry, che li
+        # vale 0. None = nessun file controllato (scansione rinviata).
         # log_file, se presente, punta al log dettagliato su disco
         # (scansioni background: il dettaglio infetti/errori non vive
         # in nessuna lista UI, quindi senza questo riferimento sarebbe
@@ -717,10 +737,7 @@ class HistoryManager:
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "type": scan_type,
             "target": target,
-            "scanned": scanned,
-            "infections": infections,
-            "errors": errors,
-            "too_large": too_large,
+            **(totals or ScanTotals()).as_entry(),
         }
         if log_file is not None:
             entry["log_file"] = log_file
@@ -971,6 +988,7 @@ class ScanPage(QWidget):
         self.worker.quarantined.connect(self._on_quarantined)
         self.worker.quarantine_outcome.connect(self._on_quarantine_outcome)
         self.worker.error.connect(self._on_error)
+        self.worker.unreadable_dir.connect(self._on_unreadable_dir)
         self.worker.finished_scan.connect(self._on_finished)
         # I segnali paused/resumed (non le richieste pause()/resume())
         # comandano lo stato del pulsante: il worker li emette quando
@@ -1035,17 +1053,20 @@ class ScanPage(QWidget):
     def _on_scanning(self, path: str) -> None:
         self._set_status_text(f"Scansione in corso: {path}")
 
-    def _on_progress(self, scanned: int, infections: int, errors: int, too_large: int) -> None:
+    def _on_progress(self, totals: ScanTotals) -> None:
         # Aggiornamento dei contatori, già filtrato/rallentato lato worker
         # (vedi scan_worker.PROGRESS_THROTTLE_SECONDS): qui ci si limita a
         # mostrare i valori ricevuti, senza fare altri calcoli.
+        scanned, infections = totals.scanned, totals.infections
         self._scanned = scanned
         self._infections = infections
-        self._errors = errors
-        self._too_large = too_large
-        text = f"{scanned} scansionati — {infections} infetti — {errors} errori"
-        if too_large:
-            text += f" — {too_large} non verificati (troppo grandi)"
+        self._errors = totals.errors
+        self._too_large = totals.too_large
+        text = f"{scanned} scansionati — {infections} infetti — {totals.errors} errori"
+        if totals.too_large:
+            text += f" — {totals.too_large} non verificati (troppo grandi)"
+        if totals.unreadable_dirs:
+            text += f" — {totals.unreadable_dirs} cartelle non leggibili"
         self.counts_label.setText(text)
 
         # Visibilità da tray per la scansione MANUALE: prima aggiornava
@@ -1124,6 +1145,15 @@ class ScanPage(QWidget):
         item.setIcon(QIcon.fromTheme("data-error"))
         self.results_list.addItem(item)
 
+    def _on_unreadable_dir(self, path: str, reason: str) -> None:
+        # Fuori dal tetto MAX_RESULT_ROWS: se ne riporta solo la cartella
+        # più alta (os.walk non scende in una cartella illeggibile), quindi
+        # sono poche, e ognuna è copertura mancante.
+        item = QListWidgetItem(_unreadable_dir_line(path, reason))
+        item.setIcon(QIcon.fromTheme("dialog-warning"))
+        self.results_list.addItem(item)
+        self.results_list.scrollToBottom()
+
     def _copy_log(self) -> None:
         """BUG-003: copia negli appunti l'intero contenuto del log/risultati."""
         lines = [self.results_list.item(i).text() for i in range(self.results_list.count())]
@@ -1181,7 +1211,9 @@ class ScanPage(QWidget):
         hours, minutes = divmod(minutes, 60)
         return f"{hours}h {minutes}m {secs}s"
 
-    def _on_finished(self, scanned: int, infections: int, errors: int, too_large: int = 0) -> None:
+    def _on_finished(self, totals: ScanTotals) -> None:
+        scanned, infections = totals.scanned, totals.infections
+        errors, too_large = totals.errors, totals.too_large
         self.progress.setVisible(False)
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
@@ -1207,6 +1239,8 @@ class ScanPage(QWidget):
         status_text = f"Completato: {scanned} file scansionati, {infections} infetti, {errors} errori."
         if too_large:
             status_text += f" {too_large} non verificati (troppo grandi)."
+        if totals.unreadable_dirs:
+            status_text += f" {totals.unreadable_dirs} cartelle non leggibili."
         self._set_status_text(status_text)
 
         omessi_err = getattr(self, "_omitted_errors", 0)
@@ -1242,12 +1276,12 @@ class ScanPage(QWidget):
             f"File infetti: {infections}\n"
             f"Errori: {errors}\n"
             f"Non verificati (troppo grandi): {too_large}\n"
-            f"Esito: {esito}"
+            + (f"Cartelle non leggibili: {totals.unreadable_dirs} "
+               f"({UNREADABLE_DIRS_HINT})\n" if totals.unreadable_dirs else "")
+            + f"Esito: {esito}"
         )
 
-        self.history.add_entry(
-            "Manuale", self.path_edit.text(), scanned, infections, errors, too_large=too_large
-        )
+        self.history.add_entry("Manuale", self.path_edit.text(), totals)
         if hasattr(main_window, 'history_page'):
             main_window.history_page.refresh()
 
@@ -1681,9 +1715,10 @@ class HistoryPage(QWidget):
         layout.addWidget(desc)
         layout.addSpacing(10)
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
-            ["Data e Ora", "Tipo", "Percorso", "Scansionati", "Infetti", "Errori", "Non verificati"]
+            ["Data e Ora", "Tipo", "Percorso", "Scansionati", "Infetti", "Errori", "Non verificati",
+             "Cartelle non leggibili"]
         )
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1733,6 +1768,10 @@ class HistoryPage(QWidget):
             # get() con default 0: le voci scritte prima dell'introduzione
             # del campo too_large non avevano questa chiave.
             self.table.setItem(row, 6, QTableWidgetItem(str(entry.get("too_large", 0))))
+            # Idem per unreadable_dirs (0.1.13).
+            self.table.setItem(
+                row, 7, QTableWidgetItem(str(ScanTotals.from_entry(entry).unreadable_dirs))
+            )
 
             # Il log dettagliato (se esiste) è raggiungibile dal tooltip
             # sulla riga: senza questo, il riferimento nel JSON sarebbe
@@ -3601,7 +3640,7 @@ X-GNOME-Autostart-enabled=true
             if not self._schedule_skip_noted:
                 self._schedule_skip_noted = True
                 target_str = self.settings.value("schedule_target", str(Path.home()))
-                self.history_manager.add_entry("Programmata (rinviata)", target_str, 0, 0, 0)
+                self.history_manager.add_entry("Programmata (rinviata)", target_str)
                 if hasattr(self, "history_page"):
                     self.history_page.refresh()
                 self.tray_icon.showMessage(
@@ -3654,6 +3693,7 @@ X-GNOME-Autostart-enabled=true
         self.bg_worker.result_ready.connect(self._on_bg_result)
         self.bg_worker.progress.connect(self._on_bg_progress)
         self.bg_worker.aborted.connect(self._on_bg_aborted)
+        self.bg_worker.unreadable_dir.connect(self._on_bg_unreadable_dir)
         self.bg_worker.finished_scan.connect(self._on_bg_finished)
         self.bg_worker.quarantined.connect(self._on_quarantine_changed)
         self.bg_worker.quarantine_outcome.connect(self._on_bg_quarantine_outcome)
@@ -3717,18 +3757,19 @@ X-GNOME-Autostart-enabled=true
         self._bg_aborted = message
         self._bg_log_write(f"ERRORE — {message}")
 
-    def _on_bg_progress(self, scanned: int, infections: int, errors: int, too_large: int) -> None:
+    def _on_bg_unreadable_dir(self, path: str, reason: str) -> None:
+        self._bg_log_write(_unreadable_dir_line(path, reason))
+
+    def _on_bg_progress(self, totals: ScanTotals) -> None:
         # Visibilità della scansione background: label in Pianificazione +
         # tooltip della tray (già throttled lato worker a 150ms).
-        self.scheduler_page.update_progress(
-            f"In corso — {scanned} file scansionati, {infections} infetti, {errors} errori"
-            + (f", {too_large} non verificati" if too_large else "")
-        )
+        self.scheduler_page.update_progress(f"In corso — {_totals_summary(totals)}")
         self.tray_icon.setToolTip(
-            f"{APP_NAME} — Scansione automatica in corso: {scanned} file…"
+            f"{APP_NAME} — Scansione automatica in corso: {totals.scanned} file…"
         )
 
-    def _on_bg_finished(self, scanned: int, infections: int, errors: int, too_large: int = 0) -> None:
+    def _on_bg_finished(self, totals: ScanTotals) -> None:
+        infections, errors, too_large = totals.infections, totals.errors, totals.too_large
         aborted, self._bg_aborted = self._bg_aborted, None
         # Una scansione non completata non è "completata, 0 infetti": prima
         # clamd irraggiungibile produceva proprio quella notifica.
@@ -3738,6 +3779,9 @@ X-GNOME-Autostart-enabled=true
             status = f"Scansione automatica completata: {infections} infetti trovati, {errors} errori."
             if too_large:
                 status += f" {too_large} file non verificati (troppo grandi)."
+            if totals.unreadable_dirs:
+                status += (f" {totals.unreadable_dirs} cartelle non leggibili "
+                           "(elenco nel log; se sono attese, escludile).")
             self.tray_icon.showMessage(
                 APP_NAME, status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000
             )
@@ -3777,20 +3821,13 @@ X-GNOME-Autostart-enabled=true
             self.history_manager.add_entry(
                 "Programmata" if aborted is None else "Programmata (non completata)",
                 target_str,
-                scanned,
-                infections,
-                errors,
-                too_large=too_large,
+                totals,
                 log_file=str(log_path) if log_path else None,
             )
             self.history_page.refresh()
 
         finished_at = datetime.now().strftime("%H:%M")
-        summary = (
-            f"Ultima esecuzione: {finished_at} — {scanned} file, "
-            f"{infections} infetti, {errors} errori"
-            + (f", {too_large} non verificati" if too_large else "")
-        )
+        summary = f"Ultima esecuzione: {finished_at} — {_totals_summary(totals)}"
         if aborted is not None:
             summary = f"Ultimo tentativo: {finished_at} — non completata: {aborted}"
         if log_path:
@@ -4240,10 +4277,8 @@ X-GNOME-Autostart-enabled=true
         else:
             self.realtime_page.add_outcome_entry(f"quarantena FALLITA — {detail}", warning=True)
 
-    def _on_realtime_finished(self, scanned: int, infections: int, errors: int, too_large: int = 0) -> None:
-        self.history_manager.add_entry(
-            "Real-Time", self._current_realtime_target, scanned, infections, errors, too_large=too_large
-        )
+    def _on_realtime_finished(self, totals: ScanTotals) -> None:
+        self.history_manager.add_entry("Real-Time", self._current_realtime_target, totals)
         self.history_page.refresh()
 
         # Rilascio differito, vedi _retire_qthread; qui il rilascio è

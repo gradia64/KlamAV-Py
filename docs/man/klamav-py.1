@@ -162,6 +162,15 @@ One line per file:
 for files over the size limit, or
 .B ERRORE
 on standard error.
+A subdirectory that cannot be read is reported once on standard error
+with
+.B CARTELLA NON LEGGIBILE
+(and in the
+.B \-\-log\-errors
+file); its contents are not checked.
+It is counted separately, not among the errors: if it is expected (a
+directory created with sudo, a container bind mount), exclude it with
+.BR \-\-exclude .
 The messages are in Italian.
 A summary with the totals follows and, if there were errors, a count
 per error type.
@@ -169,13 +178,15 @@ per error type.
 .SH EXIT STATUS
 .TP
 .B 0
-No infections found, even if some files could not be read or verified.
+No infections found, even if some files or subdirectories could not be
+read or verified.
 .TP
 .B 1
 Infections found, even if quarantining some of them failed.
 .TP
 .B 2
-Fatal error: nonexistent path, unusable quarantine directory, clamd
+Fatal error: nonexistent or unreadable path, unusable quarantine
+directory, clamd
 unreachable or protocol error,
 .B \-\-log\-errors
 file cannot be opened, invalid command line.
@@ -189,6 +200,8 @@ For
 In the scheduled scan, codes 1 and 2 trigger the desktop notification
 through
 .BR klamav-scan-notify.service .
+Unreadable subdirectories leave the code at 0, so they show up only in
+the journal.
 .
 .SH ENVIRONMENT
 .TP

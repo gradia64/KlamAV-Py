@@ -21,6 +21,7 @@ from klamav_py.gui import main_window as mw  # noqa: E402
 from klamav_py.gui.single_instance import (  # noqa: E402
     IPC_MAX_PAYLOAD_BYTES, encode_targets, notify_running_instance,
 )
+from klamav_py.scan_totals import ScanTotals  # noqa: E402
 
 app = QApplication.instance() or QApplication([])
 
@@ -158,7 +159,7 @@ def test_worker_scansiona_tutte_le_destinazioni(tmp_path):
     w.finished_scan.connect(lambda *a: fine.append(a))
     w.run()
     assert visti == ["a", "b"]
-    assert fine == [(4, 0, 2, 0)]
+    assert fine == [(ScanTotals(4, 0, 2, 0),)]
 
 
 def test_parte_oltre_path_max_scartata():

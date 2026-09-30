@@ -165,20 +165,30 @@ Una riga per file:
 per i file oltre la soglia, oppure
 .B ERRORE
 su standard error.
+Una sottocartella che non si può leggere è segnalata una volta su
+standard error con
+.B CARTELLA NON LEGGIBILE
+(e nel file di
+.BR \-\-log\-errors );
+il suo contenuto non è controllato.
+Ha un contatore a parte, non fra gli errori: se è attesa (una cartella
+creata con sudo, un bind mount di un container), va esclusa con
+.BR \-\-exclude .
 Segue un riepilogo con i totali e, se ci sono errori, un conteggio per
 tipo di errore.
 .
 .SH STATO DI USCITA
 .TP
 .B 0
-Nessuna infezione trovata, anche in presenza di errori di lettura o di
-file non verificati.
+Nessuna infezione trovata, anche in presenza di errori di lettura, file
+non verificati o sottocartelle non leggibili.
 .TP
 .B 1
 Infezioni trovate, anche se la quarantena di qualche file non è riuscita.
 .TP
 .B 2
-Errore bloccante: percorso inesistente, directory di quarantena non
+Errore bloccante: percorso inesistente o non leggibile, directory di
+quarantena non
 utilizzabile, clamd non raggiungibile o errore di protocollo, file di
 .B \-\-log\-errors
 non apribile, riga di comando non valida.
@@ -192,6 +202,8 @@ Per
 Nella scansione programmata i codici 1 e 2 attivano la notifica desktop
 tramite
 .BR klamav-scan-notify.service .
+Le sottocartelle non leggibili lasciano il codice a 0: si vedono solo nel
+journal.
 .
 .SH AMBIENTE
 .TP

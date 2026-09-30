@@ -19,6 +19,7 @@ from klamav_py.clamd_client import ClamdEndpoint, ClamdUnavailable
 pytest.importorskip("PySide6")
 
 from klamav_py.gui.scan_worker import ScanWorker  # noqa: E402
+from klamav_py.scan_totals import ScanTotals  # noqa: E402
 
 
 class Client:
@@ -124,7 +125,7 @@ def test_esclusione_ripuntata_su_un_antenato_ferma_la_scansione(tmp_path):
     assert Client.visti == []  # nessuna traversata
     assert len(got["aborted"]) == 1 and "esclusa per intero" in got["aborted"][0]
     assert got["error"] == got["aborted"]
-    assert got["finished"] == [(0, 0, 0, 0)]
+    assert got["finished"] == [(ScanTotals(),)]
 
 
 def test_esclusione_diventata_file_ferma_la_scansione(tmp_path):
