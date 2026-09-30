@@ -14,6 +14,12 @@ archivi di posta (KMail/Akonadi, Thunderbird, Evolution, Maildir) sono
 solo segnalati, non spostati: vedi quarantine_policy.py. --report-only
 aggiunge directory, --quarantine-all disattiva la regola.
 
+Segnalazioni già valutate: un file che la policy lascia al suo posto e di
+cui l'utente ha registrato la presa visione (--acknowledge, vedi
+acknowledged.py) non conta fra gli infetti. Resta una riga «GIÀ
+VALUTATO» a ogni scansione; se il contenuto cambia torna a essere
+segnalato.
+
 Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore di
 esecuzione (clamd irraggiungibile, path inesistente o non leggibile, ecc.)
 — utile per `OnFailure=` in systemd o per script di monitoraggio.
@@ -28,11 +34,20 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import stat
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
 from . import __version__
+from .acknowledged import (
+    HASH_PREFIX_LEN,
+    AckRegistry,
+    RegistryError,
+    ScanAcknowledgements,
+    hash_file,
+)
 from .clamd_client import (
     DEFAULT_MAX_STREAM_SIZE,
     DEFAULT_SOCKET,
@@ -106,7 +121,38 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"%(prog)s {__version__}",
     )
     add_endpoint_arguments(parser, default=ClamdEndpoint())
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--acknowledge",
+        metavar="PERCORSO",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Registra la presa visione di un file segnalato ma non spostato "
+            "(firma euristica o archivio di posta), dopo averlo verificato: le "
+            "scansioni successive non lo contano più fra gli infetti finché il "
+            "contenuto non cambia. Il file viene riscansionato: pulito o da "
+            "quarantena, niente registrazione. Ripetibile"
+        ),
+    )
+    parser.add_argument(
+        "--list-acknowledged",
+        action="store_true",
+        help="Elenca le prese visione registrate, con il prefisso dell'hash da usare per revocarle",
+    )
+    parser.add_argument(
+        "--unacknowledge",
+        metavar="VALORE",
+        action="append",
+        default=[],
+        help=(
+            "Revoca una presa visione: VALORE è il percorso del file o il prefisso "
+            "dell'hash mostrato da --list-acknowledged. Ripetibile"
+        ),
+    )
+    # Non obbligatorio: le opzioni delle prese visione funzionano senza
+    # comando. main() chiede un comando se manca anche quelle.
+    sub = parser.add_subparsers(dest="command")
 
     scan = sub.add_parser("scan", help="Scansiona un file o una directory")
     scan.add_argument("path", type=Path)
@@ -368,6 +414,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
     too_large = 0
     report_only = 0
     unreadable_dirs = 0
+    # Segnalazioni nuove per cui si può registrare la presa visione, e
+    # quelle già valutate (non contate fra gli infetti).
+    acknowledgeable = 0
+    acknowledged = 0
+    acks = ScanAcknowledgements()
     error_categories: Counter[str] = Counter()
     # Il log degli errori elenca percorsi di file dell'utente: 0600, niente
     # symlink, niente file preesistenti di altri utenti (es. pre-creato in
@@ -402,10 +453,22 @@ def cmd_scan(args: argparse.Namespace) -> int:
         ):
             scanned += 1
             if result.infected:
+                # La policy si applica anche senza --quarantine: decide
+                # quali rilevamenti possono avere una presa visione. Il
+                # registro si consulta solo dopo il suo «solo segnalazione».
+                decision = policy.decide(Path(result.path), result.signature)
+                if not decision.quarantine:
+                    identity = acks.identify(Path(result.path))
+                    if acks.already_evaluated(identity, result.signature):
+                        acknowledged += 1
+                        # Anche con --quiet: la riga resta nel journal a ogni
+                        # scansione.
+                        print(f"GIÀ VALUTATO: {result.path} ({result.signature})")
+                        continue
+                    acknowledgeable += 1
                 infections += 1
                 print(f"INFETTO: {result.path} ({result.signature})")
                 if quarantine:
-                    decision = policy.decide(Path(result.path), result.signature)
                     if not decision.quarantine:
                         report_only += 1
                         print(f"  -> NON messo in quarantena ({decision.reason})")
@@ -462,6 +525,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     finally:
         if log_fh:
             log_fh.close()
+        acks.finish()
+        for problem in acks.problems:
+            print(f"ATTENZIONE: {problem}", file=sys.stderr)
 
     print(f"\n{scanned} file scansionati, {infections} infetti, {errors} errori.")
     if too_large:
@@ -472,7 +538,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
             "se sono attese, escludile con --exclude."
         )
     if report_only:
-        print(f"{report_only} infetti solo segnalati e non spostati: verificali manualmente.")
+        print(f"{report_only} infetti solo segnalati e non spostati.")
+    if acknowledgeable:
+        print(
+            f"Dopo averli verificati: eliminali, oppure registra la presa visione "
+            f"con «klamav-py --acknowledge PERCORSO» ({acknowledgeable} "
+            "segnalazioni) per non contarli più finché il contenuto non cambia."
+        )
+    if acknowledged:
+        print(f"{acknowledged} segnalazioni già valutate (--list-acknowledged per l'elenco).")
 
     # Entry saltate: non sono né scansionate né "non verificate" (un
     # symlink o un socket non ha contenuto proprio), quindi restano
@@ -495,6 +569,122 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _acknowledge_one(raw: Path, client, policy: QuarantinePolicy, registry: AckRegistry) -> bool:
+    """Riscansiona `raw` e registra la presa visione solo se è infetto con
+    esito «solo segnalazione». Così la presa visione verifica lo stato
+    attuale e non si fida di un percorso fornito a mano. False, con il
+    motivo su stderr, se non registra nulla."""
+    path = raw.expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+
+    def refuse(reason: str) -> bool:
+        print(f"{raw}: {reason}. Nessuna presa visione registrata.", file=sys.stderr)
+        return False
+
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        return refuse(f"non accessibile ({exc.strerror or exc})")
+    if stat.S_ISLNK(st.st_mode):
+        return refuse("è un collegamento simbolico; indica il file vero")
+    if not stat.S_ISREG(st.st_mode):
+        return refuse("non è un file regolare")
+    try:
+        before = hash_file(path)
+        results = list(client.scan_stream(path, persistent=False))
+        after = hash_file(path)
+    except (ClamdError, OSError) as exc:
+        return refuse(f"verifica non riuscita ({exc})")
+    if len(results) != 1:
+        return refuse("verifica non riuscita (nessun esito da clamd)")
+    (result,) = results
+    if result.too_large:
+        return refuse("oltre StreamMaxLength, clamd non l'ha verificato")
+    if result.status == "ERROR":
+        return refuse(f"verifica non riuscita ({result.signature})")
+    if not result.infected:
+        return refuse("clamd non lo rileva più")
+    decision = policy.decide(path, result.signature)
+    if decision.quarantine:
+        return refuse(
+            f"rilevamento da quarantena ({result.signature}): la presa visione vale solo "
+            "per le firme euristiche e gli archivi di posta, che non vengono spostati"
+        )
+    if before != after:
+        return refuse("il file è cambiato durante la verifica")
+    try:
+        entry = registry.acknowledge(after.sha256, result.signature, path)
+    except (RegistryError, OSError) as exc:
+        return refuse(f"registro non scrivibile ({exc})")
+    print(f"Presa visione registrata: {entry.sha256[:HASH_PREFIX_LEN]}  {entry.signature}  {path}")
+    return True
+
+
+def _unacknowledge_one(value: str, registry: AckRegistry) -> bool:
+    path = Path(value).expanduser()
+    try:
+        if os.path.lexists(path):
+            if path.is_symlink():
+                raise RegistryError(f"{value} è un collegamento simbolico; indica il file vero")
+            try:
+                sha = hash_file(path).sha256
+            except OSError as exc:
+                raise RegistryError(f"impossibile leggere {value}: {exc}") from exc
+            found = registry.match_hash(sha)
+            if not found:
+                raise RegistryError(f"nessuna presa visione per il contenuto attuale di {value}")
+        else:
+            found = registry.match_prefix(value)
+        registry.revoke(e.key for e in found)
+    except (RegistryError, OSError) as exc:
+        print(f"Revoca non eseguita: {exc}", file=sys.stderr)
+        return False
+    for e in found:
+        print(f"Presa visione revocata: {e.sha256[:HASH_PREFIX_LEN]}  {e.signature}  {e.first_path}")
+    return True
+
+
+def _list_acknowledged(registry: AckRegistry) -> bool:
+    try:
+        entries = registry.entries()
+    except OSError as exc:
+        print(f"Registro delle prese visione non leggibile: {exc}", file=sys.stderr)
+        return False
+    if registry.last_recovery is not None:
+        backup, reason = registry.last_recovery
+        print(f"ATTENZIONE: registro non valido ({reason}), messo da parte in {backup}",
+              file=sys.stderr)
+    if not entries:
+        print("Nessuna presa visione registrata.")
+        return True
+    for e in entries:
+        print(
+            f"{e.sha256[:HASH_PREFIX_LEN]}  {e.signature}  {e.first_path}  "
+            f"presa visione {time.strftime('%Y-%m-%d', time.localtime(e.acknowledged_at))}, "
+            f"ultimo riscontro {time.strftime('%Y-%m-%d', time.localtime(e.last_seen))}"
+        )
+    return True
+
+
+def cmd_acknowledgements(args: argparse.Namespace) -> int:
+    """--acknowledge, --unacknowledge e --list-acknowledged, in quest'ordine.
+    Uscita 0 se tutto è andato, 2 se almeno un valore è stato rifiutato:
+    in quel caso quel valore non ha toccato il registro."""
+    registry = AckRegistry()
+    ok = True
+    if args.acknowledge:
+        client = args.endpoint.new_client()
+        policy = QuarantinePolicy(default_report_only_dirs())
+        for raw in args.acknowledge:
+            ok = _acknowledge_one(raw, client, policy, registry) and ok
+    for value in args.unacknowledge:
+        ok = _unacknowledge_one(value, registry) and ok
+    if args.list_acknowledged:
+        ok = _list_acknowledged(registry) and ok
+    return 0 if ok else 2
+
+
 def cmd_ping(args: argparse.Namespace) -> int:
     where = args.endpoint.describe()
     try:
@@ -509,6 +699,13 @@ def cmd_ping(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    acks = args.acknowledge or args.unacknowledge or args.list_acknowledged
+    if acks and args.command is not None:
+        parser.error("le opzioni delle prese visione non si combinano con un comando")
+    if acks:
+        return cmd_acknowledgements(args)
+    if args.command is None:
+        parser.error("serve un comando (scan o ping) o un'opzione delle prese visione")
     if args.command == "scan":
         return cmd_scan(args)
     if args.command == "ping":

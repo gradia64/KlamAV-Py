@@ -30,6 +30,17 @@ klamav-py \- scansione antivirus a riga di comando tramite il demone ClamAV
 .IR host [: porta ]]
 .B ping
 .br
+.B klamav-py
+.RB [ \-\-socket
+.IR percorso ]
+.RB [ \-\-tcp
+.IR host [: porta ]]
+.RB [ \-\-acknowledge
+.IR percorso ]...
+.RB [ \-\-unacknowledge
+.IR valore ]...
+.RB [ \-\-list\-acknowledged ]
+.br
 .B klamav-py \-\-version
 .
 .SH DESCRIZIONE
@@ -79,6 +90,36 @@ Incompatibile con
 Vedere
 .B SICUREZZA
 prima di usarla.
+.SS Opzioni delle prese visione
+Registrano che una segnalazione è stata verificata, così le scansioni
+successive smettono di contarla (vedere
+.BR "Rilevamenti non spostati" ).
+Si usano senza comando; se sono più d'una, vengono eseguite nell'ordine
+qui sotto.
+.TP
+.BI \-\-acknowledge " percorso"
+Riscansiona
+.I percorso
+con clamd e registra la presa visione solo se è infetto con un
+rilevamento segnalato ma non spostato (firma euristica o archivio di
+posta).
+Un file pulito, un rilevamento da quarantena, un link simbolico o un file
+che cambia durante la verifica sono rifiutati senza registrare nulla.
+Ripetibile.
+.TP
+.BI \-\-unacknowledge " valore"
+Revoca una presa visione:
+.I valore
+è il percorso del file (se ne calcola l'hash del contenuto attuale) o il
+prefisso dell'hash mostrato da
+.BR \-\-list\-acknowledged ,
+per i file che non esistono più.
+Un prefisso ambiguo o inesistente è un errore e non revoca nulla.
+Ripetibile.
+.TP
+.B \-\-list\-acknowledged
+Elenca le prese visione: prefisso dell'hash, firma, primo percorso visto,
+data della presa visione e dell'ultima scansione che l'ha ritrovata.
 .SS Opzioni di scan
 .TP
 .BI \-\-quarantine " directory"
@@ -165,6 +206,11 @@ Una riga per file:
 per i file oltre la soglia, oppure
 .B ERRORE
 su standard error.
+Una segnalazione già valutata stampa
+.B GIÀ VALUTATO
+a ogni scansione, anche con
+.BR \-\-quiet ,
+e non conta fra gli infetti.
 Una sottocartella che non si può leggere è segnalata una volta su
 standard error con
 .B CARTELLA NON LEGGIBILE
@@ -198,6 +244,9 @@ infezioni già trovate.
 Per
 .BR ping :
 0 se clamd risponde, 2 altrimenti.
+.PP
+Per le opzioni delle prese visione: 0 se ogni valore è stato gestito, 2
+se almeno uno è stato rifiutato (quello non modifica il registro).
 .PP
 Nella scansione programmata i codici 1 e 2 attivano la notifica desktop
 tramite
@@ -249,6 +298,14 @@ se il file viene copiato da un altro file system): se l'operazione viene
 interrotta, per esempio da un crash, il successivo avvio della CLI o
 della GUI la completa o la annulla, lasciando in quel caso il file
 originale al suo posto.
+.TP
+.I \%~/.local/share/klamav-py/acknowledged.json
+Registro delle prese visione (0600), scritto in modo atomico, con il lock
+.IR acknowledged.json.lock .
+Un registro non valido viene rinominato in
+.I acknowledged.json.corrupt-*
+e mai cancellato.
+Le voci che nessuna scansione ritrova da 90 giorni vengono tolte.
 .
 .SH SICUREZZA
 .SS Directory di quarantena
@@ -295,11 +352,31 @@ i rilevamenti euristici
 e i file negli archivi di posta di KMail/Akonadi, Thunderbird, Evolution
 e Maildir vengono segnalati ma non spostati, per non danneggiare le
 mailbox dell'utente.
-Vanno verificati a mano: il riepilogo ne riporta il numero.
+Senza
+.B \-\-quarantine
+sono segnalati come gli altri.
 .B \-\-report\-only
 aggiunge altre directory a questa regola,
 .B \-\-quarantine\-all
 la disattiva.
+.PP
+Dopo averne verificato uno, eliminalo o registra la presa visione con
+.BR \-\-acknowledge :
+le scansioni successive stampano
+.B GIÀ VALUTATO
+e non lo contano più fra gli infetti, quindi lo stato di uscita e la
+notifica della scansione programmata non scattano più per una
+segnalazione già verificata.
+La chiave è lo SHA-256 del contenuto più la firma, non il percorso: un
+messaggio che in un maildir passa da
+.I new/
+a
+.I cur/
+resta valutato, un contenuto cambiato torna a essere segnalato.
+Il registro si consulta solo per i rilevamenti che comunque non
+verrebbero spostati: una presa visione non nasconde mai uno da
+quarantena.
+Una segnalazione nuova resta stato di uscita 1.
 .SS Connessione TCP
 clamd non supporta TLS: con
 .B \-\-tcp
@@ -342,6 +419,19 @@ Verifica che clamd risponda su un socket non standard:
 .RS
 .EX
 klamav\-py \-\-socket /run/clamd.scan/clamd.sock ping
+.EE
+.RE
+.PP
+Presa visione di un messaggio di phishing rimasto nel cestino di KMail,
+dopo averlo verificato; elenco delle prese visione e revoca per prefisso
+dell'hash:
+.PP
+.RS
+.EX
+journalctl \-\-user \-u klamav\-scan.service | grep INFETTO
+klamav\-py \-\-acknowledge ~/.local/share/local\-mail/trash/new/1695\&.R42.host
+klamav\-py \-\-list\-acknowledged
+klamav\-py \-\-unacknowledge 3f2a9c01be47
 .EE
 .RE
 .

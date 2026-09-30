@@ -28,6 +28,17 @@ klamav-py \- command-line virus scanning through the ClamAV daemon
 .IR host [: port ]]
 .B ping
 .br
+.B klamav-py
+.RB [ \-\-socket
+.IR path ]
+.RB [ \-\-tcp
+.IR host [: port ]]
+.RB [ \-\-acknowledge
+.IR path ]...
+.RB [ \-\-unacknowledge
+.IR value ]...
+.RB [ \-\-list\-acknowledged ]
+.br
 .B klamav-py \-\-version
 .
 .SH DESCRIPTION
@@ -76,6 +87,37 @@ Incompatible with
 See
 .B SECURITY
 before using it.
+.SS Acknowledgement options
+They record that a reported detection has been checked, so that later
+scans stop counting it (see
+.BR "Detections that are not quarantined" ).
+They are used without a command; with more than one, they run in the
+order below.
+.TP
+.BI \-\-acknowledge " path"
+Rescan
+.I path
+through clamd and record the acknowledgement only if it is infected with
+a detection that is reported but not moved (heuristic signature or mail
+archive).
+A clean file, a detection that would be quarantined, a symbolic link, or
+a file that changes during the check are refused without recording
+anything.
+Repeatable.
+.TP
+.BI \-\-unacknowledge " value"
+Revoke an acknowledgement:
+.I value
+is the path of the file (its current content is hashed) or the hash
+prefix printed by
+.BR \-\-list\-acknowledged ,
+for files that no longer exist.
+An ambiguous or unknown prefix is an error and nothing is revoked.
+Repeatable.
+.TP
+.B \-\-list\-acknowledged
+List the acknowledgements: hash prefix, signature, first path seen,
+date of the acknowledgement and of the last scan that found it.
 .SS Scan options
 .TP
 .BI \-\-quarantine " directory"
@@ -162,6 +204,11 @@ One line per file:
 for files over the size limit, or
 .B ERRORE
 on standard error.
+An acknowledged detection prints
+.B GIÀ VALUTATO
+at every scan, also with
+.BR \-\-quiet ,
+and is not counted among the infected files.
 A subdirectory that cannot be read is reported once on standard error
 with
 .B CARTELLA NON LEGGIBILE
@@ -196,6 +243,9 @@ infections already found.
 For
 .BR ping :
 0 if clamd responds, 2 otherwise.
+.PP
+For the acknowledgement options: 0 if every value was handled, 2 if at
+least one was refused (that one leaves the register unchanged).
 .PP
 In the scheduled scan, codes 1 and 2 trigger the desktop notification
 through
@@ -247,6 +297,15 @@ if the file is copied from another file system): if the operation is
 interrupted, for example by a crash, the next start of the CLI or the
 GUI completes it or rolls it back, leaving the original file in place in
 that case.
+.TP
+.I \%~/.local/share/klamav-py/acknowledged.json
+Register of acknowledged detections (0600), written atomically, with the
+lock file
+.IR acknowledged.json.lock .
+An invalid register is renamed to
+.I acknowledged.json.corrupt-*
+and never deleted.
+Entries not found by any scan for 90 days are removed.
 .
 .SH SECURITY
 .SS Quarantine directory
@@ -293,11 +352,31 @@ heuristic detections
 and files in KMail/Akonadi, Thunderbird, Evolution, and Maildir mail
 archives are reported but not moved, to avoid damaging the user's
 mailboxes.
-They must be checked by hand: the summary reports how many there are.
+Without
+.B \-\-quarantine
+they are reported like the others.
 .B \-\-report\-only
 extends this rule to other directories,
 .B \-\-quarantine\-all
 disables it.
+.PP
+After checking one, delete it or record the acknowledgement with
+.BR \-\-acknowledge :
+later scans print
+.B GIÀ VALUTATO
+for it and no longer count it as infected, so the exit status and the
+scheduled scan notification are no longer triggered by a detection
+already checked.
+The key is the SHA-256 of the content plus the signature, not the path:
+a message that moves from
+.I new/
+to
+.I cur/
+in a maildir stays acknowledged, while a changed content is reported
+again.
+The register is consulted only for detections that would not be moved
+anyway: an acknowledgement never hides one that would be quarantined.
+A new detection keeps exit status 1.
 .SS TCP connection
 clamd does not support TLS: with
 .B \-\-tcp
@@ -340,6 +419,18 @@ Check that clamd responds on a non-standard socket:
 .RS
 .EX
 klamav\-py \-\-socket /run/clamd.scan/clamd.sock ping
+.EE
+.RE
+.PP
+Acknowledge a phishing message left in the KMail trash after checking
+it, list the acknowledgements, and revoke one by hash prefix:
+.PP
+.RS
+.EX
+journalctl \-\-user \-u klamav\-scan.service | grep INFETTO
+klamav\-py \-\-acknowledge ~/.local/share/local\-mail/trash/new/1695\&.R42.host
+klamav\-py \-\-list\-acknowledged
+klamav\-py \-\-unacknowledge 3f2a9c01be47
 .EE
 .RE
 .
