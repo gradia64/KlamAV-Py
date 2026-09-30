@@ -5,7 +5,7 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
-## Non rilasciato
+## 0.1.13 — 2026-09-30
 
 ### Modificato
 - Le cartelle che non si possono leggere durante una scansione hanno un
@@ -15,29 +15,12 @@ sono in `docs/CHANGELOG-archive.md`.
   errori: una cartella creata con sudo o il bind mount di un container
   darebbero sempre gli stessi errori e nasconderebbero quelli nuovi. Se
   sono attese, basta escluderle. Il codice di uscita della CLI non cambia.
-
-### Aggiunto
 - README e PKGBUILD: comando per importare la chiave di rilascio con il
   keyserver indicato esplicitamente (keys.openpgp.org o
   keyserver.ubuntu.com) oppure dal file `arch/klamav-py-release-key.asc`,
   con la verifica dell'impronta. `gpg --recv-keys` senza `--keyserver`
   usa il keyserver configurato, che può non avere la chiave e far
   fallire `makepkg`.
-- **Presa visione delle segnalazioni non spostate.** Le firme euristiche e
-  i file negli archivi di posta sono solo segnalati, e la stessa
-  segnalazione tornava a ogni scansione: con il timer di sistema, la
-  stessa notifica ogni notte (il caso d'origine: due email di phishing
-  rimaste nel cestino di KMail). Dopo aver verificato il file si può
-  registrarne la presa visione, con `klamav-py --acknowledge PERCORSO` o
-  dalla nuova pagina Segnalazioni: le scansioni successive lo riportano
-  come «già valutato» e non lo contano fra gli infetti, finché il
-  contenuto non cambia. Una segnalazione nuova notifica come prima, e una
-  presa visione non nasconde mai un file che andrebbe in quarantena.
-  `--list-acknowledged` e `--unacknowledge` elencano e revocano; le voci
-  non più ritrovate da 90 giorni si tolgono da sole.
-- Pagina **Segnalazioni** nella finestra: i file solo segnalati dalle
-  scansioni della sessione, con presa visione ed eliminazione (solo se il
-  file è ancora quello rilevato), e l'elenco delle prese visione.
 
 ### Corretto
 - **Scansione pulita di una cartella che non si può leggere.** Una
@@ -61,6 +44,29 @@ sono in `docs/CHANGELOG-archive.md`.
   sparivano i log delle ultime scansioni vere, e le loro voci in
   Cronologia puntavano a file inesistenti. Ora solo il primo tentativo
   scrive un log.
+- Il salvataggio delle Impostazioni, contando i file della quarantena che
+  si stava lasciando, completava o annullava come effetto collaterale le
+  quarantene interrotte in quella cartella. Ora la legge soltanto.
+
+### Aggiunto
+- **Presa visione delle segnalazioni non spostate.** Le firme euristiche e
+  i file negli archivi di posta sono solo segnalati, e la stessa
+  segnalazione tornava a ogni scansione: con il timer di sistema, la
+  stessa notifica ogni notte (il caso d'origine: due email di phishing
+  rimaste nel cestino di KMail). Dopo aver verificato il file si può
+  registrarne la presa visione, con `klamav-py --acknowledge PERCORSO` o
+  dalla nuova pagina Segnalazioni: le scansioni successive lo riportano
+  come «già valutato» e non lo contano fra gli infetti, finché il
+  contenuto non cambia. Una segnalazione nuova notifica come prima, e una
+  presa visione non nasconde mai un file che andrebbe in quarantena.
+  `--list-acknowledged` e `--unacknowledge` elencano e revocano; le voci
+  non più ritrovate da 90 giorni si tolgono da sole.
+- Pagina **Segnalazioni** nella finestra: i file solo segnalati dalle
+  scansioni della sessione, con presa visione ed eliminazione (solo se il
+  file è ancora quello rilevato), e l'elenco delle prese visione.
+- Test su cartelle non leggibili, intento della quarantena non valido,
+  valori della Pianificazione al clic, log dei tentativi e prese visione
+  (registro, CLI, pagina). Totale: 851 test.
 
 ---
 ## 0.1.12 — 2026-09-28

@@ -604,7 +604,7 @@ def _acknowledge_one(raw: Path, client, policy: QuarantinePolicy, registry: AckR
     if result.status == "ERROR":
         return refuse(f"verifica non riuscita ({result.signature})")
     if not result.infected:
-        return refuse("clamd non lo rileva più")
+        return refuse("clamd non lo rileva come infetto")
     decision = policy.decide(path, result.signature)
     if decision.quarantine:
         return refuse(

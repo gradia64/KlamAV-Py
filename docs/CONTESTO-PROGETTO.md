@@ -12,7 +12,7 @@ Non sostituisce la lettura del codice: i docstring dei moduli spiegano il
 dal codice non si vede, cioè da dove viene una regola e cosa è già stato
 valutato e scartato. La sezione 9 indica dove trovare il resto.
 
-Aggiornato alla versione 0.1.12.
+Aggiornato alla versione 0.1.13.
 
 ---
 
@@ -127,6 +127,19 @@ completate, clamd irraggiungibile compreso, non risultano più pulite
 dal thread della GUI (`gui/off_thread.py`). Quarantena con intento e
 recupero dopo un crash, `DatabaseDirectory` letta da `freshclam.conf`,
 versioni pre-release ordinate, test della gara QThread deterministico.
+
+**0.1.13 (30 settembre) — cartelle non leggibili, presa visione delle
+segnalazioni.** Una radice non leggibile (0300, 0700 altrui) dava una
+scansione pulita a zero file, perché `os.walk` ingoia gli errori: ora è
+bloccante, con una sonda prima della traversata, e le sottocartelle non
+leggibili hanno un contatore a parte. Dall'uso reale (phishing nel
+cestino di KMail segnalato ogni notte dal timer) la presa visione per
+contenuto e firma, in CLI e nella nuova pagina Segnalazioni, senza
+cambiare il codice di uscita. Dalle revisioni della 0.1.12: intento della
+quarantena validato come l'indice, salvataggio della Pianificazione con i
+valori letti al clic, un solo log per una serie di tentativi falliti,
+conteggio della quarantena in sola lettura. Contatori delle scansioni in
+un oggetto unico (`ScanTotals`).
 
 ---
 
