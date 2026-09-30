@@ -119,6 +119,65 @@ class _InvalidIntent(Exception):
     pass
 
 
+def _parse_index_file(index_path: Path) -> List[QuarantineEntry]:
+    """Legge e valida un indice. FileNotFoundError se manca,
+    _CorruptIndex per qualunque contenuto non plausibile. Nessun lock e
+    nessuna scrittura: la scrittura atomica garantisce uno snapshot
+    completo."""
+    try:
+        fd = os.open(index_path,
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise _CorruptIndex(f"indice non apribile: {exc}") from exc
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise _CorruptIndex("l'indice non è un file regolare")
+        if st.st_size > MAX_INDEX_BYTES:
+            raise _CorruptIndex(f"indice di dimensione anomala ({st.st_size} byte)")
+        data = fh.read(MAX_INDEX_BYTES + 1)
+    if len(data) > MAX_INDEX_BYTES:
+        raise _CorruptIndex("indice cresciuto durante la lettura")
+
+    try:
+        raw = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _CorruptIndex(f"JSON non valido: {exc}") from exc
+    if not isinstance(raw, list):
+        raise _CorruptIndex("la radice dell'indice non è una lista")
+
+    entries = []
+    for n, item in enumerate(raw):
+        problem = _entry_problem(item)
+        if problem is not None:
+            raise _CorruptIndex(f"voce {n}: {problem}")
+        # Campi sconosciuti ignorati invece di far fallire tutto: un
+        # indice scritto da una versione più recente resta leggibile
+        # dopo un downgrade.
+        known = {k: v for k, v in item.items() if k in _ENTRY_FIELDS}
+        known.setdefault("signature", None)
+        entries.append(QuarantineEntry(**known))
+    return entries
+
+
+def peek_entries(quarantine_dir: Path) -> List[QuarantineEntry]:
+    """Voci dell'indice di una quarantena esistente, in sola lettura: niente
+    creazione della directory, niente lock, niente recupero delle
+    operazioni interrotte né messa da parte di un indice corrotto (che
+    solleva QuarantineError). Per chi deve solo guardare, per esempio le
+    Impostazioni che contano le voci della quarantena che si sta lasciando:
+    costruire Quarantine lì completava o annullava operazioni interrotte
+    come effetto collaterale, nel thread della GUI."""
+    try:
+        return _parse_index_file(Path(quarantine_dir) / "index.json")
+    except FileNotFoundError:
+        return []
+    except _CorruptIndex as exc:
+        raise QuarantineError(f"indice della quarantena non valido: {exc}") from exc
+
+
 class Quarantine:
     """
     Directory di quarantena con permessi 0700, un JSON di indice
@@ -184,42 +243,7 @@ class Quarantine:
     def _parse_index(self) -> List[QuarantineEntry]:
         """Legge e valida l'indice. FileNotFoundError se manca,
         _CorruptIndex per qualunque contenuto non plausibile."""
-        try:
-            fd = os.open(self.index_path,
-                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-        except FileNotFoundError:
-            raise
-        except OSError as exc:
-            raise _CorruptIndex(f"indice non apribile: {exc}") from exc
-        with os.fdopen(fd, "rb") as fh:
-            st = os.fstat(fh.fileno())
-            if not stat.S_ISREG(st.st_mode):
-                raise _CorruptIndex("l'indice non è un file regolare")
-            if st.st_size > MAX_INDEX_BYTES:
-                raise _CorruptIndex(f"indice di dimensione anomala ({st.st_size} byte)")
-            data = fh.read(MAX_INDEX_BYTES + 1)
-        if len(data) > MAX_INDEX_BYTES:
-            raise _CorruptIndex("indice cresciuto durante la lettura")
-
-        try:
-            raw = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise _CorruptIndex(f"JSON non valido: {exc}") from exc
-        if not isinstance(raw, list):
-            raise _CorruptIndex("la radice dell'indice non è una lista")
-
-        entries = []
-        for n, item in enumerate(raw):
-            problem = _entry_problem(item)
-            if problem is not None:
-                raise _CorruptIndex(f"voce {n}: {problem}")
-            # Campi sconosciuti ignorati invece di far fallire tutto: un
-            # indice scritto da una versione più recente resta leggibile
-            # dopo un downgrade.
-            known = {k: v for k, v in item.items() if k in _ENTRY_FIELDS}
-            known.setdefault("signature", None)
-            entries.append(QuarantineEntry(**known))
-        return entries
+        return _parse_index_file(self.index_path)
 
     def _load_index(self) -> List[QuarantineEntry]:
         """Indice per un read-modify-write. Da chiamare con il lock tenuto.

@@ -62,7 +62,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..clamd_client import DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult
-from ..quarantine import Quarantine
+from ..quarantine import Quarantine, peek_entries
 from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
 from ..scan_exclusions import decide as decide_exclusion
 from ..scan_totals import ScanTotals
@@ -691,12 +691,13 @@ def validate_schedule(
 def _quarantine_count(path: Path) -> int:
     """Voci nell'indice di una quarantena esistente; 0 se non c'è o non si
     legge. Solo informativo: non deve mai bloccare il salvataggio, né
-    creare la directory se manca (il costruttore di Quarantine la crea)."""
+    creare la directory se manca, né recuperare operazioni interrotte
+    (peek_entries invece del costruttore di Quarantine)."""
     path = path.expanduser()
     if not path.is_dir():
         return 0
     try:
-        return len(Quarantine(path).list_entries())
+        return len(peek_entries(path))
     except Exception:  # noqa: BLE001 - dato informativo
         return 0
 
