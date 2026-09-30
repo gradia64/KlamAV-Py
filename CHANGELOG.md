@@ -17,6 +17,12 @@ sono in `docs/CHANGELOG-archive.md`.
   sono attese, basta escluderle. Il codice di uscita della CLI non cambia.
 
 ### Aggiunto
+- README e PKGBUILD: comando per importare la chiave di rilascio con il
+  keyserver indicato esplicitamente (keys.openpgp.org o
+  keyserver.ubuntu.com) oppure dal file `arch/klamav-py-release-key.asc`,
+  con la verifica dell'impronta. `gpg --recv-keys` senza `--keyserver`
+  usa il keyserver configurato, che può non avere la chiave e far
+  fallire `makepkg`.
 - **Presa visione delle segnalazioni non spostate.** Le firme euristiche e
   i file negli archivi di posta sono solo segnalati, e la stessa
   segnalazione tornava a ogni scansione: con il timer di sistema, la

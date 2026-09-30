@@ -36,6 +36,8 @@ Moduli principali, tutti in `klamav_py/`:
 | `quarantine.py` | Spostamento, indice, ripristino e cancellazione dei file in quarantena |
 | `quarantine_location.py` | Validazione della directory di quarantena scelta dall'utente |
 | `quarantine_policy.py` | Quando un infetto va solo segnalato e non spostato |
+| `acknowledged.py` | Registro delle segnalazioni già valutate (presa visione), per contenuto e firma |
+| `scan_totals.py` | Riepilogo numerico di una scansione, condiviso da worker, cronologia e CLI |
 | `scan_exclusions.py` | Validazione delle directory escluse dalle scansioni programmate |
 | `systemd_dropin.py` | Drop-in utente per `klamav-scan.service` |
 | `freshclam_service.py` | Aggiornamento firme tramite riavvio dell'unità freshclam |
@@ -155,6 +157,15 @@ valutazione della gravità.
 - **Fallire in modo visibile.** Una configurazione sbagliata deve produrre un
   errore o una notifica, mai un comportamento degradato in silenzio. Niente
   fallback automatici fra trasporti.
+- **Lo stesso utente non attraversa un confine di privilegio.** I file di
+  stato stanno nella home dell'utente o nella sua quarantena 0700: indice
+  e intenti della quarantena, registro delle prese visione, cronologia,
+  configurazione. Una loro manomissione da parte dello stesso utente (o
+  di un processo che gira come lui) non è un'escalation: i reperti di
+  questo tipo si classificano come robustezza, non come sicurezza. Restano
+  da correggere quando rompono qualcosa (un'eccezione che impedisce
+  l'avvio, un file dell'utente toccato fuori dalla quarantena), con la
+  regola di sempre: validare, mettere da parte, mai cancellare.
 - **Dire la verità scomoda dove si configura.** Le label di avviso (Real-Time
   parziale, TCP in chiaro, esclusioni attive) sono una scelta di progetto,
   non rumore.
@@ -166,7 +177,9 @@ difetto più serio che questo progetto possa avere, più di molti problemi di
 sicurezza classici: l'utente crede di essere protetto e non lo è. Esempi già
 trovati e corretti: quarantena in `/var/tmp` distrutta da PrivateTmp,
 quarantena che contiene la radice della scansione (CLI, 0.1.10), esclusione
-che diventa antenata della radice (pianificazione interna, `6a7a326`).
+che diventa antenata della radice (pianificazione interna, `6a7a326`),
+radice non leggibile, che `os.walk` percorreva senza errori e senza file
+(0.1.13).
 
 Il meccanismo tipico è `_iter_files` (`clamd_client.py`): se la radice della
 scansione sta dentro un'esclusione, la traversata restituisce zero file. È un
@@ -220,7 +233,8 @@ nulla fa perdere tempo.
   `gui/off_thread.run_off_gui_thread` (thread daemon, risultato consegnato
   con un segnale queued), una valutazione per tipo alla volta; il
   salvataggio disattiva il pulsante finché la validazione non risponde e
-  prosegue con i valori letti al clic. Thread daemon e non QThread: un
+  prosegue con i valori letti al clic (`_ScheduleForm`: casella,
+  intervallo, unità, cartella), senza rileggere i widget. Thread daemon e non QThread: un
   controllo bloccato su un mount di rete non deve impedire l'uscita.
   Stesso meccanismo per `systemctl --user` (timeout 10 s): stato del timer
   nella label e nel salvataggio, `disable_timer()`, `daemon_reload()` dopo
@@ -238,8 +252,60 @@ nulla fa perdere tempo.
   Pianificazione controlla la regola inversa al salvataggio.
 - **Scansione non completata** (`ScanWorker.aborted`): per la pianificazione
   interna non aggiorna `schedule_last_run`, quindi viene ritentata al
-  minuto; notifica e voce in cronologia una volta sola finché una scansione
-  non arriva alla fine.
+  minuto; notifica, voce in cronologia e file di log una volta sola finché
+  una scansione non arriva alla fine (un log per tentativo faceva uscire
+  dalla rotazione quelli delle scansioni vere).
+- **Radice non leggibile = bloccante.** Per ogni radice che è una
+  directory, con o senza `strict_roots`, una sonda esplicita
+  (`clamd_client.unreadable_root_problem`, `os.scandir` aperto e chiuso,
+  non `os.access`) prima della traversata e della connessione a clamd:
+  GUI → `aborted`, CLI → uscita 2. Un errore di `os.walk` sulla radice
+  (corsa con la sonda) è `UnreadableRoot`, stesso esito. Una directory
+  vuota ma leggibile resta una scansione pulita.
+- **Sottocartelle non leggibili: contatore a parte, non errori.**
+  `_iter_files` usa `onerror` e riporta la sola cartella più alta; ENOENT
+  ed ENOTDIR (cartella sparita o sostituita durante la traversata) non si
+  contano. Non entrano negli «errori» perché le EACCES permanenti (bind
+  mount di container, cartelle create con sudo) produrrebbero sempre gli
+  stessi errori e nasconderebbero quelli nuovi; la via d'uscita è
+  l'esclusione, che funziona perché lo sfoltimento avviene prima dello
+  scandir. **Limite noto, voluto:** la CLI esce comunque con 0, quindi
+  sotto il timer `OnFailure` non scatta e le cartelle non leggibili si
+  vedono solo nel log e nel journal, non in una notifica. È la regola dei
+  codici di uscita, non un difetto.
+- **Riepilogo come oggetto unico.** `progress`/`finished_scan` di
+  `ScanWorker` e `HistoryManager.add_entry` passano un `ScanTotals`
+  invece di interi posizionali; un contatore nuovo è un campo con default
+  0, e le voci di cronologia vecchie si leggono con `from_entry`.
+
+### Segnalazioni non spostate e presa visione
+
+- **Il codice di uscita non cambia.** Una segnalazione «solo
+  segnalazione» (firma euristica, archivio di posta) nuova esce con 1 e
+  notifica: è proprio la segnalazione utile. Il problema era la
+  *ripetizione* di una già valutata, e si risolve con la presa visione
+  per contenuto (`acknowledged.py`), non toccando l'uscita. Scartate:
+  uscita 0 per le sole segnalazioni e uscita 3 con `SuccessExitStatus=3`
+  (i phishing nuovi diventerebbero invisibili nel percorso del timer),
+  escludere l'archivio di posta (contro il design), i file `.fp` di
+  ClamAV (semantica giusta, ma di sistema, scritti da root e validi per
+  tutti) e `.ign2` (spegne la firma ovunque). Differenziare il testo della
+  notifica con `MONITOR_EXIT_STATUS` (systemd ≥ 251) resta un possibile
+  raffinamento, non la correzione.
+- **Chiave: SHA-256 del contenuto più firma**, non il percorso (in un
+  maildir un messaggio letto cambia nome). Contenuto cambiato = di nuovo
+  segnalato. Voci senza riscontri da 90 giorni tolte.
+- **Solo dopo la policy.** Il registro si consulta solo per i rilevamenti
+  che la policy ha già deciso di segnalare soltanto: una presa visione non
+  sopprime mai un rilevamento da quarantena, nemmeno con lo stesso hash
+  altrove. Hash solo sui file segnalati, riletti dopo il rilevamento con
+  `O_NOFOLLOW`; un errore di lettura o un registro illeggibile valgono
+  come segnalazione nuova.
+- **`--acknowledge` riscansiona** il file via clamd e registra solo un
+  infetto «solo segnalazione» con contenuto stabile durante la verifica:
+  non si fida di un percorso fornito a mano. La GUI registra invece il
+  contenuto riletto subito dopo il rilevamento, e l'eliminazione passa
+  solo se il percorso è ancora lo stesso inode.
 
 ### Unit systemd e drop-in
 
@@ -328,6 +394,21 @@ e la rete dell'ambiente può non raggiungere i mirror Debian.
   originale lasciato dov'è (la prossima scansione lo rileva). Non si
   ripete mai lo spostamento dell'originale nel recupero: vorrebbe dire
   ripeterne le verifiche.
+- **L'intento ha la fiducia dell'indice** (0.1.13). Si valida con le
+  stesse regole (`_entry_problem`), `original_path` assoluto, `dev`/`ino`
+  interi non negativi, e `staging` deve stare nella directory
+  dell'originale con il nome `.klamav-quarantena-<32 hex>`: è l'unico
+  file fuori dalla quarantena che il recupero può cancellare. Un intento
+  non valido, o qualunque errore imprevisto nel recupero, si mette da
+  parte come `.<nome>.intent.corrupt-*` (mai cancellato) e lascia `dest`
+  visibile in `orphans()`: il costruttore di `Quarantine` non solleva per
+  un file di servizio. Se `staging` esiste ma non è il file verificato
+  (salvataggio con temporaneo+rename durante la copia), la voce si
+  aggiunge comunque e `staging` resta per il recupero manuale.
+- **Contare non è recuperare.** Chi deve solo guardare l'indice (le
+  Impostazioni che contano le voci della quarantena che si lascia) usa
+  `peek_entries()`: niente lock, niente recupero, niente creazione della
+  directory.
 
 ### Aggiornamento dell'applicazione
 
@@ -354,8 +435,44 @@ e la rete dell'ambiente può non raggiungere i mirror Debian.
 Già tracciati: segnalarli di nuovo è utile solo se si aggiunge uno scenario,
 una riproduzione o una correzione migliore.
 
-Nessuno alla 0.1.12: le voci aperte fino alla 0.1.11 sono state risolte e le
-decisioni corrispondenti sono in sezione 4.
+Emersi dalle revisioni della 0.1.12 e non corretti nella 0.1.13:
+
+- **Recupero della quarantena nel thread della GUI.** Il costruttore di
+  `Quarantine` esegue il recupero, e si chiama nel thread della GUI
+  all'avvio e in `_apply_quarantine_dir`. La 0.1.13 ha tolto solo il caso
+  del conteggio (`peek_entries`); spostare fuori thread gli altri due è
+  il lavoro previsto per la 0.1.14.
+- **Finestra fra `open_private_fd(O_EXCL)` e `flock` in `_write_intent`:**
+  un recupero concorrente può eliminare l'intento di un'operazione viva
+  (esito: orfano visibile, come prima della 0.1.12). Correzione possibile:
+  intento su nome temporaneo, poi rename.
+- **`_clear_intent` nel `finally` di `quarantine_file`:** se la scrittura
+  dell'indice fallisce dopo lo spostamento, l'intento sparisce e il
+  recupero automatico non avviene.
+- **Scansione manuale bloccata:** la riga di errore compare, ma stato e
+  referto dicono «Completata senza problemi» (`ScanPage` non collega
+  `aborted`). Vale anche per la radice non leggibile della 0.1.13.
+- **`ScanWorker.run()`:** costruzione del client e di `Quarantine` fuori
+  dal `try`; un `OSError` lascia la pagina «in corso» fino al riavvio.
+- **Pagina Pianificazione:** con un controllo bloccato su un mount di
+  rete, le aggiunte di esclusioni vengono scartate in silenzio e il
+  pulsante di salvataggio resta disattivato senza spiegazione.
+- Il messaggio «verrà ritentata finché il problema non è risolto» non ha
+  seguito dopo il primo tentativo.
+- `Quarantine.recovered` non è letto da nessun consumatore: valutare di
+  mostrare gli esiti del recupero (tray una volta, stderr nella CLI).
+- **Prese visione nella scansione programmata interna:** i problemi del
+  registro (file non rileggibile per l'hash, registro messo da parte)
+  arrivano sul segnale `error`, che la programmata non collega: si
+  vedono nella scansione manuale e nella CLI, non nel log della
+  programmata. L'esito resta corretto (segnalazione nuova).
+- **Hash riletto dopo il rilevamento:** fra il verdetto di clamd e la
+  rilettura il contenuto può cambiare, e la GUI registrerebbe la presa
+  visione del contenuto nuovo. Richiede che lo stesso utente modifichi il
+  file in quella finestra; la CLI (`--acknowledge`) confronta l'hash prima
+  e dopo la scansione.
+- Residuo nei test: `tests/test_settings_exclusions.py` imposta
+  `_schedule_missing_noted`, attributo non più usato in produzione.
 
 ---
 
@@ -413,6 +530,10 @@ Per ogni reperto:
    scenario improbabile va detta così.
 4. **Stato della prova**: verificato con riproduzione (riportare comando e
    output essenziale), verificato su lettura del codice, oppure ipotesi.
+   Un reperto di gravità alta o bloccante va accompagnato da una
+   riproduzione, e l'output riportato va confrontato con la tesi prima di
+   concludere: più di un reperto è stato scartato perché l'output della
+   sua stessa riproduzione diceva altro.
 5. **Riferimenti** `file:riga` al commit indicato.
 6. **Correzione proposta**, con le alternative se ce ne sono, e il suo
    rapporto con le voci aperte della sezione 5: una correzione che va in

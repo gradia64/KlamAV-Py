@@ -400,10 +400,21 @@ Dalla 0.1.10 i tag dei rilasci sono firmati con la chiave del progetto:
 
 ```bash
 gpg --keyserver hkps://keys.openpgp.org --recv-keys EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
+# oppure, se keys.openpgp.org non risponde o non consegna la chiave:
+gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
 git clone https://github.com/gradia64/KlamAV-Py.git && cd KlamAV-Py
 git tag -v v0.1.10
 ```
 
-Controlla che l'impronta riportata da `gpg` coincida con quella indicata
-sopra: il keyserver garantisce solo di consegnare una chiave, non che sia
-quella giusta. I tag precedenti alla 0.1.10 non sono firmati.
+Senza keyserver, la chiave pubblica è anche nel repository:
+
+```bash
+gpg --import arch/klamav-py-release-key.asc
+gpg --fingerprint EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
+```
+
+In ogni caso controlla che l'impronta riportata da `gpg` coincida con
+quella indicata sopra: il keyserver (o il file nel repository) garantisce
+solo di consegnare una chiave, non che sia quella giusta. Indica sempre il
+keyserver con `--keyserver`: senza, `gpg` usa quello configurato, che può
+non avere la chiave. I tag precedenti alla 0.1.10 non sono firmati.
