@@ -353,6 +353,13 @@ nulla fa perdere tempo.
   prese visione precedenti e che non sono cancellate. Il codice di uscita
   delle opzioni non cambia: l'operazione è riuscita sul registro nuovo,
   come già per `--list-acknowledged`.
+- **Una sola policy per scan e `--acknowledge`** (`cli.build_policy`,
+  0.1.14): cartelle predefinite più le `--report-only`, disattivata da
+  `--quarantine-all`. Le due opzioni esistono anche fra le opzioni globali
+  (dest `report_only_global`/`quarantine_all_global`, sommate a quelle di
+  `scan`), perché `--acknowledge` non ha un comando; con `ping` sono un
+  errore. La presa visione va chiesta con le stesse opzioni della
+  scansione, e il rifiuto lo dice.
 - **`--acknowledge` riscansiona** il file via clamd e registra solo un
   infetto «solo segnalazione» con contenuto stabile durante la verifica:
   non si fida di un percorso fornito a mano. La GUI registra invece il
@@ -521,6 +528,13 @@ Emersi dalle revisioni della 0.1.12 e non corretti nella 0.1.13:
   visione del contenuto nuovo. Richiede che lo stesso utente modifichi il
   file in quella finestra; la CLI (`--acknowledge`) confronta l'hash prima
   e dopo la scansione.
+- **Cartelle report-only personalizzate nella GUI:** il worker usa sempre
+  la policy predefinita (`ScanWorker`, `QuarantinePolicy()`), e la GUI non
+  ha un modo di indicare cartelle `--report-only`. Una presa visione
+  registrata dalla CLI con una `--report-only` vale anche per le
+  scansioni della GUI solo se il file è comunque «solo segnalazione»
+  (firma euristica, archivio di posta); altrimenti la GUI lo mette in
+  quarantena come prima. Limite annotato nella 0.1.14, non corretto.
 - **Mount NFS `hard` che non risponde:** la traversata si blocca invece
   di ricevere un errore, quindi la riclassificazione degli errno della
   0.1.14 non lo copre. Stesso tema della validazione fuori dal thread

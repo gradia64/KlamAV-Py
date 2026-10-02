@@ -31,8 +31,18 @@ sono in `docs/CHANGELOG-archive.md`.
   resta 2. La riga «CARTELLA NON LEGGIBILE» ha lo stesso formato nella
   CLI e nella GUI.
 
+- `--report-only` e `--quarantine-all` si possono indicare anche prima del
+  comando, fra le opzioni globali, e valgono per `--acknowledge`: la
+  presa visione va chiesta con le stesse opzioni della scansione. Con
+  `scan` funzionano in entrambe le posizioni.
 
 ### Corretto
+- **Presa visione rifiutata sotto una cartella `--report-only`.** Un file
+  sotto una cartella passata con `--report-only` era solo segnalato dalla
+  scansione, ma `--acknowledge` lo rifiutava come «rilevamento da
+  quarantena», perché ignorava quell'opzione (e `--quarantine-all`). Ora
+  la regola è la stessa; senza le stesse opzioni il rifiuto spiega cosa
+  passare.
 - **Prese visione sparite senza spiegazione.** Con un registro delle
   prese visione danneggiato, `--acknowledge`, `--unacknowledge` e la
   pagina Segnalazioni lo mettevano da parte senza dire nulla:

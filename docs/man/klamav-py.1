@@ -38,6 +38,9 @@ klamav-py \- command-line virus scanning through the ClamAV daemon
 .RB [ \-\-unacknowledge
 .IR value ]...
 .RB [ \-\-list\-acknowledged ]
+.RB [ \-\-report\-only
+.IR directory ]...
+.RB [ \-\-quarantine\-all ]
 .br
 .B klamav-py \-\-version
 .
@@ -104,6 +107,14 @@ A clean file, a detection that would be quarantined, a symbolic link, or
 a file that changes during the check are refused without recording
 anything.
 Repeatable.
+.IP
+It must be given the same
+.B \-\-report\-only
+(and
+.BR \-\-quarantine\-all )
+options used for the scan: the rule that decides what is only reported is
+the same, and without those directories a file the scan leaves in place
+is a detection that would be quarantined.
 .TP
 .BI \-\-unacknowledge " value"
 Revoke an acknowledgement:
@@ -118,6 +129,17 @@ Repeatable.
 .B \-\-list\-acknowledged
 List the acknowledgements: hash prefix, signature, first path seen,
 date of the acknowledgement and of the last scan that found it.
+.TP
+.BI \-\-report\-only " directory"
+.TQ
+.B \-\-quarantine\-all
+The
+.B scan
+options with the same name, given among the global options for
+.BR \-\-acknowledge .
+With
+.B scan
+they work in both positions, and the directories add up.
 .SS Scan options
 .TP
 .BI \-\-quarantine " directory"
@@ -466,6 +488,18 @@ journalctl \-\-user \-u klamav\-scan.service | grep INFETTO
 klamav\-py \-\-acknowledge ~/.local/share/local\-mail/trash/new/1695\&.R42.host
 klamav\-py \-\-list\-acknowledged
 klamav\-py \-\-unacknowledge 3f2a9c01be47
+.EE
+.RE
+.PP
+Acknowledge a file under a directory that is only reported, with the
+same
+.B \-\-report\-only
+as the scan:
+.PP
+.RS
+.EX
+klamav\-py scan ~ \-\-quarantine ~/.local/share/klamav\-py/quarantine \-\-report\-only ~/Archive
+klamav\-py \-\-report\-only ~/Archive \-\-acknowledge ~/Archive/old.exe
 .EE
 .RE
 .

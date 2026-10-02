@@ -40,6 +40,9 @@ klamav-py \- scansione antivirus a riga di comando tramite il demone ClamAV
 .RB [ \-\-unacknowledge
 .IR valore ]...
 .RB [ \-\-list\-acknowledged ]
+.RB [ \-\-report\-only
+.IR directory ]...
+.RB [ \-\-quarantine\-all ]
 .br
 .B klamav-py \-\-version
 .
@@ -106,6 +109,14 @@ posta).
 Un file pulito, un rilevamento da quarantena, un link simbolico o un file
 che cambia durante la verifica sono rifiutati senza registrare nulla.
 Ripetibile.
+.IP
+Va chiamato con le stesse
+.B \-\-report\-only
+(e
+.BR \-\-quarantine\-all )
+usate in scansione: la regola che decide cosa è solo segnalato è la
+stessa, e senza quelle cartelle un file che la scansione lascia al suo
+posto risulta un rilevamento da quarantena.
 .TP
 .BI \-\-unacknowledge " valore"
 Revoca una presa visione:
@@ -120,6 +131,17 @@ Ripetibile.
 .B \-\-list\-acknowledged
 Elenca le prese visione: prefisso dell'hash, firma, primo percorso visto,
 data della presa visione e dell'ultima scansione che l'ha ritrovata.
+.TP
+.BI \-\-report\-only " directory"
+.TQ
+.B \-\-quarantine\-all
+Le opzioni di
+.B scan
+con lo stesso nome, indicate fra le opzioni globali per
+.BR \-\-acknowledge .
+Con
+.B scan
+valgono in entrambe le posizioni, e le directory si sommano.
 .SS Opzioni di scan
 .TP
 .BI \-\-quarantine " directory"
@@ -469,6 +491,17 @@ journalctl \-\-user \-u klamav\-scan.service | grep INFETTO
 klamav\-py \-\-acknowledge ~/.local/share/local\-mail/trash/new/1695\&.R42.host
 klamav\-py \-\-list\-acknowledged
 klamav\-py \-\-unacknowledge 3f2a9c01be47
+.EE
+.RE
+.PP
+Presa visione di un file sotto una cartella solo segnalata, con la stessa
+.B \-\-report\-only
+della scansione:
+.PP
+.RS
+.EX
+klamav\-py scan ~ \-\-quarantine ~/.local/share/klamav\-py/quarantine \-\-report\-only ~/Archivio
+klamav\-py \-\-report\-only ~/Archivio \-\-acknowledge ~/Archivio/vecchio.exe
 .EE
 .RE
 .

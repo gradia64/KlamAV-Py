@@ -12,7 +12,10 @@ essere ri-rilevati (e ri-quarantenati) a ogni scansione che la copre.
 Con --quarantine, le firme euristiche (Heuristics.*) e i file negli
 archivi di posta (KMail/Akonadi, Thunderbird, Evolution, Maildir) sono
 solo segnalati, non spostati: vedi quarantine_policy.py. --report-only
-aggiunge directory, --quarantine-all disattiva la regola.
+aggiunge directory, --quarantine-all disattiva la regola. Valgono anche
+fra le opzioni globali, per --acknowledge: la regola si costruisce in un
+punto solo (build_policy), e la presa visione va chiesta con le stesse
+opzioni della scansione.
 
 Segnalazioni già valutate: un file che la policy lascia al suo posto e di
 cui l'utente ha registrato la presa visione (--acknowledge, vedi
@@ -156,6 +159,30 @@ def build_parser() -> argparse.ArgumentParser:
             "dell'hash mostrato da --list-acknowledged. Ripetibile"
         ),
     )
+    # Regola «solo segnalazione» anche fra le opzioni globali: --acknowledge
+    # non ha un comando, e deve poter ricostruire la stessa policy della
+    # scansione (vedi build_policy). Con scan valgono in entrambe le
+    # posizioni e si sommano; dest diversi, perché i valori del
+    # sottocomando sostituirebbero quelli globali invece di aggiungersi.
+    parser.add_argument(
+        "--report-only",
+        dest="report_only_global",
+        metavar="DIR",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Come l'opzione di scan, per --acknowledge: passa le stesse cartelle "
+            "usate in scansione, perché la presa visione valga per i file sotto di "
+            "esse (ripetibile)"
+        ),
+    )
+    parser.add_argument(
+        "--quarantine-all",
+        dest="quarantine_all_global",
+        action="store_true",
+        help="Come l'opzione di scan, per --acknowledge: nessun rilevamento è solo segnalato",
+    )
     # Non obbligatorio: le opzioni delle prese visione funzionano senza
     # comando. main() chiede un comando se manca anche quelle.
     sub = parser.add_subparsers(dest="command")
@@ -255,6 +282,23 @@ def _error_category(signature: str) -> str:
     # normalizza eventuali path assoluti dentro il messaggio
     cleaned = re.sub(r"/\S+", "<path>", cleaned)
     return cleaned.strip()
+
+
+def build_policy(args: argparse.Namespace) -> QuarantinePolicy:
+    """
+    La regola «solo segnalazione» dagli argomenti: cartelle predefinite più
+    le --report-only (globali e di scan), disattivata da --quarantine-all.
+    Unica costruzione per scan e --acknowledge: prima --acknowledge usava
+    le sole cartelle predefinite, e un file sotto una --report-only era
+    «solo segnalazione» in scansione ma rifiutato come «da quarantena»
+    dalla presa visione.
+    """
+    report_only = [*args.report_only_global, *getattr(args, "report_only", [])]
+    quarantine_all = args.quarantine_all_global or getattr(args, "quarantine_all", False)
+    return QuarantinePolicy(
+        default_report_only_dirs() + [p.expanduser() for p in report_only],
+        enabled=not quarantine_all,
+    )
 
 
 def _prepare_quarantine_dir(raw: Path, scan_root: Path) -> Path | None:
@@ -408,10 +452,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     except (OSError, QuarantineError) as exc:
         print(f"Quarantena non utilizzabile: {exc}", file=sys.stderr)
         return 2
-    policy = QuarantinePolicy(
-        default_report_only_dirs() + [p.expanduser() for p in args.report_only],
-        enabled=not args.quarantine_all,
-    )
+    policy = build_policy(args)
 
     scanned = 0
     infections = 0
@@ -612,9 +653,16 @@ def _acknowledge_one(raw: Path, client, policy: QuarantinePolicy, registry: AckR
         return refuse("clamd non lo rileva come infetto")
     decision = policy.decide(path, result.signature)
     if decision.quarantine:
+        if not policy.enabled:
+            return refuse(
+                f"rilevamento da quarantena ({result.signature}): con --quarantine-all "
+                "nessun rilevamento è solo segnalato, quindi la presa visione non si applica"
+            )
         return refuse(
             f"rilevamento da quarantena ({result.signature}): la presa visione vale solo "
-            "per le firme euristiche e gli archivi di posta, che non vengono spostati"
+            "per i rilevamenti che non vengono spostati (firme euristiche, archivi di "
+            "posta, cartelle --report-only). Se la scansione usa --report-only, passa "
+            "le stesse cartelle anche a --acknowledge"
         )
     if before != after:
         return refuse("il file è cambiato durante la verifica")
@@ -682,7 +730,7 @@ def cmd_acknowledgements(args: argparse.Namespace) -> int:
     ok = True
     if args.acknowledge:
         client = args.endpoint.new_client()
-        policy = QuarantinePolicy(default_report_only_dirs())
+        policy = build_policy(args)
         for raw in args.acknowledge:
             ok = _acknowledge_one(raw, client, policy, registry) and ok
     for value in args.unacknowledge:
@@ -718,6 +766,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "scan":
         return cmd_scan(args)
     if args.command == "ping":
+        if args.report_only_global or args.quarantine_all_global:
+            parser.error("--report-only e --quarantine-all valgono per scan e --acknowledge")
         return cmd_ping(args)
     parser.error("comando sconosciuto")
     return 2
