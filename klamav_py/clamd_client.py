@@ -307,6 +307,12 @@ def unreadable_dir_line(path: "Path | str", reason: str) -> str:
 # Una cartella sparita (ENOENT) o sostituita da un file (ENOTDIR) durante la
 # traversata non è copertura mancante, come un file sparito.
 _VANISHED_DIR_ERRNOS = {errno.ENOENT, errno.ENOTDIR}
+# Permessi: la cartella è lì e resterà illeggibile finché qualcuno non
+# cambia i permessi (cartelle create con sudo, bind mount di container).
+# Contatore a parte, rimedio --exclude. Ogni altro errno (EIO di un disco
+# che degrada, ESTALE di un mount NFS che non risponde più) è un guasto, e
+# segue il percorso degli errori dei file.
+_UNREADABLE_DIR_ERRNOS = {errno.EACCES, errno.EPERM}
 
 
 @dataclass
@@ -452,7 +458,7 @@ class ClamdClient:
         path: Path,
         exclude_dirs: Optional[Iterable[Path]],
         on_unreadable_dir: Optional[Callable[[Path, OSError], None]] = None,
-    ) -> Iterator[Path]:
+    ) -> Iterator["Path | ScanResult"]:
         """
         Traversata ricorsiva con PRUNING: le directory escluse non vengono
         nemmeno attraversate — a differenza di un filtro post-hoc su
@@ -473,15 +479,23 @@ class ClamdClient:
         Cartelle non leggibili: os.walk senza onerror ingoiava gli errori
         di scandir, e una sottocartella illeggibile era saltata in
         silenzio mentre un file illeggibile produce un errore. Ora
-        on_unreadable_dir(cartella, errore) le riporta; os.walk non ci
-        scende, quindi si riporta solo la più alta. Le esclusioni sono
-        sfoltite prima dello scandir e non arrivano mai qui. Un errore
+        on_unreadable_dir(cartella, errore) riporta quelle con permessi
+        negati (EACCES, EPERM); os.walk non ci scende, quindi si riporta
+        solo la più alta. Ogni altro errore su una sottocartella (EIO,
+        ESTALE: disco o mount guasto) non è un permesso da escludere ma un
+        guasto: esce come ScanResult ERROR, nel flusso dei file, e chi
+        scansiona lo conta fra gli errori come quelli dei file. Le
+        esclusioni sono sfoltite prima dello scandir e non arrivano mai
+        qui. Un errore
         sulla radice stessa (corsa con la sonda di chi chiama, oppure una
         radice che non è una directory né un file regolare) è
         UnreadableRoot con il motivo di root_problem: bloccante, mai una
         scansione vuota.
         """
         exclude = [Path(e) for e in (exclude_dirs or [])]
+        # Errori di sottocartelle guaste, raccolti da onerror (che os.walk
+        # chiama dentro il proprio next()) e restituiti al passo successivo.
+        failed: list[ScanResult] = []
 
         def onerror(exc: OSError) -> None:
             where = Path(exc.filename) if exc.filename is not None else path
@@ -490,8 +504,15 @@ class ClamdClient:
                 raise UnreadableRoot(path, problem) from exc
             if exc.errno in _VANISHED_DIR_ERRNOS:
                 return
-            if on_unreadable_dir is not None:
-                on_unreadable_dir(where, exc)
+            if exc.errno in _UNREADABLE_DIR_ERRNOS:
+                if on_unreadable_dir is not None:
+                    on_unreadable_dir(where, exc)
+                return
+            failed.append(ScanResult(
+                path=str(where),
+                status="ERROR",
+                signature=f"cartella non letta, contenuto non controllato: {exc.strerror or exc}",
+            ))
 
         if path.is_file():
             yield path
@@ -505,6 +526,8 @@ class ClamdClient:
             return
 
         for dirpath, dirnames, filenames in os.walk(path, onerror=onerror, followlinks=False):
+            yield from failed
+            failed.clear()
             dirnames.sort()
             base = Path(dirpath)
             # Pruning: rimuovere una dir da dirnames (modifica in-place,
@@ -521,6 +544,8 @@ class ClamdClient:
                 ]
             for name in sorted(filenames):
                 yield base / name
+        # Una sottocartella guasta può essere l'ultima che os.walk prova.
+        yield from failed
 
     def scan_stream(
         self,
@@ -544,11 +569,13 @@ class ClamdClient:
         a risultato ottenuto (specie su file grossi che richiedono un
         po' per essere letti e inviati).
 
-        on_unreadable_dir(cartella, errore): sottocartella che non si può
-        leggere, vedi _iter_files. Non è un risultato: non entra negli
+        on_unreadable_dir(cartella, errore): sottocartella con permessi
+        negati, vedi _iter_files. Non è un risultato: non entra negli
         errori (le EACCES permanenti, come i bind mount di Docker,
         nasconderebbero quelli veri) e ha un contatore suo nei chiamanti.
-        Una radice illeggibile solleva invece UnreadableRoot.
+        Una sottocartella guasta (EIO, ESTALE) è invece un risultato ERROR
+        con il percorso della cartella, e una radice non valida solleva
+        UnreadableRoot.
 
         exclude_dirs: directory da escludere dall'attraversamento ricorsivo
         (non vengono né attraversate né lette). È il filtro giusto per la
@@ -606,6 +633,9 @@ class ClamdClient:
         try:
             if not persistent:
                 for target in self._iter_files(path, exclude_dirs, on_unreadable_dir):
+                    if isinstance(target, ScanResult):
+                        yield target
+                        continue
                     if self._should_skip_entry(target):
                         continue
                     if on_file_start:
@@ -621,6 +651,10 @@ class ClamdClient:
                 return
 
             for target in self._iter_files(path, exclude_dirs, on_unreadable_dir):
+                if isinstance(target, ScanResult):
+                    # Sottocartella guasta: già un esito, niente da inviare.
+                    yield target
+                    continue
                 # Prima di on_file_start: le entry saltate non devono
                 # nemmeno comparire come "sto scansionando X" nella UI.
                 if self._should_skip_entry(target):

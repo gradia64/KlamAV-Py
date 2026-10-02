@@ -25,9 +25,12 @@ esecuzione (clamd irraggiungibile, percorso inesistente, collegamento
 rotto, né directory né file regolare, non leggibile, ecc.)
 — utile per `OnFailure=` in systemd o per script di monitoraggio.
 
-Una sottocartella non leggibile non cambia il codice di uscita: una riga
-su stderr (e nel log degli errori) e un contatore a parte nel riepilogo.
-Sotto il timer quindi non notifica: si vede nel log e nel journal.
+Una sottocartella con permessi negati non cambia il codice di uscita: una
+riga su stderr (e nel log degli errori) e un contatore a parte nel
+riepilogo, con il suggerimento di --exclude. Ogni altro errore su una
+sottocartella (EIO, ESTALE: disco o mount guasto) è un errore come quelli
+dei file, senza quel suggerimento. Sotto il timer nessuno dei due
+notifica: si vedono nel journal e nel log degli errori della unit.
 """
 
 from __future__ import annotations

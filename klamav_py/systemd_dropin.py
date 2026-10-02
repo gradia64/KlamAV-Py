@@ -53,7 +53,15 @@ HEADER = "# Generato da KlamAV-Py: non modificare a mano."
 # verificata dai test, quindi un cambio nella unit non può passare
 # inosservato qui.
 EXEC_BINARY = "/usr/bin/klamav-py"
-EXEC_TEMPLATE = EXEC_BINARY + " {options}scan %h --quarantine {quarantine}{excludes} --quiet"
+# Log degli errori nella LogsDirectory= della unit spedita (%L/klamav-py,
+# cioè $XDG_STATE_HOME/log/klamav-py in una unit utente): la creano systemd
+# e la sandbox la lascia scrivibile.
+ERRORS_LOG = "%L/klamav-py/scan-errors.log"
+EXEC_TEMPLATE = (
+    EXEC_BINARY
+    + " {options}scan %h --quarantine {quarantine}{excludes} --quiet --log-errors "
+    + ERRORS_LOG
+)
 
 # Percorso assoluto, niente PATH: stesso principio di trusted_binary() in
 # freshclam_service.py.
@@ -111,13 +119,20 @@ def quote_path_value(value: str) -> str:
 _CUNESCAPE = {"\\": "\\", '"': '"', "'": "'", "n": "\n", "t": "\t", "r": "\r", "s": " "}
 
 
-def _specifiers(value: str, home: str | None) -> str:
+def _specifiers(value: str, home: str | None, logs: str | None = None) -> str:
+    """%%, %h e %L. %L in una unit utente è $XDG_STATE_HOME/log: senza un
+    valore esplicito si usa quello predefinito sotto `home`."""
+    if logs is None and home is not None:
+        logs = f"{home}/.local/state/log"
+
     def repl(m: re.Match) -> str:
         code = m.group(1)
         if code == "%":
             return "%"
         if code == "h" and home is not None:
             return home
+        if code == "L" and logs is not None:
+            return logs
         raise ValueError(f"specificatore %{code} non gestito")
     return re.sub(r"%(.)", repl, value)
 
@@ -167,9 +182,10 @@ def _variables(word: str) -> str:
     return re.sub(r"\$\$|\$\{?\w+\}?", repl, word)
 
 
-def split_exec(value: str, home: str | None = None) -> list[str]:
-    """argv che systemd ricava da un valore di ExecStart= (%h espanso con home)."""
-    return [_variables(w) for w in _split_words(_specifiers(value, home))]
+def split_exec(value: str, home: str | None = None, logs: str | None = None) -> list[str]:
+    """argv che systemd ricava da un valore di ExecStart= (%h espanso con
+    home, %L con logs)."""
+    return [_variables(w) for w in _split_words(_specifiers(value, home, logs))]
 
 
 def split_paths(value: str, home: str | None = None) -> list[str]:

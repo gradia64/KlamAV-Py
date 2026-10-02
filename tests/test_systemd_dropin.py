@@ -119,7 +119,7 @@ GOLDEN_FUORI_HOME = f"""{HEADER}
 [Service]
 # Azzeramento obbligatorio: su Type=oneshot le ExecStart si sommano.
 ExecStart=
-ExecStart=/usr/bin/klamav-py scan %h --quarantine "/srv/quarantena" --quiet
+ExecStart=/usr/bin/klamav-py scan %h --quarantine "/srv/quarantena" --quiet --log-errors %L/klamav-py/scan-errors.log
 ReadWritePaths="/srv/quarantena"
 """
 
@@ -171,6 +171,26 @@ def test_template_coincide_con_la_unit_spedita():
     assert len(unit_exec) == 1
     nostro = EXEC_TEMPLATE.format(options="", quarantine=f"%h/{DEFAULT_QUARANTINE_SUBDIR}", excludes="")
     assert split_exec(nostro, home=str(HOME)) == split_exec(unit_exec[0], home=str(HOME))
+
+
+def _unit_values(key):
+    return _values(UNIT.read_text(), key)
+
+
+@pytest.mark.parametrize("endpoint", [None, ClamdEndpoint.tcp("10.0.0.5", 3311)])
+def test_log_degli_errori_nella_logsdirectory_della_unit(endpoint):
+    # Con il timer gli errori e le cartelle non leggibili finivano solo nel
+    # journal. Il log va nella LogsDirectory= della unit spedita, che systemd
+    # crea 0700 e la sandbox lascia scrivibile: stesso percorso nella unit
+    # e nel drop-in, che non ripete la direttiva ma la eredita.
+    assert _unit_values("LogsDirectory") == ["klamav-py"]
+    assert _unit_values("LogsDirectoryMode") == ["0700"]
+    logs = "/home/utente/.local/state/log"
+    for exec_line in (_unit_values("ExecStart")[0],
+                      _values(render_dropin(Path("/srv/q"), home=HOME, endpoint=endpoint),
+                              "ExecStart")[1]):
+        args = build_parser().parse_args(split_exec(exec_line, home=str(HOME), logs=logs)[1:])
+        assert args.log_errors == Path(f"{logs}/klamav-py/scan-errors.log")
 
 
 # -- systemd-analyze verify ----------------------------------------------
@@ -338,7 +358,7 @@ GOLDEN_TCP = f"""{HEADER}
 [Service]
 # Azzeramento obbligatorio: su Type=oneshot le ExecStart si sommano.
 ExecStart=
-ExecStart=/usr/bin/klamav-py --tcp "10.0.0.5:3311" scan %h --quarantine "{DEFAULT_Q}" --quiet
+ExecStart=/usr/bin/klamav-py --tcp "10.0.0.5:3311" scan %h --quarantine "{DEFAULT_Q}" --quiet --log-errors %L/klamav-py/scan-errors.log
 # clamd via TCP: rete consentita solo per questo (vedi klamav-py(1), SICUREZZA).
 PrivateNetwork=no
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
@@ -544,7 +564,7 @@ GOLDEN_ESCLUSIONI = f"""{HEADER}
 [Service]
 # Azzeramento obbligatorio: su Type=oneshot le ExecStart si sommano.
 ExecStart=
-ExecStart=/usr/bin/klamav-py scan %h --quarantine "{DEFAULT_Q}" --exclude "/home/utente/vm" --exclude "/home/utente/Le Mie Foto" --quiet
+ExecStart=/usr/bin/klamav-py scan %h --quarantine "{DEFAULT_Q}" --exclude "/home/utente/vm" --exclude "/home/utente/Le Mie Foto" --quiet --log-errors %L/klamav-py/scan-errors.log
 """
 
 

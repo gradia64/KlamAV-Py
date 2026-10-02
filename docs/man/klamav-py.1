@@ -209,8 +209,8 @@ An acknowledged detection prints
 at every scan, also with
 .BR \-\-quiet ,
 and is not counted among the infected files.
-A subdirectory that cannot be read is reported once on standard error
-with
+A subdirectory whose permissions deny access is reported once on
+standard error with
 .B CARTELLA NON LEGGIBILE
 (and in the
 .B \-\-log\-errors
@@ -218,6 +218,14 @@ file); its contents are not checked.
 It is counted separately, not among the errors: if it is expected (a
 directory created with sudo, a container bind mount), exclude it with
 .BR \-\-exclude .
+Any other error on a subdirectory (an I/O error from a failing disk, an
+NFS mount that stopped responding) is a fault, not a permission: it is an
+.B ERRORE
+line with the directory and the reason, and it counts among the errors
+like an unreadable file.
+In that case
+.B \-\-exclude
+is only meant for a mount known to be permanently unavailable.
 The messages are in Italian.
 A summary with the totals follows and, if there were errors, a count
 per error type.
@@ -226,7 +234,8 @@ per error type.
 .TP
 .B 0
 No infections found, even if some files or subdirectories could not be
-read or verified.
+read (read errors, or subdirectories whose permissions deny access) or
+verified.
 .TP
 .B 1
 Infections found, even if quarantining some of them failed.
@@ -253,8 +262,11 @@ least one was refused (that one leaves the register unchanged).
 In the scheduled scan, codes 1 and 2 trigger the desktop notification
 through
 .BR klamav-scan-notify.service .
-Unreadable subdirectories leave the code at 0, so they show up only in
-the journal.
+Errors and unreadable subdirectories leave the code at 0: they show up in
+the journal and, one per line, in
+.IR \%~/.local/state/log/klamav\-py/scan\-errors.log
+(see
+.BR FILES ).
 .
 .SH ENVIRONMENT
 .TP
@@ -275,6 +287,19 @@ the lowest CPU and I/O priority.
 The quarantine directory used by the timer is changed from the Settings
 of
 .BR klamav-py-gui (1).
+.TP
+.I \%$XDG_STATE_HOME/log/klamav\-py/scan\-errors.log
+Errors and unreadable directories of the last scheduled scan
+.RB ( \-\-log\-errors
+in the unit), rewritten at every scan.
+The directory is the unit's
+.BR LogsDirectory= ,
+created by systemd with permissions 0700 and writable inside the
+sandbox; without
+.B XDG_STATE_HOME
+it is
+.IR \%~/.local/state/log/klamav\-py .
+The drop-in written by the GUI carries the same option.
 .TP
 .I \%/usr/lib/systemd/user/klamav-scan-notify.service
 Desktop notification, started only by the scan's

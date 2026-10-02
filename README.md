@@ -129,7 +129,7 @@ La directory passata a `--quarantine` è sempre esclusa automaticamente dall'att
 - `--version` — stampa la versione ed esce (opzione globale, non del sottocomando scan).
 - `--no-persistent` / `--session-batch-size N` — controllo della sessione persistente (vedi sezione dedicata).
 
-Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore di esecuzione (clamd irraggiungibile, path inesistente o non leggibile) — utile per OnFailure= in systemd o per script di monitoraggio. Una sottocartella non leggibile non cambia il codice: compare su stderr come `CARTELLA NON LEGGIBILE` e ha un contatore a parte nel riepilogo; se è attesa (cartelle create con sudo, bind mount di container) va esclusa con `--exclude`.
+Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore di esecuzione (clamd irraggiungibile; percorso inesistente, collegamento rotto, né directory né file regolare, o non leggibile) — utile per OnFailure= in systemd o per script di monitoraggio. Una sottocartella con permessi negati non cambia il codice: compare su stderr come `CARTELLA NON LEGGIBILE` e ha un contatore a parte nel riepilogo; se è attesa (cartelle create con sudo, bind mount di container) va esclusa con `--exclude`. Un altro errore su una sottocartella (EIO di un disco che degrada, ESTALE di un mount NFS che non risponde) è un guasto: conta fra gli errori, come un file illeggibile, ed esce con lo stesso codice. `--exclude` serve solo per un mount che si sa non disponibile in modo permanente.
 
 ## Segnalazioni non spostate e presa visione
 
@@ -245,7 +245,7 @@ La risposta di GitHub è trattata come dato non fidato: viene letta fino a un ma
 
 - **Timer della GUI (pagina Pianificazione):** gira solo con l'app attiva (anche in tray), ma offre progresso live, log persistente e integrazione completa con la UI.
 - **Unit systemd utente (installata dal .deb):** parte al login di ciascun utente senza configurazione, funziona a GUI chiusa. Per far girare il timer anche a utente scollegato:
-  `loginctl enable-linger $USER`. Usa lo stesso percorso di quarantena di default della GUI (~/.local/share/klamav-py/quarantine).
+  `loginctl enable-linger $USER`. Usa lo stesso percorso di quarantena di default della GUI (~/.local/share/klamav-py/quarantine). Errori e cartelle non leggibili dell'ultima scansione, uno per riga, sono anche in `~/.local/state/log/klamav-py/scan-errors.log` (`$XDG_STATE_HOME/log/klamav-py`, la `LogsDirectory=` della unit), oltre che nel journal.
 - **Unit systemd di sistema** (systemd/ nel repo, solo per installazioni manuali multi-utente/server): da configurare ed abilitare a mano; la ExecStart assume un venv sotto /opt/klamav-py/venv, ma la CLI gira anche senza venv. Scenario distinto dalla unit utente del .deb, non la stessa unit installata in due modi.
 
 ## Diagnosi degli errori comuni

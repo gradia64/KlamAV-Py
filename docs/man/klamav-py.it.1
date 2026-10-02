@@ -211,7 +211,7 @@ Una segnalazione già valutata stampa
 a ogni scansione, anche con
 .BR \-\-quiet ,
 e non conta fra gli infetti.
-Una sottocartella che non si può leggere è segnalata una volta su
+Una sottocartella con permessi negati è segnalata una volta su
 standard error con
 .B CARTELLA NON LEGGIBILE
 (e nel file di
@@ -220,14 +220,24 @@ il suo contenuto non è controllato.
 Ha un contatore a parte, non fra gli errori: se è attesa (una cartella
 creata con sudo, un bind mount di un container), va esclusa con
 .BR \-\-exclude .
+Ogni altro errore su una sottocartella (un errore di I/O di un disco che
+degrada, un mount NFS che non risponde più) è un guasto e non un
+permesso: è una riga
+.B ERRORE
+con la cartella e il motivo, e conta fra gli errori come un file
+illeggibile.
+.B \-\-exclude
+serve in quel caso solo per un mount che si sa non disponibile in modo
+permanente.
 Segue un riepilogo con i totali e, se ci sono errori, un conteggio per
 tipo di errore.
 .
 .SH STATO DI USCITA
 .TP
 .B 0
-Nessuna infezione trovata, anche in presenza di errori di lettura, file
-non verificati o sottocartelle non leggibili.
+Nessuna infezione trovata, anche in presenza di errori di lettura (di
+file o di sottocartelle), file non verificati o sottocartelle con
+permessi negati.
 .TP
 .B 1
 Infezioni trovate, anche se la quarantena di qualche file non è riuscita.
@@ -255,8 +265,11 @@ se almeno uno è stato rifiutato (quello non modifica il registro).
 Nella scansione programmata i codici 1 e 2 attivano la notifica desktop
 tramite
 .BR klamav-scan-notify.service .
-Le sottocartelle non leggibili lasciano il codice a 0: si vedono solo nel
-journal.
+Errori e sottocartelle non leggibili lasciano il codice a 0: si vedono nel
+journal e, uno per riga, in
+.IR \%~/.local/state/log/klamav\-py/scan\-errors.log
+(vedere
+.BR FILE ).
 .
 .SH AMBIENTE
 .TP
@@ -277,6 +290,19 @@ sandbox con priorità minima di CPU e I/O.
 La directory di quarantena usata dal timer si cambia dalle Impostazioni
 di
 .BR klamav-py-gui (1).
+.TP
+.I \%$XDG_STATE_HOME/log/klamav\-py/scan\-errors.log
+Errori e cartelle non leggibili dell'ultima scansione programmata
+.RB ( \-\-log\-errors
+nella unit), riscritto a ogni scansione.
+La directory è la
+.B LogsDirectory=
+della unit, creata da systemd con permessi 0700 e scrivibile nella
+sandbox; senza
+.B XDG_STATE_HOME
+è
+.IR \%~/.local/state/log/klamav\-py .
+La stessa opzione è nel drop-in scritto dalla GUI.
 .TP
 .I \%/usr/lib/systemd/user/klamav-scan-notify.service
 Notifica desktop, attivata solo da

@@ -56,9 +56,12 @@ La stessa pagina elenca le prese visione e le revoca.
 Dopo aver eliminato un messaggio di un archivio di posta gestito da
 Akonadi (KMail) può servire
 .BR "akonadictl fsck" .
-Le cartelle che non si possono leggere durante una scansione sono
-elencate e contate a parte rispetto agli errori; una cartella da
-scansionare che non si può leggere ferma la scansione.
+Le cartelle con permessi negati durante una scansione sono elencate e
+contate a parte rispetto agli errori; ogni altro errore su una cartella
+(un errore di I/O, un mount NFS che non risponde più) è elencato e
+contato fra gli errori.
+Un percorso da scansionare inesistente, collegamento simbolico rotto, né
+cartella né file regolare, o non leggibile ferma la scansione.
 .
 .SH OPZIONI
 .BR \-\-socket ,

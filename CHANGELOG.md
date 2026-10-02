@@ -8,6 +8,21 @@ sono in `docs/CHANGELOG-archive.md`.
 ## Non rilasciato
 
 ### Modificato
+- **Errori di I/O sulle sottocartelle contati fra gli errori.** Nella
+  0.1.13 ogni errore su una sottocartella finiva fra le «cartelle non
+  leggibili», con il suggerimento di escluderla: anche un disco che
+  degrada (errore di I/O) o un mount NFS che non risponde più. Ora fra le
+  cartelle non leggibili restano solo i permessi negati; gli altri errori
+  sono righe «ERRORE» con la cartella e il motivo, contano fra gli errori
+  come un file illeggibile, senza suggerire l'esclusione. Il codice di
+  uscita della CLI resta quello degli errori di lettura (0 senza
+  infezioni), come per i file.
+- La scansione programmata di sistema scrive errori e cartelle non
+  leggibili dell'ultima esecuzione anche in
+  `~/.local/state/log/klamav-py/scan-errors.log`, oltre che nel journal.
+  Chi ha salvato quarantena, connessione o cartelle escluse dalla GUI con
+  una versione precedente ottiene l'opzione al prossimo salvataggio delle
+  Impostazioni o della Pianificazione.
 - Un percorso da scansionare non valido ha un messaggio per ciascun caso:
   inesistente, collegamento simbolico rotto (con la destinazione), né
   directory né file regolare (`klamav-py scan /dev/null`, una FIFO), non

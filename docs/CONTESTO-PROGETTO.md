@@ -284,17 +284,30 @@ nulla fa perdere tempo.
   `CARTELLA NON LEGGIBILE` ha un solo formato
   (`clamd_client.unreadable_dir_line`), uguale su stderr della CLI, nella
   pagina Scansione e nel log della pianificazione interna.
-- **Sottocartelle non leggibili: contatore a parte, non errori.**
+- **Sottocartelle con permessi negati: contatore a parte, non errori.**
   `_iter_files` usa `onerror` e riporta la sola cartella più alta; ENOENT
   ed ENOTDIR (cartella sparita o sostituita durante la traversata) non si
-  contano. Non entrano negli «errori» perché le EACCES permanenti (bind
-  mount di container, cartelle create con sudo) produrrebbero sempre gli
-  stessi errori e nasconderebbero quelli nuovi; la via d'uscita è
-  l'esclusione, che funziona perché lo sfoltimento avviene prima dello
-  scandir. **Limite noto, voluto:** la CLI esce comunque con 0, quindi
-  sotto il timer `OnFailure` non scatta e le cartelle non leggibili si
-  vedono solo nel log e nel journal, non in una notifica. È la regola dei
-  codici di uscita, non un difetto.
+  contano. Solo EACCES ed EPERM sono «cartella non leggibile» (0.1.14):
+  non entrano negli «errori» perché le EACCES permanenti (bind mount di
+  container, cartelle create con sudo) produrrebbero sempre gli stessi
+  errori e nasconderebbero quelli nuovi; la via d'uscita è l'esclusione,
+  che funziona perché lo sfoltimento avviene prima dello scandir.
+- **Sottocartelle guaste: errori come i file** (0.1.14). Ogni altro errno
+  (EIO di un disco che degrada, ESTALE di un mount NFS che non risponde)
+  non è un permesso che resterà uguale: `_iter_files` lo restituisce come
+  `ScanResult` ERROR nel flusso dei file, quindi CLI, worker, pagina
+  Scansione e log della programmata lo contano e lo mostrano come un file
+  illeggibile, senza categoria nuova né campo nuovo in `ScanTotals` e
+  senza suggerire `--exclude` (le man page lo indicano solo per un mount
+  che si sa non disponibile in modo permanente).
+- **Dove si vedono.** Cartelle non leggibili ed errori non cambiano il
+  codice di uscita (0 senza infezioni), quindi sotto il timer `OnFailure`
+  non scatta: è la regola dei codici di uscita, non un difetto. Si vedono
+  su stderr e nel journal, nel riepilogo, e dalla 0.1.14 anche nel log
+  degli errori della unit (`--log-errors %L/klamav-py/scan-errors.log`,
+  `LogsDirectory=klamav-py`, cioè `$XDG_STATE_HOME/log/klamav-py`); nella
+  GUI nella lista della pagina Scansione e nel log della programmata
+  interna.
 - **Riepilogo come oggetto unico.** `progress`/`finished_scan` di
   `ScanWorker` e `HistoryManager.add_entry` passano un `ScanTotals`
   invece di interi posizionali; un contatore nuovo è un campo con default
@@ -336,6 +349,12 @@ nulla fa perdere tempo.
 - **Un solo drop-in, generato dallo stato completo** (quarantena, endpoint,
   esclusioni), con `ExecStart=` azzerato. Chi salva una parte deve passare
   anche le altre.
+- **Log degli errori del timer nella `LogsDirectory=`** (0.1.14), con lo
+  stesso percorso nella unit e nel template del drop-in (`ERRORS_LOG`):
+  systemd la crea 0700 e la sandbox (`ProtectSystem=strict`) la lascia
+  scrivibile, verificato con una unit utente reale. Il file si riscrive a
+  ogni scansione. Un drop-in scritto da una versione precedente non ha
+  l'opzione finché la GUI non lo riscrive (al salvataggio).
 - **La unit spedita non si modifica** per le personalizzazioni: per il TCP il
   drop-in aggiunge `PrivateNetwork=no` e *estende*
   `RestrictAddressFamilies`, mantenendo il filtro.
@@ -493,6 +512,10 @@ Emersi dalle revisioni della 0.1.12 e non corretti nella 0.1.13:
   visione del contenuto nuovo. Richiede che lo stesso utente modifichi il
   file in quella finestra; la CLI (`--acknowledge`) confronta l'hash prima
   e dopo la scansione.
+- **Mount NFS `hard` che non risponde:** la traversata si blocca invece
+  di ricevere un errore, quindi la riclassificazione degli errno della
+  0.1.14 non lo copre. Stesso tema della validazione fuori dal thread
+  della GUI: un controllo su un mount appeso non ritorna.
 - Residuo nei test: `tests/test_settings_exclusions.py` imposta
   `_schedule_missing_noted`, attributo non più usato in produzione.
 

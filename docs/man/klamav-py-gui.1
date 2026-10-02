@@ -53,9 +53,12 @@ The same page lists the acknowledgements and revokes them.
 After deleting a message from a mail archive managed by Akonadi (KMail),
 .B akonadictl fsck
 may be needed.
-Folders that cannot be read during a scan are listed and counted
-separately from errors; a folder to scan that cannot be read stops the
-scan.
+Folders whose permissions deny access during a scan are listed and
+counted separately from errors; any other error on a folder (an I/O error,
+an NFS mount that stopped responding) is listed and counted among the
+errors.
+A path to scan that does not exist, is a broken symbolic link, is neither
+a folder nor a regular file, or cannot be read stops the scan.
 .
 .SH OPTIONS
 .BR \-\-socket ,

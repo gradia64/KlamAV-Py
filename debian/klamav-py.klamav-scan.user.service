@@ -21,7 +21,14 @@ Type=oneshot
 # Codici di uscita: 0 nessuna infezione (anche con errori di lettura),
 # 1 infezioni trovate, 2 errore bloccante. La directory di quarantena è
 # esclusa automaticamente dalla scansione.
-ExecStart=/usr/bin/klamav-py scan %h --quarantine %h/.local/share/klamav-py/quarantine --quiet
+#
+# Errori e cartelle non leggibili, uno per riga, anche in un file oltre
+# che nel journal: %L/klamav-py è la LogsDirectory qui sotto, cioè
+# $XDG_STATE_HOME/log/klamav-py (di solito ~/.local/state/log/klamav-py).
+# Il file è riscritto a ogni scansione.
+ExecStart=/usr/bin/klamav-py scan %h --quarantine %h/.local/share/klamav-py/quarantine --quiet --log-errors %L/klamav-py/scan-errors.log
+LogsDirectory=klamav-py
+LogsDirectoryMode=0700
 
 # stdout non bufferizzato: le righe arrivano al journal mentre il processo
 # è vivo e restano attribuite alla unit. Con il buffering di default
