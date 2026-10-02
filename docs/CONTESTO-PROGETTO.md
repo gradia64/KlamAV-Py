@@ -339,6 +339,17 @@ nulla fa perdere tempo.
 - **Chiave: SHA-256 del contenuto più firma**, non il percorso (in un
   maildir un messaggio letto cambia nome). Contenuto cambiato = di nuovo
   segnalato. Voci senza riscontri da 90 giorni tolte.
+- **Ambito: contenuto e firma, in qualunque percorso.** Una copia
+  identica altrove, con la stessa firma, risulta già valutata. Resta
+  così, e **niente campo `reason`** nel registro: due revisioni della
+  0.1.13 hanno verificato che per una stessa chiave il motivo (euristica o
+  archivio di posta) non può differire in modo utile. Dalla 0.1.14 lo si
+  dice all'utente con una frase unica (`acknowledged.SCOPE_NOTE`) nella
+  conferma della CLI e della GUI, nella pagina Segnalazioni, nel README e
+  nelle man page.
+- **Pagina Segnalazioni della sessione corrente**: non persistente, lo
+  dice la pagina stessa insieme al comando per le segnalazioni del timer
+  di sistema (journal e `--acknowledge`).
 - **Solo dopo la policy.** Il registro si consulta solo per i rilevamenti
   che la policy ha già deciso di segnalare soltanto: una presa visione non
   sopprime mai un rilevamento da quarantena, nemmeno con lo stesso hash

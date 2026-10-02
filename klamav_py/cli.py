@@ -53,6 +53,7 @@ from .acknowledged import (
     AckRegistry,
     RegistryError,
     ScanAcknowledgements,
+    SCOPE_NOTE,
     hash_file,
     recovery_notice,
 )
@@ -731,8 +732,13 @@ def cmd_acknowledgements(args: argparse.Namespace) -> int:
     if args.acknowledge:
         client = args.endpoint.new_client()
         policy = build_policy(args)
+        recorded = False
         for raw in args.acknowledge:
-            ok = _acknowledge_one(raw, client, policy, registry) and ok
+            done = _acknowledge_one(raw, client, policy, registry)
+            recorded = recorded or done
+            ok = done and ok
+        if recorded:
+            print(SCOPE_NOTE)
     for value in args.unacknowledge:
         ok = _unacknowledge_one(value, registry) and ok
     if args.list_acknowledged:

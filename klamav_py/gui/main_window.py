@@ -65,6 +65,7 @@ from ..acknowledged import (
     HASH_PREFIX_LEN,
     AckRegistry,
     PendingReport,
+    SCOPE_NOTE,
     RegistryError,
     delete_if_same,
     recovery_notice,
@@ -1548,11 +1549,24 @@ class ReportsPage(QWidget):
             "File rilevati ma lasciati al loro posto (firme euristiche e archivi di posta). "
             "Dopo averli verificati puoi eliminarli, oppure registrare la presa visione: le "
             "scansioni successive, anche quella di sistema, non li contano più fra gli infetti "
-            "finché il contenuto non cambia."
+            f"finché il contenuto non cambia. {SCOPE_NOTE}"
         )
         desc.setStyleSheet("font-size: 14px; color: palette(mid);")
         desc.setWordWrap(True)
         layout.addWidget(desc)
+
+        # La tabella non è persistente: chi cerca qui le segnalazioni della
+        # notte (timer di sistema) deve sapere dove trovarle.
+        session = QLabel(
+            "Qui compaiono le segnalazioni delle scansioni di questa sessione della finestra "
+            "(manuale, programmata interna, Real-Time). Quelle della scansione programmata di "
+            "sistema sono nel journal («journalctl --user -u klamav-scan.service | grep "
+            "INFETTO») e si gestiscono con «klamav-py --acknowledge PERCORSO»."
+        )
+        session.setStyleSheet("font-size: 12px; color: palette(mid);")
+        session.setWordWrap(True)
+        session.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(session)
 
         # Registro messo da parte da questa pagina (registrazione, revoca,
         # ricarica): resta visibile, perché le segnalazioni che tornano
@@ -1575,6 +1589,12 @@ class ReportsPage(QWidget):
         self.pending_table.verticalHeader().setVisible(False)
         layout.addWidget(self.pending_table, 1)
 
+        # Esito dell'ultima presa visione, con il suo ambito (SCOPE_NOTE).
+        self.ack_status_label = QLabel("")
+        self.ack_status_label.setWordWrap(True)
+        self.ack_status_label.setStyleSheet("font-size: 12px;")
+        self.ack_status_label.setVisible(False)
+
         self.ack_button = QPushButton("Ho verificato, non segnalare più")
         self.ack_button.setIcon(QIcon.fromTheme("dialog-ok-apply"))
         self.ack_button.clicked.connect(self._acknowledge_selected)
@@ -1586,6 +1606,7 @@ class ReportsPage(QWidget):
         pending_row.addWidget(self.delete_button)
         pending_row.addStretch()
         layout.addLayout(pending_row)
+        layout.addWidget(self.ack_status_label)
 
         ack_title = QLabel("Prese visione")
         ack_title.setStyleSheet("font-size: 16px; font-weight: bold;")
@@ -1673,6 +1694,11 @@ class ReportsPage(QWidget):
                 QMessageBox.warning(self, title, f"{report.path}: {exc}")
                 continue
             done.append((report.identity.sha256, report.signature))
+        if done:
+            self.ack_status_label.setText(
+                f"Presa visione registrata per {len(done)} segnalazioni. {SCOPE_NOTE}"
+            )
+            self.ack_status_label.setVisible(True)
         # Lo stesso contenuto in altri percorsi è ora valutato anch'esso.
         self._pending = [
             r for r in self._pending

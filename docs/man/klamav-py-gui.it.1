@@ -47,11 +47,19 @@ all'istanza già attiva e termina subito.
 I rilevamenti segnalati ma non spostati (firme euristiche e archivi di
 posta, vedere
 .BR klamav-py (1))
-compaiono nella pagina Segnalazioni.
+trovati dalle scansioni della sessione corrente (manuale, programmata
+interna, Real-Time) compaiono nella pagina Segnalazioni.
+L'elenco non si conserva fra le sessioni; i rilevamenti della scansione
+programmata di sistema sono nel journal
+.RB ( "journalctl \-\-user \-u klamav\-scan.service" )
+e la presa visione si registra con
+.BR "klamav\-py \-\-acknowledge" .
 Dopo averne verificato uno si può eliminarlo, solo se il percorso è
 ancora lo stesso file regolare rilevato, oppure registrarne la presa
 visione: le scansioni successive, anche quella programmata di sistema,
 non ne contano più il contenuto fra gli infetti.
+La presa visione vale per il contenuto e la firma, in qualunque percorso:
+una copia identica altrove, con la stessa firma, risulta già valutata.
 La stessa pagina elenca le prese visione e le revoca.
 Se nel registrare, revocare o ricaricare il registro risulta non valido,
 la pagina lo dice e indica il file

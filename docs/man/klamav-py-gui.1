@@ -44,11 +44,20 @@ paths to the running instance and exits immediately.
 Detections that are reported but not moved (heuristic signatures and
 mail archives, see
 .BR klamav-py (1))
-are listed in the Reports page
+found by the scans of the current session (manual, internal schedule,
+Real-Time) are listed in the Reports page
 .RI ( Segnalazioni ).
+The list is not kept across sessions; detections of the scheduled system
+scan are in the journal
+.RB ( "journalctl \-\-user \-u klamav\-scan.service" )
+and are acknowledged with
+.BR "klamav\-py \-\-acknowledge" .
 After checking one, it can be deleted, only if the path is still the same
 regular file that was detected, or acknowledged: later scans, including
 the scheduled system scan, no longer count its content as infected.
+The acknowledgement applies to the content and the signature, in any
+path: an identical copy elsewhere, with the same signature, is already
+acknowledged.
 The same page lists the acknowledgements and revokes them.
 If the register turns out to be invalid when recording, revoking or
 reloading, the page says so and names the

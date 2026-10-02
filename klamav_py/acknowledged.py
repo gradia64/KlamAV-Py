@@ -65,6 +65,15 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 Key = Tuple[str, str]  # (sha256, firma)
 
 
+# Ambito di una presa visione, detto all'utente con le stesse parole nella
+# CLI, nella pagina Segnalazioni e nella documentazione. Una copia identica
+# altrove ha la stessa chiave: è voluto (vedi sopra), ma va saputo.
+SCOPE_NOTE = (
+    "La presa visione vale per il contenuto e la firma, in qualunque percorso: "
+    "una copia identica altrove, con la stessa firma, risulta già valutata."
+)
+
+
 def default_registry_path() -> Path:
     """Accanto alla cronologia della GUI. Letto a ogni chiamata, non
     all'import: HOME può cambiare (test, sudo -u)."""

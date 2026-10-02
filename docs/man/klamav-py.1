@@ -431,6 +431,9 @@ to
 .I cur/
 in a maildir stays acknowledged, while a changed content is reported
 again.
+An acknowledgement therefore applies to the content and the signature,
+in any path: an identical copy elsewhere, with the same signature, is
+already acknowledged.
 The register is consulted only for detections that would not be moved
 anyway: an acknowledgement never hides one that would be quarantined.
 A new detection keeps exit status 1.

@@ -35,6 +35,12 @@ sono in `docs/CHANGELOG-archive.md`.
   comando, fra le opzioni globali, e valgono per `--acknowledge`: la
   presa visione va chiesta con le stesse opzioni della scansione. Con
   `scan` funzionano in entrambe le posizioni.
+- La conferma della presa visione (CLI e pagina Segnalazioni) dice il suo
+  ambito: vale per il contenuto e la firma, in qualunque percorso, quindi
+  una copia identica altrove, con la stessa firma, risulta già valutata.
+  La pagina Segnalazioni dice anche di mostrare le segnalazioni della
+  sessione corrente, e dove trovare quelle della scansione programmata di
+  sistema.
 
 ### Corretto
 - **Presa visione rifiutata sotto una cartella `--report-only`.** Un file
