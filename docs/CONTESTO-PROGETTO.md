@@ -268,6 +268,15 @@ nulla fa perdere tempo.
   minuto; notifica, voce in cronologia e file di log una volta sola finché
   una scansione non arriva alla fine (un log per tentativo faceva uscire
   dalla rotazione quelli delle scansioni vere).
+- **Scansione non completata anche per la manuale** (0.1.14): `ScanPage`
+  collega `aborted`; stato, referto (titolo «Scansione non completata»,
+  esito «Non completata: <motivo>»), notifica e Cronologia («Manuale (non
+  completata)») usano il testo della pianificazione interna per lo stesso
+  caso. `aborted` è emesso **prima** di `error` con lo stesso testo: la
+  programmata collega anche `error` (riga `ERRORE SISTEMA` nel log, come
+  nella lista della manuale, e conteggio nella notifica finale) e salta il
+  messaggio uguale al motivo di `aborted`, già scritto una volta per serie
+  di tentativi.
 - **Radice: una sola regola, sempre bloccante** (`clamd_client.root_problem`,
   0.1.14). Quattro casi con un messaggio ciascuno: inesistente
   (`lexists`, così un symlink rotto non passa per inesistente),
@@ -498,9 +507,6 @@ Emersi dalle revisioni della 0.1.12 e non corretti nella 0.1.13:
 - **`_clear_intent` nel `finally` di `quarantine_file`:** se la scrittura
   dell'indice fallisce dopo lo spostamento, l'intento sparisce e il
   recupero automatico non avviene.
-- **Scansione manuale bloccata:** la riga di errore compare, ma stato e
-  referto dicono «Completata senza problemi» (`ScanPage` non collega
-  `aborted`). Vale anche per la radice non leggibile della 0.1.13.
 - **`ScanWorker.run()`:** costruzione del client e di `Quarantine` fuori
   dal `try`; un `OSError` lascia la pagina «in corso» fino al riavvio.
 - **Pagina Pianificazione:** con un controllo bloccato su un mount di
@@ -510,11 +516,6 @@ Emersi dalle revisioni della 0.1.12 e non corretti nella 0.1.13:
   seguito dopo il primo tentativo.
 - `Quarantine.recovered` non è letto da nessun consumatore: valutare di
   mostrare gli esiti del recupero (tray una volta, stderr nella CLI).
-- **Prese visione nella scansione programmata interna:** i problemi del
-  registro (file non rileggibile per l'hash, registro messo da parte)
-  arrivano sul segnale `error`, che la programmata non collega: si
-  vedono nella scansione manuale e nella CLI, non nel log della
-  programmata. L'esito resta corretto (segnalazione nuova).
 - **Hash riletto dopo il rilevamento:** fra il verdetto di clamd e la
   rilettura il contenuto può cambiare, e la GUI registrerebbe la presa
   visione del contenuto nuovo. Richiede che lo stesso utente modifichi il

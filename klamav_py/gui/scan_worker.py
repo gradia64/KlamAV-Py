@@ -81,10 +81,11 @@ class ScanWorker(QThread):
     report_only_found = Signal(object)
     # Scansione non eseguita o interrotta da un errore bloccante (radice
     # dentro un'esclusione, clamd irraggiungibile, errore di protocollo):
-    # emesso prima di finished_scan, che arriva comunque. Chi non mostra
-    # i messaggi di error (scansione programmata) lo usa per non
-    # registrare come "pulita" una scansione che non ha controllato
-    # tutto.
+    # emesso prima di finished_scan, che arriva comunque, e prima di error
+    # con lo stesso testo. Chi lo collega (pagina Scansione, scansione
+    # programmata) lo usa per non registrare come "pulita" una scansione
+    # che non ha controllato tutto; chi collega anche error riconosce il
+    # duplicato perché aborted è già arrivato.
     aborted = Signal(str)
     finished_scan = Signal(object)  # ScanTotals
     # Segnali di pausa: emessi dal worker quando entra/esce EFFETTIVAMENTE
@@ -291,8 +292,8 @@ class ScanWorker(QThread):
             blocked = f"impossibile verificare le cartelle escluse: {exc}"
         if blocked:
             message = f"Scansione non eseguita. {blocked}"
-            self.error.emit(message)
             self.aborted.emit(message)
+            self.error.emit(message)
             self.progress.emit(totals())
             self.finished_scan.emit(totals())
             return
@@ -452,18 +453,18 @@ class ScanWorker(QThread):
             # non si sonda, e un FIFO o un dispositivo arrivano qui. Stessa
             # regola e stesso testo della sonda (clamd_client.root_problem).
             message = f"Scansione non eseguita. Il percorso da scansionare {exc}"
-            self.error.emit(message)
             self.aborted.emit(message)
+            self.error.emit(message)
         except ClamdUnavailable as exc:
             # Una sola segnalazione invece di una riga ERROR per file: la
             # scansione è incompleta, non "con errori".
             message = f"clamd non raggiungibile su {exc.where}: {exc}. Scansione incompleta."
-            self.error.emit(message)
             self.aborted.emit(message)
+            self.error.emit(message)
         except (ClamdError, OSError) as exc:
             message = f"Errore di comunicazione con clamd ({self.endpoint.describe()}): {exc}"
-            self.error.emit(message)
             self.aborted.emit(message)
+            self.error.emit(message)
 
         acks.finish()
         for problem in acks.problems:

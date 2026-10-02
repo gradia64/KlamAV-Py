@@ -976,6 +976,7 @@ class ScanPage(QWidget):
         self._omitted_errors = self._omitted_too_large = 0
         self._non_infected_rows = 0
         self._new_reports = 0
+        self._aborted = None
         self.progress.setVisible(True)
         self._set_status_text("Scansione in corso…")
         self._scanned = self._infections = self._errors = self._too_large = 0
@@ -1012,6 +1013,11 @@ class ScanPage(QWidget):
         self.worker.unreadable_dir.connect(self._on_unreadable_dir)
         self.worker.acknowledged.connect(self._on_acknowledged)
         self.worker.report_only_found.connect(self._on_report_only)
+        # Prima di finished_scan (stesso emettitore, connessioni queued):
+        # _on_finished lo trova già impostato. Senza, una scansione mai
+        # partita (radice non valida, esclusione che la contiene, clamd
+        # irraggiungibile) finiva «Completata senza problemi».
+        self.worker.aborted.connect(self._on_aborted)
         self.worker.finished_scan.connect(self._on_finished)
         # I segnali paused/resumed (non le richieste pause()/resume())
         # comandano lo stato del pulsante: il worker li emette quando
@@ -1181,6 +1187,9 @@ class ScanPage(QWidget):
         if hasattr(main_window, "reports_page"):
             main_window.reports_page.add_report(report)
 
+    def _on_aborted(self, message: str) -> None:
+        self._aborted = message
+
     def _on_unreadable_dir(self, path: str, reason: str) -> None:
         # Fuori dal tetto MAX_RESULT_ROWS: se ne riporta solo la cartella
         # più alta (os.walk non scende in una cartella illeggibile), quindi
@@ -1272,13 +1281,20 @@ class ScanPage(QWidget):
             else "n/d"
         )
 
-        status_text = f"Completato: {scanned} file scansionati, {infections} infetti, {errors} errori."
-        if too_large:
-            status_text += f" {too_large} non verificati (troppo grandi)."
-        if totals.unreadable_dirs:
-            status_text += f" {totals.unreadable_dirs} cartelle non leggibili."
-        if totals.acknowledged:
-            status_text += f" {totals.acknowledged} già valutati."
+        # Non completata: non eseguita (radice non valida, esclusioni, clamd
+        # irraggiungibile all'avvio) o interrotta da un errore bloccante.
+        # Stesso testo della pianificazione interna per lo stesso caso.
+        aborted, self._aborted = getattr(self, "_aborted", None), None
+        if aborted is not None:
+            status_text = f"Scansione non completata: {aborted}"
+        else:
+            status_text = f"Completato: {scanned} file scansionati, {infections} infetti, {errors} errori."
+            if too_large:
+                status_text += f" {too_large} non verificati (troppo grandi)."
+            if totals.unreadable_dirs:
+                status_text += f" {totals.unreadable_dirs} cartelle non leggibili."
+            if totals.acknowledged:
+                status_text += f" {totals.acknowledged} già valutati."
         self._set_status_text(status_text)
 
         omessi_err = getattr(self, "_omitted_errors", 0)
@@ -1298,7 +1314,9 @@ class ScanPage(QWidget):
             self.results_list.addItem(item)
             self.results_list.scrollToBottom()
 
-        if infections > 0:
+        if aborted is not None:
+            esito = f"Non completata: {aborted}"
+        elif infections > 0:
             esito = "Infezioni rilevate"
         elif errors > 0:
             esito = "Completata con errori"
@@ -1321,14 +1339,22 @@ class ScanPage(QWidget):
             + (f"\n\n{REPORTS_HINT}" if getattr(self, "_new_reports", 0) else "")
         )
 
-        self.history.add_entry("Manuale", self.path_edit.text(), totals)
+        self.history.add_entry(
+            "Manuale" if aborted is None else "Manuale (non completata)",
+            self.path_edit.text(),
+            totals,
+        )
         if hasattr(main_window, 'history_page'):
             main_window.history_page.refresh()
 
+        title = "Scansione completata" if aborted is None else "Scansione non completata"
         if hasattr(main_window, 'tray_icon'):
-            icon_type = "emblem-checked" if infections == 0 else "emblem-virus"
+            if aborted is not None:
+                icon_type = "dialog-warning"
+            else:
+                icon_type = "emblem-checked" if infections == 0 else "emblem-virus"
             main_window.tray_icon.showMessage(
-                f"{APP_NAME} — Scansione completata", status_text, _icon(icon_type), 6000
+                f"{APP_NAME} — {title}", status_text, _icon(icon_type), 6000
             )
 
         # Il popup esplicito compare solo se la finestra è visibile in
@@ -1338,8 +1364,9 @@ class ScanPage(QWidget):
         # avanza la notifica tray sopra.
         if self.isVisible() and self.window().isVisible():
             report_box = QMessageBox(self)
-            report_box.setIcon(QMessageBox.Warning if infections > 0 else QMessageBox.Information)
-            report_box.setWindowTitle("Scansione completata")
+            warn = infections > 0 or aborted is not None
+            report_box.setIcon(QMessageBox.Warning if warn else QMessageBox.Information)
+            report_box.setWindowTitle(title)
             report_box.setText(report_text)
             report_box.exec()
 
@@ -3461,6 +3488,9 @@ class MainWindow(QMainWindow):
         # Segnalazioni «solo segnalazione» nuove della scansione programmata
         # in corso: la notifica finale rimanda alla pagina Segnalazioni.
         self._bg_new_reports = 0
+        # Messaggi di error della scansione programmata in corso (escluso il
+        # motivo di aborted): scritti nel log, contati nella notifica.
+        self._bg_errors = 0
         self._double_schedule_noted = False
         self._double_schedule_checking = False
         self.bg_worker = None
@@ -3979,6 +4009,7 @@ X-GNOME-Autostart-enabled=true
         self._bg_log_close()
         self._bg_log_path = None
         self._bg_new_reports = 0
+        self._bg_errors = 0
         self.bg_worker = ScanWorker(
             endpoint=self._clamd_endpoint(),
             # Risolta dal worker (strict_roots): le esclusioni sono
@@ -3997,6 +4028,10 @@ X-GNOME-Autostart-enabled=true
         self.bg_worker.result_ready.connect(self._on_bg_result)
         self.bg_worker.progress.connect(self._on_bg_progress)
         self.bg_worker.aborted.connect(self._on_bg_aborted)
+        # Messaggi che la scansione manuale mostra in lista (problemi del
+        # registro delle prese visione, quarantena fallita): prima la
+        # programmata non li collegava e non arrivavano da nessuna parte.
+        self.bg_worker.error.connect(self._on_bg_error)
         self.bg_worker.unreadable_dir.connect(self._on_bg_unreadable_dir)
         self.bg_worker.acknowledged.connect(self._on_bg_acknowledged)
         self.bg_worker.report_only_found.connect(self._on_bg_report_only)
@@ -4068,6 +4103,15 @@ X-GNOME-Autostart-enabled=true
         if not self._schedule_aborted_noted:
             self._bg_log_write(f"ERRORE — {message}")
 
+    def _on_bg_error(self, message: str) -> None:
+        # Il motivo di una scansione non completata arriva prima su aborted
+        # (scan_worker): già scritto, una volta per serie di tentativi.
+        if message == self._bg_aborted:
+            return
+        self._bg_errors = getattr(self, "_bg_errors", 0) + 1
+        # Stessa riga della lista della pagina Scansione.
+        self._bg_log_write(f"ERRORE SISTEMA — {message}")
+
     def _on_bg_unreadable_dir(self, path: str, reason: str) -> None:
         self._bg_log_write(unreadable_dir_line(path, reason))
 
@@ -4102,6 +4146,9 @@ X-GNOME-Autostart-enabled=true
                            "(elenco nel log; se sono attese, escludile).")
             if getattr(self, "_bg_new_reports", 0):
                 status += " Alcuni file sono stati solo segnalati: vedi la pagina Segnalazioni."
+            if getattr(self, "_bg_errors", 0):
+                status += (f" {self._bg_errors} problemi durante la scansione "
+                           "(dettaglio nel log, vedi Pianificazione).")
             self.tray_icon.showMessage(
                 APP_NAME, status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000
             )

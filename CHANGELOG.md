@@ -41,6 +41,17 @@ sono in `docs/CHANGELOG-archive.md`.
   pagina, con il file `acknowledged.json.corrupt-*` in cui le prese
   visione precedenti restano, non cancellate. Il codice di uscita non
   cambia.
+- **Scansione manuale non eseguita presentata come riuscita.** Una
+  scansione dalla finestra che non partiva (cartella non leggibile o non
+  valida, cartella esclusa che la contiene, clamd irraggiungibile)
+  mostrava la riga d'errore, ma lo stato, il referto e la voce in
+  Cronologia dicevano «Completata senza problemi». Ora dicono «Scansione
+  non completata» con il motivo, e la Cronologia registra «Manuale (non
+  completata)».
+- La scansione programmata interna non riportava nel suo log i problemi
+  che la scansione manuale mostra in lista, come un registro delle prese
+  visione danneggiato. Ora finiscono nel log e la notifica finale ne
+  indica il numero.
 
 ---
 ## 0.1.13 — 2026-09-30
