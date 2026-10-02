@@ -12,7 +12,7 @@ Non sostituisce la lettura del codice: i docstring dei moduli spiegano il
 dal codice non si vede, cioè da dove viene una regola e cosa è già stato
 valutato e scartato. La sezione 9 indica dove trovare il resto.
 
-Aggiornato alla versione 0.1.13.
+Aggiornato alla versione 0.1.14.
 
 ---
 
@@ -140,6 +140,23 @@ quarantena validato come l'indice, salvataggio della Pianificazione con i
 valori letti al clic, un solo log per una serie di tentativi falliti,
 conteggio della quarantena in sola lettura. Contatori delle scansioni in
 un oggetto unico (`ScanTotals`).
+
+**0.1.14 (2 ottobre) — nessun esito rassicurante falso.** Dalle revisioni
+della 0.1.13, casi in cui una scansione o un'operazione sul registro
+finiva con un esito tranquillo quando qualcosa non era andato: un guasto
+di I/O su un file o una sottocartella (disco, mount NFS) usciva con 0 e
+sulle sottocartelle contava come «cartella non leggibile» con il
+suggerimento di escluderla, ora è un errore e, senza rilevamenti, esce
+con 2 (precedenza dei codici in sezione 4); il registro delle prese visione messo da parte in silenzio da
+`--acknowledge` e dalla pagina Segnalazioni; la scansione manuale non
+eseguita presentata come «Completata senza problemi»; i problemi del
+registro assenti dal log della programmata interna. Una sola regola per
+la radice della scansione (messaggi distinti per inesistente, symlink
+rotto, né directory né file regolare, non leggibile), una sola policy per
+scan e `--acknowledge` (con `--report-only` e `--quarantine-all` anche
+fra le opzioni globali), log degli errori del timer nella
+`LogsDirectory=` della unit. Ambito della presa visione detto
+all'utente; test più rigorosi su man page e sottoprocessi.
 
 ---
 
@@ -537,13 +554,14 @@ e la rete dell'ambiente può non raggiungere i mirror Debian.
 Già tracciati: segnalarli di nuovo è utile solo se si aggiunge uno scenario,
 una riproduzione o una correzione migliore.
 
-Emersi dalle revisioni della 0.1.12 e non corretti nella 0.1.13:
+Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.14:
 
 - **Recupero della quarantena nel thread della GUI.** Il costruttore di
   `Quarantine` esegue il recupero, e si chiama nel thread della GUI
   all'avvio e in `_apply_quarantine_dir`. La 0.1.13 ha tolto solo il caso
-  del conteggio (`peek_entries`); spostare fuori thread gli altri due è
-  il lavoro previsto per la 0.1.14.
+  del conteggio (`peek_entries`); spostare fuori thread gli altri due era
+  previsto per la 0.1.14, ma non è entrato nella sua roadmap: resta da
+  pianificare.
 - **Finestra fra `open_private_fd(O_EXCL)` e `flock` in `_write_intent`:**
   un recupero concorrente può eliminare l'intento di un'operazione viva
   (esito: orfano visibile, come prima della 0.1.12). Correzione possibile:
@@ -564,7 +582,12 @@ Emersi dalle revisioni della 0.1.12 e non corretti nella 0.1.13:
   rilettura il contenuto può cambiare, e la GUI registrerebbe la presa
   visione del contenuto nuovo. Richiede che lo stesso utente modifichi il
   file in quella finestra; la CLI (`--acknowledge`) confronta l'hash prima
-  e dopo la scansione.
+  e dopo la scansione. Chiuderla calcolando l'hash durante lo streaming
+  INSTREAM è una decisione di progetto con costi da misurare (hash di
+  tutti i file, anche puliti), da discutere a parte.
+
+Annotati nella 0.1.14:
+
 - **Cartelle report-only personalizzate nella GUI:** il worker usa sempre
   la policy predefinita (`ScanWorker`, `QuarantinePolicy()`), e la GUI non
   ha un modo di indicare cartelle `--report-only`. Una presa visione
@@ -576,6 +599,9 @@ Emersi dalle revisioni della 0.1.12 e non corretti nella 0.1.13:
   di ricevere un errore, quindi la riclassificazione degli errno della
   0.1.14 non lo copre. Stesso tema della validazione fuori dal thread
   della GUI: un controllo su un mount appeso non ritorna.
+- `update_check_worker.version_key("0.1.12-1") < version_key("0.1.12")`:
+  una revisione di pacchetto in stile Debian si legge come pre-release.
+  Limite noto, non toccato: i tag del progetto non hanno revisione.
 - Residuo nei test: `tests/test_settings_exclusions.py` imposta
   `_schedule_missing_noted`, attributo non più usato in produzione.
 

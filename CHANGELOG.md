@@ -5,7 +5,7 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
-## Non rilasciato
+## 0.1.14 — 2026-10-02
 
 ### Modificato
 - **Guasti di I/O: la scansione non vale più come pulita.** Un errore di
@@ -33,11 +33,6 @@ sono in `docs/CHANGELOG-archive.md`.
   e un collegamento rotto «percorso inesistente». Il codice di uscita
   resta 2. La riga «CARTELLA NON LEGGIBILE» ha lo stesso formato nella
   CLI e nella GUI.
-
-- `--report-only` e `--quarantine-all` si possono indicare anche prima del
-  comando, fra le opzioni globali, e valgono per `--acknowledge`: la
-  presa visione va chiesta con le stesse opzioni della scansione. Con
-  `scan` funzionano in entrambe le posizioni.
 - La conferma della presa visione (CLI e pagina Segnalazioni) dice il suo
   ambito: vale per il contenuto e la firma, in qualunque percorso, quindi
   una copia identica altrove, con la stessa firma, risulta già valutata.
@@ -71,6 +66,18 @@ sono in `docs/CHANGELOG-archive.md`.
   che la scansione manuale mostra in lista, come un registro delle prese
   visione danneggiato. Ora finiscono nel log e la notifica finale ne
   indica il numero.
+
+### Aggiunto
+- `--report-only` e `--quarantine-all` si possono indicare anche prima del
+  comando, fra le opzioni globali, e valgono per `--acknowledge`: la
+  presa visione va chiesta con le stesse opzioni della scansione. Con
+  `scan` funzionano in entrambe le posizioni.
+- Test su guasti di I/O di file e sottocartelle (con un clamd finto, in
+  sessione e senza), radice non valida, registro
+  delle prese visione messo da parte, esiti delle scansioni della GUI,
+  policy di `--acknowledge`, ambito della presa visione; le man page
+  devono descrivere ogni opzione in entrambe le lingue, e i sottoprocessi
+  dei test usano una HOME temporanea. Totale: 935 test.
 
 ---
 ## 0.1.13 — 2026-09-30
