@@ -2,9 +2,11 @@
 Script del workflow di rilascio (tools/, .github/workflows/release.yml).
 
 Il workflow si fida di questi script per tre decisioni che non si possono
-sbagliare: pubblicare solo da un tag firmato con la chiave di rilascio,
-firmare gli artefatti con la sola sottochiave di firma (la primaria resta
-offline) e non pubblicare su AUR un .SRCINFO che non descrive il PKGBUILD.
+sbagliare: pubblicare solo da un tag firmato dalla sottochiave dei tag del
+maintainer (non da una qualunque della chiave di rilascio: la sottochiave
+della CI non deve poter firmare un tag valido), firmare gli allegati solo
+con la sottochiave della CI, e non pubblicare su AUR un .SRCINFO che non
+descrive il PKGBUILD. Ruoli in tools/release-keys.sh.
 Qui si provano con chiavi e repository temporanei, mai con quelli reali:
 GNUPGHOME e HOME puntano sempre in tmp_path.
 """
@@ -47,14 +49,17 @@ def _run(cmd, tmp_path, cwd=None, check=True, **extra):
 
 
 class Keyring:
-    """Portachiavi temporaneo con una chiave «di rilascio» (primaria solo
-    certificazione, sottochiave di firma) e una chiave estranea."""
+    """Portachiavi temporaneo con una chiave «di rilascio» come quella vera
+    (primaria solo certificazione, una sottochiave per i tag e una per la
+    CI) e una chiave estranea."""
 
     def __init__(self, tmp_path: Path):
         self.tmp = tmp_path
         self.home = tmp_path / "gnupg"
         self.home.mkdir(mode=0o700)
         self.release = self._new_key("Rilascio di prova <rilascio@example.org>", subkey=True)
+        self.gpg("--quick-add-key", self.release, "ed25519", "sign", "1y")
+        self.tag_subkey, self.ci_subkey = self._fprs(self.release)[1:3]
         self.other = self._new_key("Estranea <estranea@example.org>", subkey=False)
         self.pubkey = tmp_path / "release-key.asc"
         self.pubkey.write_text(self.gpg("--armor", "--export", self.release).stdout)
@@ -74,9 +79,15 @@ class Keyring:
         out = self.gpg("--with-colons", "--list-keys", uid).stdout
         return [l.split(":")[9] for l in out.splitlines() if l.startswith("fpr:")]
 
-    def signing_subkey_secret(self) -> str:
-        sub = self._fprs(self.release)[1]
+    def subkey_secret(self, sub) -> str:
+        """Come nel secret della CI: solo quella sottochiave."""
         return self.gpg("--armor", "--export-secret-subkeys", f"{sub}!").stdout
+
+    def roles(self) -> dict:
+        """Ruoli della chiave di prova per tools/release-keys.sh."""
+        return {"KLAMAV_RELEASE_PRIMARY": self.release,
+                "KLAMAV_TAG_SIGNING_SUBKEYS": self.tag_subkey,
+                "KLAMAV_CI_SIGNING_SUBKEY": self.ci_subkey}
 
     def close(self):
         subprocess.run(["gpgconf", "--homedir", str(self.home), "--kill", "gpg-agent"],
@@ -103,7 +114,7 @@ def _project(tmp_path: Path, keys: Keyring) -> Path:
     repo = tmp_path / "progetto"
     (repo / "tools").mkdir(parents=True)
     (repo / "arch").mkdir()
-    for name in ("verify-tag.sh", "sign-release.sh", "publish-aur.sh"):
+    for name in ("verify-tag.sh", "sign-release.sh", "publish-aur.sh", "release-keys.sh"):
         shutil.copy(TOOLS / name, repo / "tools" / name)
     shutil.copy(keys.pubkey, repo / "arch" / "klamav-py-release-key.asc")
     (repo / "README").write_text("x")
@@ -135,11 +146,21 @@ def _gpg_wrapper(tmp_path, keys) -> Path:
 
 # -- tools/verify-tag.sh -------------------------------------------------------
 
-def test_tag_firmato_dalla_sottochiave_di_rilascio_accettato(tmp_path, keys):
+def test_tag_firmato_dalla_sottochiave_dei_tag_accettato(tmp_path, keys):
     repo = _project(tmp_path, keys)
-    _tag(repo, tmp_path, keys, "v1.0.0", key=keys.release)
-    proc = _run(["tools/verify-tag.sh", "v1.0.0"], tmp_path, cwd=repo)
-    assert f"firma valida della chiave di rilascio {keys.release}" in proc.stdout
+    _tag(repo, tmp_path, keys, "v1.0.0", key=f"{keys.tag_subkey}!")
+    proc = _run(["tools/verify-tag.sh", "v1.0.0"], tmp_path, cwd=repo, **keys.roles())
+    assert f"firmato dal maintainer (sottochiave {keys.tag_subkey}" in proc.stdout
+
+
+def test_tag_firmato_dalla_sottochiave_della_ci_rifiutato(tmp_path, keys):
+    # La firma è valida e la primaria è quella di rilascio: è proprio il caso
+    # di una CI compromessa che firma un tag. Non deve passare.
+    repo = _project(tmp_path, keys)
+    _tag(repo, tmp_path, keys, "v1.0.0", key=f"{keys.ci_subkey}!")
+    proc = _run(["tools/verify-tag.sh", "v1.0.0"], tmp_path, cwd=repo, check=False, **keys.roles())
+    assert proc.returncode != 0
+    assert f"firmato da {keys.ci_subkey}, che non è una sottochiave dei tag" in proc.stderr
 
 
 @pytest.mark.parametrize("caso", ["altra chiave", "annotato senza firma", "leggero"])
@@ -149,9 +170,9 @@ def test_tag_non_valido_rifiutato(tmp_path, keys, caso):
         _tag(repo, tmp_path, keys, "v1.0.0", key=keys.other)
     else:
         _tag(repo, tmp_path, keys, "v1.0.0", annotated=(caso != "leggero"))
-    proc = _run(["tools/verify-tag.sh", "v1.0.0"], tmp_path, cwd=repo, check=False)
+    proc = _run(["tools/verify-tag.sh", "v1.0.0"], tmp_path, cwd=repo, check=False, **keys.roles())
     assert proc.returncode != 0
-    assert "firma valida" not in proc.stdout
+    assert "firmato dal maintainer" not in proc.stdout
 
 
 # -- tools/sign-release.sh -----------------------------------------------------
@@ -164,13 +185,11 @@ def _dist(tmp_path) -> Path:
     return dist
 
 
-def test_firma_con_la_sola_sottochiave(tmp_path, keys):
+def test_firma_con_la_sottochiave_della_ci(tmp_path, keys):
     repo = _project(tmp_path, keys)
     dist = _dist(tmp_path)
-    # Come nel secret della CI: solo la sottochiave, la primaria resta fuori.
-    secret = keys.signing_subkey_secret()
-    _run(["tools/sign-release.sh", str(dist)], tmp_path, cwd=repo,
-         GPG_PRIVATE_KEY=secret, GPG_PASSPHRASE=PASSPHRASE)
+    _run(["tools/sign-release.sh", str(dist)], tmp_path, cwd=repo, **keys.roles(),
+         GPG_PRIVATE_KEY=keys.subkey_secret(keys.ci_subkey), GPG_PASSPHRASE=PASSPHRASE)
     names = sorted(p.name for p in dist.iterdir())
     assert names == sorted([
         "klamav-py_1.0.0_all.deb", "klamav-py_1.0.0_all.deb.sig",
@@ -179,14 +198,25 @@ def test_firma_con_la_sola_sottochiave(tmp_path, keys):
     ])
     sums = (dist / "SHA256SUMS").read_text()
     assert "klamav-py_1.0.0_all.deb" in sums and "pkg.tar.zst" in sums
+    # Firmato proprio dalla sottochiave della CI, non da un'altra.
+    status = keys.gpg("--status-fd", "1", "--verify", str(dist / "SHA256SUMS.sig"),
+                      str(dist / "SHA256SUMS")).stdout
+    assert f"VALIDSIG {keys.ci_subkey} " in status
 
 
-def test_firma_con_una_chiave_estranea_rifiutata(tmp_path, keys):
+@pytest.mark.parametrize("chiave", ["sottochiave dei tag", "chiave estranea"])
+def test_firma_con_un_altra_chiave_rifiutata(tmp_path, keys, chiave):
+    # Con la sola sottochiave dei tag nel secret (l'errore di configurazione
+    # della prima versione) gli allegati non si firmano: i ruoli restano
+    # separati anche se qualcuno sbaglia secret.
     repo = _project(tmp_path, keys)
     dist = _dist(tmp_path)
-    secret = keys.gpg("--armor", "--export-secret-keys", keys.other).stdout
+    if chiave == "sottochiave dei tag":
+        secret = keys.subkey_secret(keys.tag_subkey)
+    else:
+        secret = keys.gpg("--armor", "--export-secret-keys", keys.other).stdout
     proc = _run(["tools/sign-release.sh", str(dist)], tmp_path, cwd=repo, check=False,
-                GPG_PRIVATE_KEY=secret, GPG_PASSPHRASE=PASSPHRASE)
+                **keys.roles(), GPG_PRIVATE_KEY=secret, GPG_PASSPHRASE=PASSPHRASE)
     assert proc.returncode != 0
     assert not list(dist.glob("*.sig"))
 
@@ -244,13 +274,53 @@ def test_note_della_release_dal_changelog(tmp_path):
 
 # -- il workflow usa questi script e non firma i tag ---------------------------
 
-def test_workflow_verifica_il_tag_prima_di_tutto():
+def _jobs(text: str) -> dict:
+    """Testo di ogni job di release.yml, per nome (indentazione a 2 spazi)."""
+    body = text[text.index("\njobs:\n"):]
+    parts = re.split(r"\n  ([\w-]+):\n", body)
+    return dict(zip(parts[1::2], parts[2::2]))
+
+
+def test_workflow_verifica_il_tag_e_isola_i_secret():
     text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    assert "tools/verify-tag.sh" in text and "tools/check-version.sh" in text
-    # Nessun job firma tag o usa la chiave primaria: solo gli artefatti.
+    jobs = _jobs(text)
+    assert "tools/verify-tag.sh" in jobs["verify"] and "tools/check-version.sh" in jobs["verify"]
+    # Nessun job firma tag o usa la chiave primaria: solo gli allegati.
     assert "git tag" not in text and "export-secret-keys" not in text
+    # I secret solo nel job publish, nell'environment protetto.
+    assert [name for name, body in jobs.items() if "secrets." in body] == ["publish"]
+    assert "environment: release" in jobs["publish"]
     # Ogni action esterna è fissata per SHA.
     for ref in re.findall(r"uses:\s*([^\s#]+)", text):
         if ref.startswith("./"):
             continue
         assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", ref), ref
+
+
+def test_ruoli_delle_chiavi_coerenti_con_la_chiave_pubblica(tmp_path):
+    # tools/release-keys.sh e arch/klamav-py-release-key.asc devono parlare
+    # della stessa chiave: due sottochiavi di firma distinte, ognuna con il
+    # suo ruolo, e la primaria che non firma.
+    roles = dict(re.findall(r'^(\w+)="\$\{KLAMAV_\w+:-([0-9A-F ]+)\}"',
+                            (TOOLS / "release-keys.sh").read_text(), re.M))
+    gnupg = tmp_path / "gnupg"
+    gnupg.mkdir(mode=0o700)
+    out = _run(["gpg", "--homedir", str(gnupg), "--batch", "--with-colons", "--show-keys",
+                str(ROOT / "arch/klamav-py-release-key.asc")], tmp_path).stdout
+    rows = [l.split(":") for l in out.splitlines()]
+    keys, kind = {}, None
+    for r in rows:
+        if r[0] in ("pub", "sub"):
+            kind = (r[0], r[11])
+        elif r[0] == "fpr" and kind:
+            keys[r[9]] = kind
+            kind = None
+    primary = roles["RELEASE_PRIMARY"]
+    tag_subkeys = roles["TAG_SIGNING_SUBKEYS"].split()
+    ci = roles["CI_SIGNING_SUBKEY"]
+    assert keys[primary][0] == "pub" and "s" not in keys[primary][1]
+    for sub in (*tag_subkeys, ci):
+        assert keys[sub] == ("sub", "s")
+    assert ci not in tag_subkeys
+    # L'impronta di validpgpkeys è la primaria.
+    assert primary in (ROOT / "arch/PKGBUILD").read_text()

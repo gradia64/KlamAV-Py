@@ -438,6 +438,10 @@ sha256sum --check --ignore-missing SHA256SUMS
 gpg --verify klamav-py_0.1.15-1_all.deb.sig klamav-py_0.1.15-1_all.deb
 ```
 
-Le firme sono fatte con la sottochiave di firma
-`FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 FD2E`: `gpg` le attribuisce
-alla chiave primaria indicata sopra.
+Gli allegati sono firmati dalla CI con una sottochiave dedicata,
+`F9F4 2835 8660 2F8D D724  C467 0888 61B0 4D8D 328D`; i tag li firma il
+maintainer con `FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 FD2E`.
+`gpg` attribuisce entrambe alla chiave primaria indicata sopra. Se `gpg`
+non riconosce la firma di un allegato, la tua copia della chiave è
+precedente alla sottochiave della CI: riscaricala dal keyserver o dal
+repository come sopra.

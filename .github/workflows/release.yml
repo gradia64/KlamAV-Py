@@ -2,13 +2,15 @@
 # Debian sid, pacchetto Arch dal tag firmato, firma GPG degli artefatti,
 # release GitHub con le note da CHANGELOG.md e PKGBUILD pubblicato su AUR.
 #
-# Il tag lo firma solo il maintainer, con la chiave di rilascio: qui si
-# VERIFICA e basta (tools/verify-tag.sh). La CI firma solo gli artefatti,
-# con la sottochiave di firma; la chiave primaria non lascia mai la
-# macchina del maintainer. Vedi docs/RILASCIO.md.
+# Due sottochiavi di firma con ruoli separati (tools/release-keys.sh,
+# modello di fiducia in docs/RILASCIO.md): il tag lo firma il maintainer
+# con la sua, che non è mai nella CI, e qui si VERIFICA che sia proprio
+# quella (tools/verify-tag.sh); la CI firma solo gli allegati, con la
+# sottochiave della CI. La primaria non lascia la macchina del maintainer.
 #
-# Secret del repository:
-#   GPG_PRIVATE_KEY, GPG_PASSPHRASE   sottochiave di firma (obbligatori)
+# Secret, solo nell'environment «release» (limitato ai tag v*, con
+# approvazione del maintainer): nessun altro job o workflow li vede.
+#   GPG_PRIVATE_KEY, GPG_PASSPHRASE   sottochiave della CI (obbligatori)
 #   AUR_SSH_PRIVATE_KEY               push su AUR (se manca, passo saltato)
 #
 # Le action sono fissate per SHA (commento = versione).
@@ -45,16 +47,6 @@ jobs:
 
       - name: Note della release presenti
         run: tools/release-notes.sh "${GITHUB_REF_NAME#v}" > /dev/null
-
-      # Prima di costruire: una release non firmata non deve partire.
-      - name: Secret di firma presenti
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: |
-          if [ -z "$GPG_PRIVATE_KEY" ]; then
-            echo "::error::secret GPG_PRIVATE_KEY mancante: le release devono essere firmate (docs/RILASCIO.md)"
-            exit 1
-          fi
 
   tests:
     needs: verify
@@ -123,9 +115,22 @@ jobs:
   publish:
     needs: [deb, arch]
     runs-on: ubuntu-26.04
+    # Unico job con i secret, e solo dopo l'approvazione del maintainer:
+    # l'ultimo punto di controllo prima della release e di AUR.
+    environment: release
     permissions:
       contents: write   # creare la release e caricare i file
     steps:
+      # Prima di qualunque pubblicazione: una release non firmata non esce.
+      - name: Secret di firma presenti
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "::error::secret GPG_PRIVATE_KEY mancante nell'environment release (docs/RILASCIO.md)"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1

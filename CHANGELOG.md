@@ -12,8 +12,10 @@ sono in `docs/CHANGELOG-archive.md`.
   il tag sia firmato con la chiave di rilascio, ripete i test, costruisce
   il `.deb` su Debian sid e il pacchetto Arch dal tag firmato, firma tutti
   gli allegati (`.sig` e `SHA256SUMS`), crea la release GitHub con le note
-  di questo file e aggiorna il pacchetto su AUR. Come verificare le firme:
-  README, «Verifica dei rilasci».
+  di questo file e aggiorna il pacchetto su AUR. Gli allegati sono firmati
+  con una sottochiave dedicata alla CI, separata da quella che firma i tag:
+  serve la chiave pubblica aggiornata. Come verificare le firme: README,
+  «Verifica dei rilasci».
 
 ### Corretto
 - Il pacchetto Arch non dipendeva da `hicolor-icon-theme`, pur

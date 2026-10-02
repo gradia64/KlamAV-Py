@@ -516,11 +516,25 @@ Ordine, per ogni versione:
    mano prima del push (note in più per chi aggiorna) resta com'è: il
    workflow carica solo i file.
 
-- **La CI firma gli artefatti, mai i tag**, e solo con la sottochiave di
-  firma (`707F1CD9C887FD2E`) nei secret: la primaria resta offline, e
-  una compromissione della CI si risolve revocando la sottochiave, senza
-  toccare `validpgpkeys`. Ogni firma è verificata con la sola chiave
-  pubblica del repository prima della pubblicazione.
+- **Due sottochiavi di firma, ruoli separati** (impronte in
+  `tools/release-keys.sh`, modello di fiducia in `docs/RILASCIO.md`). La
+  sottochiave dei tag (`FDC22208…`, ha firmato tutti i tag dalla 0.1.10)
+  sta solo sulla macchina del maintainer; quella della CI (`F9F42835…`)
+  sta solo nei secret e firma solo gli allegati. `verify` accetta un tag
+  solo se firmato dalla sottochiave dei tag, non da una qualunque della
+  primaria. Una compromissione della CI si risolve revocando la sola
+  sottochiave della CI: le firme dei tag passati restano valide.
+  Scartata la prima versione, con la sottochiave dei tag nei secret: la
+  regola «la CI non firma tag» era garantita da un test sul workflow e non
+  dalla crittografia, e revocarla avrebbe invalidato lo storico.
+- **Secret solo nell'environment `release`**, limitato ai tag `v*` e con
+  l'approvazione del maintainer: solo il job `publish` li vede, e niente
+  arriva alla release o su AUR senza un clic. Limiti noti: makepkg
+  accetta qualunque sottochiave della primaria, e la chiave SSH di AUR
+  vale per tutto l'account (anche `olladesk`).
+- **La voce del CHANGELOG è la descrizione della release**: va riletta
+  prima del tag con `tools/release-notes.sh`, perché il workflow la
+  pubblica così com'è.
 - **Il pacchetto Arch della CI è quello di AUR**: stesso PKGBUILD, stessa
   sorgente (il tag firmato su GitHub). Per questo il job gira dopo il
   push del tag e non prima.

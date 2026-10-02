@@ -1,8 +1,47 @@
 # Rilascio di KlamAV-Py
 
 Guida per chi pubblica le release. La procedura e le sue ragioni sono in
-`docs/CONTESTO-PROGETTO.md`, sezione 4, «Rilascio»; qui ci sono la
-configurazione una tantum e i comandi.
+`docs/CONTESTO-PROGETTO.md`, sezione 4, «Rilascio»; qui ci sono il modello
+di fiducia, la configurazione una tantum e i comandi.
+
+## Modello di fiducia
+
+Una chiave di rilascio, tre parti con ruoli separati (impronte in
+`tools/release-keys.sh`, unico punto in cui sono scritte):
+
+| Parte | Impronta | Dove sta | Firma |
+|-------|----------|----------|-------|
+| Primaria `[C]` | `EBEE 3E80 EFA3 8B42 B147  F1B9 9D7A A4F1 971F EAA9` | solo sulla macchina del maintainer | niente: certifica le sottochiavi. È l'impronta di `validpgpkeys` e del README |
+| Sottochiave dei tag `[S]` | `FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 FD2E` (scade 2028-09-25) | solo sulla macchina del maintainer, **mai nella CI** | i tag `v*` (tutti, dalla 0.1.10) |
+| Sottochiave della CI `[S]` | `F9F4 2835 8660 2F8D D724  C467 0888 61B0 4D8D 328D` (scade 2028-10-01) | secret dell'environment `release` | gli allegati della release (`.sig`, `SHA256SUMS.sig`) |
+
+Cosa garantisce cosa:
+
+- **La firma del tag** dice che il codice di quella versione l'ha approvato
+  il maintainer. È quella che verificano `git tag -v` e makepkg (`?signed`):
+  il pacchetto AUR si costruisce dal tag, non dagli allegati. Il job
+  `verify` accetta solo la sottochiave dei tag: un tag firmato con la
+  sottochiave della CI, valido per gpg, qui viene rifiutato.
+- **La firma degli allegati** dice che quei file li ha prodotti la CI di
+  questo repository da quel tag. Non dice nulla di più del tag.
+- **Se la CI o i secret vengono compromessi**: si revoca solo la
+  sottochiave della CI. Le firme dei tag passati restano valide, la
+  primaria e `validpgpkeys` non cambiano.
+
+Limiti da sapere:
+
+- makepkg accetta una firma di **qualunque** sottochiave della primaria in
+  `validpgpkeys`. Chi avesse la sottochiave della CI potrebbe firmare un
+  tag che makepkg accetta, anche se `verify` lo rifiuta: per questo la
+  sottochiave sta solo nell'environment protetto, e va revocata subito al
+  primo sospetto.
+- La chiave SSH di AUR nella CI dà accesso a tutto l'account AUR
+  (`klamav-py` e `olladesk`): chi la ottiene può pubblicare un PKGBUILD a
+  sua scelta. L'approvazione dell'environment è l'ultimo controllo prima
+  di AUR.
+
+La separazione non rende innocua una CI compromessa: la rende
+rimediabile senza danni allo storico.
 
 ## Cosa fa il workflow
 
@@ -10,15 +49,14 @@ Al push di un tag `v<versione>` parte `.github/workflows/release.yml`:
 
 | Job       | Cosa fa |
 |-----------|---------|
-| `verify`  | il tag è annotato e firmato dalla chiave di rilascio (`tools/verify-tag.sh`); tag = versione in `__init__.py`, PKGBUILD, `debian/changelog`, voce di `CHANGELOG.md` (`tools/check-version.sh`); secret di firma presente |
+| `verify`  | il tag è annotato e firmato dalla sottochiave dei tag (`tools/verify-tag.sh`); tag = versione in `__init__.py`, PKGBUILD, `debian/changelog`, voce di `CHANGELOG.md` (`tools/check-version.sh`) |
 | `tests`   | la stessa matrice di `tests.yml` (Python 3.10–3.14) |
 | `deb`     | in `debian:sid`: `dpkg-buildpackage -us -uc -b`, lintian (gli errori bloccano), tarball del sorgente da `git archive` |
 | `arch`    | in `archlinux:base-devel`: il PKGBUILD così com'è, che clona il tag da GitHub e ne verifica la firma; namcap (gli errori bloccano), `.SRCINFO` rigenerato, installazione e prova della CLI (`tools/build-arch.sh`) |
-| `publish` | firma di tutti gli artefatti con la sottochiave (`tools/sign-release.sh`), release GitHub con le note dalla voce di `CHANGELOG.md` (`tools/release-notes.sh`), PKGBUILD, `klamav-py.install` e `.SRCINFO` su AUR (`tools/publish-aur.sh`) |
+| `publish` | **attende la tua approvazione** (environment `release`), poi: firma degli allegati con la sottochiave della CI (`tools/sign-release.sh`), release GitHub con le note dalla voce di `CHANGELOG.md` (`tools/release-notes.sh`), PKGBUILD, `klamav-py.install` e `.SRCINFO` su AUR (`tools/publish-aur.sh`) |
 
-Il workflow **non firma tag**: li firma solo il maintainer. Un tag non
-firmato, o firmato con un'altra chiave, si ferma al primo job senza
-pubblicare nulla.
+Solo `publish` vede i secret. Nessun altro job, e nessun altro workflow
+(`tests.yml` da un branch compreso), li legge.
 
 File allegati alla release:
 
@@ -33,81 +71,130 @@ klamav-py-release-key.asc           chiave pubblica di rilascio
 
 ## Configurazione (una volta sola)
 
-I secret valgono per singolo repository: quelli di OllaDesk non servono
-qui, e la sua chiave è un'altra.
+### 1. Chiave pubblica aggiornata
 
-### 1. Sottochiave di firma
-
-La chiave di rilascio ha già una sottochiave di sola firma:
-
-```
-pub  ed25519  EBEE 3E80 EFA3 8B42 B147  F1B9 9D7A A4F1 971F EAA9   [C]   (primaria)
-sub  ed25519  FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 FD2E   [S]   scade il 2028-09-25
-```
-
-Nei secret va **solo la sottochiave**: il `!` dopo l'ID esclude tutto il
-resto, e la primaria resta sulla tua macchina come stub. Senza file
-intermedi:
+Dopo aver aggiunto la sottochiave della CI, la chiave pubblica va
+ripubblicata ovunque: chi ha la versione vecchia non conosce la nuova
+sottochiave e non riesce a verificare gli allegati.
 
 ```bash
-gpg --armor --export-secret-subkeys '707F1CD9C887FD2E!' \
-    | gh secret set GPG_PRIVATE_KEY -R gradia64/KlamAV-Py
-gh secret set GPG_PASSPHRASE -R gradia64/KlamAV-Py     # chiede la passphrase
-```
-
-Le firme fatte con la sottochiave si verificano con la chiave pubblica di
-sempre (`arch/klamav-py-release-key.asc`, impronta della primaria), e
-makepkg le accetta con il `validpgpkeys` attuale.
-
-Se la CI o i secret venissero compromessi: revoca la sottochiave
-(`gpg --edit-key EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9`, `key 1`,
-`revkey`), aggiungine una nuova (`addkey`), ripubblica la chiave pubblica
-(file nel repository e keyserver) e aggiorna il secret. La primaria e
-`validpgpkeys` non cambiano.
-
-Prima del 2028-09-25 proroga la sottochiave:
-
-```bash
-gpg --quick-set-expire EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9 3y FDC222086F32BADB04034BAF707F1CD9C887FD2E
 gpg --armor --export EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9 > arch/klamav-py-release-key.asc
+gpg --keyserver hkps://keys.openpgp.org --send-keys EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
+gpg --keyserver hkps://keyserver.ubuntu.com --send-keys EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
 ```
 
-poi committa la chiave pubblica, ripubblicala sui keyserver e riesporta il
-secret come sopra.
+### 2. Environment `release` su GitHub
 
-### 2. AUR
+Settings → Environments → New environment, nome `release`:
 
-Se l'account AUR che mantiene `klamav-py` è lo stesso di OllaDesk puoi
-riusare la sua chiave SSH dedicata; altrimenti creane una e aggiungila al
-profilo AUR:
+- **Required reviewers**: il maintainer. Ogni rilascio si ferma prima di
+  `publish` finché non approvi.
+- **Deployment branches and tags**: «Selected branches and tags», regola
+  sul tag `v*`. Un job che usa l'environment da un branch non parte.
+- **Environment secrets**:
+  ```bash
+  gpg --armor --export-secret-subkeys 'F9F4283586602F8DD724C467088861B04D8D328D!' \
+      | gh secret set GPG_PRIVATE_KEY --env release -R gradia64/KlamAV-Py
+  gh secret set GPG_PASSPHRASE --env release -R gradia64/KlamAV-Py
+  gh secret set AUR_SSH_PRIVATE_KEY --env release -R gradia64/KlamAV-Py < ~/.ssh/aur_klamav_ci
+  ```
+  Il `!` esporta solo la sottochiave della CI: né la primaria né la
+  sottochiave dei tag.
+
+Poi togli i secret a livello di repository, se ci sono:
 
 ```bash
-ssh-keygen -t ed25519 -f ~/.ssh/aur_klamav_py -C "klamav-py CI"
-gh secret set AUR_SSH_PRIVATE_KEY -R gradia64/KlamAV-Py < ~/.ssh/aur_klamav_py
+gh secret delete GPG_PRIVATE_KEY -R gradia64/KlamAV-Py
+gh secret delete GPG_PASSPHRASE -R gradia64/KlamAV-Py
+gh secret delete AUR_SSH_PRIVATE_KEY -R gradia64/KlamAV-Py
 ```
 
-Senza questo secret il passo AUR viene saltato con un avviso e il resto
-della release procede.
+e controlla che restino solo quelli dell'environment:
+
+```bash
+gh secret list -R gradia64/KlamAV-Py            # vuoto
+gh secret list --env release -R gradia64/KlamAV-Py
+```
+
+### 3. git firma con la sottochiave dei tag
+
+Con due sottochiavi di firma nel portachiavi, gpg sceglie da sé la più
+recente, cioè quella della CI, se la chiave è indicata senza `!`. Nel
+repository va fissata quella dei tag (vale per tag e commit firmati):
+
+```bash
+git config --local user.signingkey 'FDC222086F32BADB04034BAF707F1CD9C887FD2E!'
+```
+
+Se non ti serve firmare gli allegati in locale, puoi anche togliere dal
+portachiavi la parte privata della sottochiave della CI, dopo averla
+caricata nell'environment: resta solo su GitHub, e per sostituirla basta
+crearne una nuova con la primaria.
+
+### 4. AUR
+
+La chiave SSH della CI è `~/.ssh/aur_klamav_ci`, senza passphrase,
+registrata nel profilo AUR accanto a quella per l'uso a mano
+(`aur_klamav`). Senza il secret `AUR_SSH_PRIVATE_KEY` il passo viene
+saltato con un avviso.
 
 ## Rilascio
 
 1. Commit di rilascio e merge su `main` con la CI verde (CONTESTO, punti 1
-   e 2).
-2. Tag firmato e push:
+   e 2). **Rileggi la voce del CHANGELOG** così come diventerà la
+   descrizione della release:
+   ```bash
+   tools/release-notes.sh 0.1.15
+   tools/check-version.sh v0.1.15
+   ```
+   Il workflow la pubblica così com'è: correggerla dopo vuol dire
+   modificare la release a mano.
+2. Tag firmato con la sottochiave dei tag (sezione 3) e push:
    ```bash
    git tag -s v0.1.15 -m "KlamAV-Py 0.1.15"
-   git tag -v v0.1.15
+   tools/verify-tag.sh v0.1.15
    git push origin v0.1.15
    ```
-3. Segui il workflow (`gh run watch`). Se `publish` fallisce dopo l'upload
-   si può rilanciare il job: l'upload sovrascrive (`--clobber`) e il push
-   su AUR non fa nulla se AUR è già aggiornato.
+   `tools/verify-tag.sh` in locale, prima del push, dice subito se il tag è
+   stato firmato con la sottochiave sbagliata.
+3. Segui il workflow (`gh run watch`) e approva `publish` quando `deb` e
+   `arch` sono verdi. Se `publish` fallisce dopo l'upload si può
+   rilanciare: l'upload sovrascrive (`--clobber`) e il push su AUR non fa
+   nulla se AUR è già aggiornato.
 
 Una release creata a mano prima del push (per esempio con note in più per
 chi aggiorna) resta com'è: il workflow carica solo i file.
 
 `arch/.SRCINFO` nel repository resta da aggiornare nel commit di rilascio
 (`pkgver` e `source`); quello pubblicato su AUR lo rigenera il workflow.
+
+## Rotazione e revoca
+
+**Compromissione della CI o dei secret** (o solo il sospetto):
+
+```bash
+gpg --edit-key EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
+#   selezionare la sottochiave F9F4…328D (key N), poi: revkey, save
+gpg --quick-add-key EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9 ed25519 sign 2y
+```
+
+Aggiorna `CI_SIGNING_SUBKEY` in `tools/release-keys.sh`, ripubblica la
+chiave pubblica (sezione 1), ricarica `GPG_PRIVATE_KEY` nell'environment e
+togli la chiave SSH della CI dal profilo AUR, sostituendola. La
+sottochiave dei tag non si tocca.
+
+**Scadenze**: prorogale prima che scadano (tag 2028-09-25, CI
+2028-10-01), poi ripubblica la chiave pubblica:
+
+```bash
+gpg --quick-set-expire EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9 3y FDC222086F32BADB04034BAF707F1CD9C887FD2E
+gpg --quick-set-expire EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9 2y F9F4283586602F8DD724C467088861B04D8D328D
+```
+
+**Rotazione della sottochiave dei tag**: aggiungi la nuova a
+`TAG_SIGNING_SUBKEYS` (separate da spazi) prima di firmare con essa, e
+togli la vecchia solo quando non serve più verificare tag nuovi con quella.
+Revocarla invaliderebbe la verifica di tutti i tag che ha firmato.
 
 ## In locale
 
@@ -118,5 +205,5 @@ tools/verify-tag.sh v0.1.15
 tools/check-version.sh v0.1.15
 tools/release-notes.sh 0.1.15
 docker run --rm -v "$PWD":/src -w /src archlinux:base-devel tools/build-arch.sh
-tools/sign-release.sh dist     # con il portachiavi locale
+tools/sign-release.sh dist     # con il portachiavi locale (sottochiave della CI)
 ```

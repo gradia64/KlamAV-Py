@@ -8,14 +8,16 @@
 # (arch/klamav-py-release-key.asc): una firma che nessuno potrebbe
 # verificare con la chiave distribuita non esce da qui.
 #
+# Firma SEMPRE con la sottochiave della CI (CI_SIGNING_SUBKEY in
+# tools/release-keys.sh), mai con quella dei tag: le due hanno ruoli
+# separati, e la verifica qui sotto rifiuta una firma fatta con l'altra.
+#
 # Chiave privata, in ordine di preferenza:
-#   GPG_PRIVATE_KEY   secret della CI: la sola SOTTOCHIAVE di firma, esportata
-#                     con «gpg --export-secret-subkeys 'ID!'» (la primaria
-#                     resta offline). Passphrase opzionale in GPG_PASSPHRASE.
+#   GPG_PRIVATE_KEY   secret dell'environment «release»: la sola sottochiave
+#                     della CI, esportata con «gpg --export-secret-subkeys
+#                     'ID!'». Passphrase opzionale in GPG_PASSPHRASE.
 #                     Importata in un portachiavi temporaneo.
 #   portachiavi locale (GNUPGHOME o ~/.gnupg), per firmare a mano.
-# In entrambi i casi gpg sceglie la sottochiave di firma valida della chiave
-# di rilascio: niente impronta da tenere allineata qui.
 #
 # Uso: tools/sign-release.sh [cartella]
 set -euo pipefail
@@ -23,6 +25,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PUBKEY="${KLAMAV_RELEASE_KEY:-$ROOT/arch/klamav-py-release-key.asc}"
 DIR="${1:-$ROOT/dist}"
+# shellcheck source=tools/release-keys.sh
+. "$ROOT/tools/release-keys.sh"
 
 if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
     GNUPGHOME="$(mktemp -d)"
@@ -32,14 +36,15 @@ if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
     printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --quiet --import
 fi
 
-PRIMARY="$(gpg --batch --with-colons --show-keys "$PUBKEY" | awk -F: '$1 == "fpr" { print $10; exit }')"
-[ -n "$PRIMARY" ] || { echo "impronta non leggibile da $PUBKEY" >&2; exit 1; }
-if ! gpg --batch --list-secret-keys "$PRIMARY" >/dev/null 2>&1; then
-    echo "nessuna chiave privata di $PRIMARY (né GPG_PRIVATE_KEY né portachiavi)" >&2
+PRIMARY="$RELEASE_PRIMARY"
+if ! gpg --batch --with-colons --list-secret-keys "$PRIMARY" 2>/dev/null \
+        | awk -F: -v k="$CI_SIGNING_SUBKEY" '$1 == "fpr" && $10 == k { found = 1 } END { exit !found }'; then
+    echo "nessuna chiave privata della sottochiave della CI $CI_SIGNING_SUBKEY (né GPG_PRIVATE_KEY né portachiavi)" >&2
     exit 1
 fi
 
-GPG=(gpg --batch --yes --local-user "$PRIMARY")
+# «!»: proprio questa sottochiave, non quella che gpg sceglierebbe da sé.
+GPG=(gpg --batch --yes --local-user "$CI_SIGNING_SUBKEY!")
 if [ -n "${GPG_PASSPHRASE:-}" ]; then
     GPG+=(--pinentry-mode loopback --passphrase-fd 3)
 fi
@@ -69,14 +74,14 @@ done
 sha256sum "${files[@]}" > SHA256SUMS
 sign SHA256SUMS
 
-# Verifica con la sola chiave pubblica, e che la primaria sia quella di
-# rilascio (VALIDSIG: ultimo campo = primaria anche per una sottochiave).
+# Verifica con la sola chiave pubblica: firmata dalla sottochiave della CI
+# (terzo campo di VALIDSIG) della chiave di rilascio (ultimo campo).
 VERIFY_HOME="$(mktemp -d)"
 chmod 700 "$VERIFY_HOME"
 gpg --homedir "$VERIFY_HOME" --batch --quiet --import "$PUBKEY"
 for f in "${files[@]}" SHA256SUMS; do
     if ! gpg --homedir "$VERIFY_HOME" --batch --status-fd 1 --verify "$f.sig" "$f" 2>/dev/null \
-            | grep -qE "^\[GNUPG:\] VALIDSIG .* $PRIMARY\$"; then
+            | grep -qE "^\[GNUPG:\] VALIDSIG $CI_SIGNING_SUBKEY .* $PRIMARY\$"; then
         echo "verifica fallita: $f" >&2
         gpgconf --homedir "$VERIFY_HOME" --kill gpg-agent >/dev/null 2>&1 || true
         rm -rf "$VERIFY_HOME"
@@ -86,5 +91,5 @@ done
 gpgconf --homedir "$VERIFY_HOME" --kill gpg-agent >/dev/null 2>&1 || true
 rm -rf "$VERIFY_HOME"
 
-echo "firmati con la chiave di rilascio $PRIMARY:"
+echo "firmati con la sottochiave della CI $CI_SIGNING_SUBKEY (chiave di rilascio $PRIMARY):"
 printf '  %s\n' "${files[@]}" SHA256SUMS
