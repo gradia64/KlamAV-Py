@@ -500,9 +500,11 @@ e la rete dell'ambiente può non raggiungere i mirror Debian.
   distruzione del wrapper Python con il thread ancora vivo (SIGABRT osservato
   su Arch). `PingWorker` fa eccezione perché ha un parent Qt.
 - **Il test della gara (`test_qthread_retire.py`) è deterministico**: lo
-  script di riproduzione tiene vivo `run()` 50 ms dopo l'emit, così la
-  controprova senza correzione aborta sempre. Un'uscita pulita della
-  controprova è un fallimento, non uno skip.
+  script di riproduzione tiene vivo `run()` dopo l'emit con un
+  `QSemaphore` che la slot rilascia solo dopo aver rilasciato (o
+  distrutto) il worker (0.1.14; prima un `sleep` di 50 ms, che dipendeva
+  dal carico), così la controprova senza correzione aborta sempre. Un'uscita
+  pulita della controprova è un fallimento, non uno skip.
 
 ---
 
@@ -571,11 +573,23 @@ oracolo); scansione di home altrui; esecuzione come root.
   di sviluppo con copie diverse installate (`.deb`, venv, albero) conviene
   comunque `pip install -e .` nel venv.
 - **Skip e fallimenti ambientali attesi**: da root diversi test sui permessi
-  si saltano; senza `::1` o senza locale italiano alcuni test si saltano; in
-  un sandbox in sola lettura i test che invocano `systemd-analyze` possono
-  fallire. Riportarli come ambientali, non come difetti. Il test della gara
+  si saltano; senza `::1` o senza locale italiano alcuni test si saltano; i
+  test che invocano `systemd-analyze` si saltano senza manager utente
+  («Failed to initialize manager») o su un filesystem in sola lettura
+  («Failed to setup working directory»). Riportarli come ambientali, non
+  come difetti. Il test della gara
   QThread non rientra più fra gli skip: dalla 0.1.12 si riproduce in modo
   deterministico, e se la controprova non aborta è un fallimento.
+- **Sottoprocessi nei test: HOME temporanea.** Ogni test che lancia la CLI,
+  o altro codice Python, in un sottoprocesso passa
+  `env={**os.environ, "HOME": str(tmp_path)}` (o `dict(os.environ,
+  HOME=...)`), come `tests/test_settings_permissions.py`: il monkeypatch
+  di `conftest.py` (registro delle prese visione) non attraversa i
+  sottoprocessi, che userebbero i dati reali di chi lancia la suite.
+  `tests/test_subprocess_home.py` lo verifica staticamente.
+- **Man page**: `tests/test_manpage.py` confronta i nomi delle opzioni con
+  il parser e fra le lingue, e dalla 0.1.14 verifica che ogni opzione
+  abbia una descrizione (testo dopo la voce `.TP`/`.TQ`) in ogni lingua.
 - **Test con thread veri**: alcuni test della pagina Pianificazione usano
   `run_off_gui_thread` reale, con una funzione bloccata di proposito; gli
   altri la sostituiscono con una versione in linea nelle fixture `env`.

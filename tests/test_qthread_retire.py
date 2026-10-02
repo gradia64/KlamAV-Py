@@ -140,10 +140,15 @@ def test_retire_trattiene_un_riferimento():
 SCRIPT_RIPRODUZIONE = """
 import sys
 import time
-from PySide6.QtCore import QCoreApplication, QThread, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QSemaphore, QThread, QTimer, Signal
 
 MODO = sys.argv[1]
 _in_ritiro = set()
+# run() resta vivo dopo l'emit finché la slot non ha rilasciato (o
+# distrutto) il worker: la slot gira sempre a thread ancora in esecuzione,
+# per costruzione e non per tempi. Il timeout evita un blocco infinito se
+# una versione futura di PySide6 consegnasse la slot in modo diverso.
+SLOT_ESEGUITA = QSemaphore(0)
 
 
 def retire(worker):
@@ -166,13 +171,14 @@ class Worker(QThread):
         # come ScanWorker/FreshclamRestartWorker: il segnale di fine e' emesso
         # dentro run(), non dopo
         self.fine.emit()
-        # Finestra della gara allargata: run() resta vivo ancora un poco
-        # dopo l'emit, come un worker reale che chiude socket e file. Senza,
-        # la finestra e' di pochi microsecondi e la gara si riproduceva solo
-        # a volte (mai in CI, spesso mai in locale): il test di controprova
-        # veniva saltato e la rete di sicurezza non misurava nulla. Con
-        # 50 ms la slot gira sempre a thread ancora vivo.
-        time.sleep(0.05)
+        # Finestra della gara tenuta aperta in modo esplicito: run() resta
+        # vivo finché la slot (nel thread principale) non ha rilasciato il
+        # worker, come un worker reale che dopo l'emit chiude ancora socket e
+        # file. Prima c'era time.sleep(0.05): bastava quasi sempre, ma la
+        # riproduzione dipendeva dal carico della macchina. Senza alcuna
+        # finestra la gara si riproduceva solo a volte (mai in CI) e la
+        # controprova non misurava nulla.
+        SLOT_ESEGUITA.tryAcquire(1, 10000)
 
 
 class Pagina:
@@ -188,9 +194,10 @@ class Pagina:
     def su_fine(self):
         worker, self.worker = self.worker, None
         if MODO == "senza_fix":
-            del worker
+            del worker  # qui il processo aborta: thread ancora vivo
         else:
             retire(worker)
+        SLOT_ESEGUITA.release()
         self.cicli += 1
         if self.cicli < 50:
             QTimer.singleShot(0, self.avvia)
@@ -209,7 +216,7 @@ print("uscita pulita")
 def _esegui(modo: str, tmp_path: Path) -> subprocess.CompletedProcess:
     script = tmp_path / "riproduzione.py"
     script.write_text(textwrap.dedent(SCRIPT_RIPRODUZIONE), encoding="utf-8")
-    ambiente = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    ambiente = dict(os.environ, QT_QPA_PLATFORM="offscreen", HOME=str(tmp_path))
     return subprocess.run(
         [sys.executable, str(script), modo],
         capture_output=True,

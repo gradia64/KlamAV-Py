@@ -173,6 +173,22 @@ def test_template_coincide_con_la_unit_spedita():
     assert split_exec(nostro, home=str(HOME)) == split_exec(unit_exec[0], home=str(HOME))
 
 
+# Errori di systemd-analyze che dipendono dall'ambiente, non dalla unit:
+# niente manager utente (container, CI), filesystem in sola lettura (sandbox
+# che non lascia creare la directory di lavoro).
+ENVIRONMENTAL_ERRORS = ("Failed to initialize manager", "Failed to setup working directory")
+
+
+def _environmental(output: str) -> bool:
+    return any(e in output for e in ENVIRONMENTAL_ERRORS)
+
+
+def test_guardia_ambientale():
+    assert _environmental("Failed to setup working directory: Read-only file system")
+    assert _environmental("Failed to initialize manager: Permission denied")
+    assert not _environmental("klamav-scan.service: Unknown key name 'Foo'")
+
+
 def _unit_values(key):
     return _values(UNIT.read_text(), key)
 
@@ -221,7 +237,7 @@ def test_systemd_analyze_verify(value, tmp_path):
         capture_output=True, text=True, env=env, timeout=60,
     )
     output = proc.stdout + proc.stderr
-    if "Failed to initialize manager" in output:
+    if _environmental(output):
         pytest.skip(f"manager utente non inizializzabile qui: {output.strip()}")
     # verify esce 0 anche con "Ignoring unknown escape" o "path is not
     # absolute, ignoring": ogni riga che cita il drop-in è un errore.
@@ -432,7 +448,7 @@ def test_systemd_analyze_verify_tcp(tmp_path):
         capture_output=True, text=True, env=env, timeout=60,
     )
     output = proc.stdout + proc.stderr
-    if "Failed to initialize manager" in output:
+    if _environmental(output):
         pytest.skip(output.strip())
     assert proc.returncode == 0, output
     assert "50-klamav-py.conf" not in output, output
@@ -625,7 +641,7 @@ def test_systemd_analyze_verify_esclusioni(tmp_path):
         capture_output=True, text=True, env=env, timeout=60,
     )
     output = proc.stdout + proc.stderr
-    if "Failed to initialize manager" in output:
+    if _environmental(output):
         pytest.skip(output.strip())
     assert proc.returncode == 0, output
     assert "50-klamav-py.conf" not in output, output

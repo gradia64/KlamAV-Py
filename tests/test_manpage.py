@@ -63,6 +63,46 @@ def documented_options(path: Path) -> set[str]:
     return _tagged(_read(path), _OPT_RE)
 
 
+# Macro che chiudono la descrizione di una voce .TP. .IP no: continua il
+# paragrafo della voce con un capoverso rientrato.
+_END_OF_ITEM = (".TP", ".SH", ".SS", ".PP", ".P", ".LP")
+# Macro di carattere che portano testo («.B parola»): contano come
+# descrizione. Le altre righe che iniziano con «.» sono comandi.
+_FONT_RE = re.compile(r"^\.(?:B|I|BI|BR|IB|IR|RB|RI|SM|SB)\s+\S")
+
+
+def described_options(lines: list[str]) -> dict[str, bool]:
+    """
+    Per ogni opzione che apre una voce (.TP, più eventuali .TQ della stessa
+    voce), se almeno una delle sue voci ha una descrizione: testo, o una
+    macro di carattere con testo, prima della voce o sezione successiva.
+    """
+    described: dict[str, bool] = {}
+    i, n = 0, len(lines)
+    while i < n:
+        if lines[i].strip() != ".TP" or i + 1 >= n:
+            i += 1
+            continue
+        tags = [lines[i + 1]]
+        j = i + 2
+        while j + 1 < n and lines[j].strip() == ".TQ":
+            tags.append(lines[j + 1])
+            j += 2
+        has_text = False
+        while j < n and lines[j].split(" ", 1)[0] not in _END_OF_ITEM:
+            line = lines[j]
+            if line.strip() and (not line.startswith(".") or _FONT_RE.match(line)):
+                has_text = True
+            j += 1
+        for tag in tags:
+            m = _OPT_RE.match(tag)
+            if m:
+                opt = m.group(1).replace("\\-", "-")
+                described[opt] = described.get(opt, False) or has_text
+        i = j
+    return described
+
+
 def documented_commands(path: Path) -> set[str]:
     return _tagged(_read(path), _CMD_RE)
 
@@ -152,6 +192,48 @@ def test_comandi_cli(lang):
 @pytest.mark.parametrize("lang", PAGES["klamav-py-gui"])
 def test_opzioni_gui(lang):
     assert documented_options(MAN_DIR / f"klamav-py-gui{lang}.1") == gui_options()
+
+
+def _undescribed(paths: list[Path], options: set[str]) -> dict[str, list[str]]:
+    """Opzioni senza descrizione, per pagina. Un'opzione assente da una
+    pagina conta come non descritta in quella lingua."""
+    out = {}
+    for path in paths:
+        described = described_options(_read(path))
+        missing = sorted(o for o in options if not described.get(o))
+        if missing:
+            out[path.name] = missing
+    return out
+
+
+@pytest.mark.parametrize("page, options", [
+    ("klamav-py", cli_options),
+    ("klamav-py-gui", gui_options),
+])
+def test_ogni_opzione_descritta_in_ogni_lingua(page, options):
+    # Il confronto dei soli nomi non vedeva una voce .TP rimasta senza testo,
+    # né una descrizione scritta in una lingua sola sotto una voce comune.
+    paths = [MAN_DIR / f"{page}{lang}.1" for lang in PAGES[page]]
+    assert _undescribed(paths, options()) == {}
+
+
+def test_controllo_descrizioni_vede_i_buchi(tmp_path):
+    # Il controllo deve fallire davvero: voce senza testo, voce presente in
+    # una lingua sola, .TQ che condivide la descrizione.
+    it = tmp_path / "x.it.1"
+    en = tmp_path / "x.1"
+    it.write_text(
+        ".SH OPZIONI\n.TP\n.B \\-\\-vuota\n.TP\n.BI \\-\\-piena \" x\"\nTesto.\n"
+        ".TP\n.B \\-\\-prima\n.TQ\n.B \\-\\-seconda\nComune.\n"
+        ".TP\n.B \\-\\-solo\\-macro\n.BR clamd (8).\n.SH FINE\n",
+        encoding="utf-8",
+    )
+    en.write_text(".SH OPTIONS\n.TP\n.B \\-\\-piena\nText.\n.SH END\n", encoding="utf-8")
+    opts = {"--vuota", "--piena", "--prima", "--seconda", "--solo-macro"}
+    assert _undescribed([it, en], opts) == {
+        "x.it.1": ["--vuota"],
+        "x.1": ["--prima", "--seconda", "--solo-macro", "--vuota"],
+    }
 
 
 # -- coerenza fra traduzioni --------------------------------------------

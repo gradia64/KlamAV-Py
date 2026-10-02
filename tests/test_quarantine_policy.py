@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from klamav_py import cli
+from klamav_py.acknowledged import AckRegistry
 from klamav_py.clamd_client import ClamdEndpoint, ScanResult
 from klamav_py.quarantine_policy import (
     REASON_HEURISTIC, REASON_MAIL_STORE, QuarantinePolicy, default_report_only_dirs,
@@ -151,6 +152,9 @@ def test_worker_esito_dopo_result_ready(tmp_path):
         endpoint=ClamdEndpoint(), target=tmp_path / "a", quarantine_dir=tmp_path / "q",
         auto_quarantine=True, client_factory=Client,
         policy=QuarantinePolicy(default_report_only_dirs(tmp_path)),
+        # Registro esplicito: l'euristica lo fa consultare, e il test non deve
+        # dipendere dal fixture globale di conftest.py.
+        acknowledgements=AckRegistry(tmp_path / "acknowledged.json"),
     )
     eventi = []
     w.result_ready.connect(lambda r: eventi.append(("result", Path(r.path).name)))

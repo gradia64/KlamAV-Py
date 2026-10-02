@@ -85,7 +85,9 @@ def test_lettura_completa_di_un_payload_grande(tmp_path):
         f"paths = [f'/home/u/foto/IMG_{{i:05d}}.jpg' for i in range({n})]\n"
         "sys.exit(0 if notify_running_instance(sys.argv[1], encode_targets(paths)[0]) else 1)\n"
     )
-    env = dict(os.environ, PYTHONPATH=str(RADICE), QT_QPA_PLATFORM="offscreen")
+    # HOME temporanea: il monkeypatch di conftest.py non arriva nel
+    # sottoprocesso (vedi CONTESTO, sezione 7).
+    env = dict(os.environ, PYTHONPATH=str(RADICE), QT_QPA_PLATFORM="offscreen", HOME=str(tmp_path))
     proc = subprocess.Popen([sys.executable, "-c", codice, sock_path], env=env)
 
     client = None
