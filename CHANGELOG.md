@@ -8,15 +8,18 @@ sono in `docs/CHANGELOG-archive.md`.
 ## Non rilasciato
 
 ### Modificato
-- **Errori di I/O sulle sottocartelle contati fra gli errori.** Nella
-  0.1.13 ogni errore su una sottocartella finiva fra le «cartelle non
-  leggibili», con il suggerimento di escluderla: anche un disco che
-  degrada (errore di I/O) o un mount NFS che non risponde più. Ora fra le
-  cartelle non leggibili restano solo i permessi negati; gli altri errori
-  sono righe «ERRORE» con la cartella e il motivo, contano fra gli errori
-  come un file illeggibile, senza suggerire l'esclusione. Il codice di
-  uscita della CLI resta quello degli errori di lettura (0 senza
-  infezioni), come per i file.
+- **Guasti di I/O: la scansione non vale più come pulita.** Un errore di
+  lettura che non è un permesso negato né un file sparito (un disco che
+  degrada, un mount NFS che non risponde più), su un file o su una
+  sottocartella, faceva uscire la CLI con 0: sotto il timer di sistema,
+  nessuna notifica. Ora, senza infezioni, l'uscita è 2 e la notifica
+  scatta; con infezioni resta 1, e l'ultima riga del riepilogo segnala
+  comunque il guasto. Nella 0.1.13 un guasto su una sottocartella finiva
+  inoltre fra le «cartelle non leggibili», con il suggerimento di
+  escluderla: ora è una riga «ERRORE» con la cartella e il motivo. Fra le
+  cartelle non leggibili restano solo i permessi negati, che come i file
+  spariti non cambiano il codice di uscita. Un errore di lettura a metà
+  file non viene più riportato come «sessione clamd interrotta».
 - La scansione programmata di sistema scrive errori e cartelle non
   leggibili dell'ultima esecuzione anche in
   `~/.local/state/log/klamav-py/scan-errors.log`, oltre che nel journal.

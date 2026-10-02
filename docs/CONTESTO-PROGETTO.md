@@ -309,14 +309,37 @@ nulla fa perdere tempo.
   illeggibile, senza categoria nuova né campo nuovo in `ScanTotals` e
   senza suggerire `--exclude` (le man page lo indicano solo per un mount
   che si sa non disponibile in modo permanente).
-- **Dove si vedono.** Cartelle non leggibili ed errori non cambiano il
-  codice di uscita (0 senza infezioni), quindi sotto il timer `OnFailure`
-  non scatta: è la regola dei codici di uscita, non un difetto. Si vedono
-  su stderr e nel journal, nel riepilogo, e dalla 0.1.14 anche nel log
-  degli errori della unit (`--log-errors %L/klamav-py/scan-errors.log`,
-  `LogsDirectory=klamav-py`, cioè `$XDG_STATE_HOME/log/klamav-py`); nella
-  GUI nella lista della pagina Scansione e nel log della programmata
-  interna.
+- **Guasti di I/O contro stati attesi** (0.1.14, punto 1-bis). Permessi
+  negati (EACCES, EPERM) e entry sparite o sostituite durante la
+  traversata (ENOENT, ENOTDIR; per i file anche ELOOP ed EISDIR) sono
+  stati attesi e permanenti o innocui: non cambiano il codice di uscita,
+  altrimenti una cartella creata con sudo farebbe fallire ogni notte.
+  Ogni altro errno nella lettura locale di un file o di una sottocartella
+  è un guasto (`clamd_client.is_io_fault`, `ScanResult.io_fault`): parte
+  dell'albero non è stata controllata e la scansione non può valere come
+  pulita. Solo le letture locali: gli errori di comunicazione con clamd
+  su un singolo file (timeout, sessione interrotta) non lo sono, e
+  restano errori senza effetto sul codice. Le letture del file da
+  inviare passano da `_LocalReadError`, distinto dagli OSError del
+  socket: prima un EIO a metà file diventava «sessione clamd
+  interrotta».
+- **Codici di uscita della CLI, in ordine di precedenza** (0.1.14): 2
+  errore bloccante (radice non valida, clamd, quarantena; la scansione
+  non parte o si interrompe); 1 almeno un rilevamento, anche con guasti
+  di I/O; 2 almeno un guasto di I/O senza rilevamenti; 0 altrimenti. Il
+  rilevamento prevale perché è l'informazione più urgente e la notifica
+  scatta comunque (la unit non ha `SuccessExitStatus=`, verificato); il
+  guasto resta nell'ultima riga del riepilogo anche con uscita 1. La GUI
+  non usa i codici: un guasto conta fra gli errori, quindi l'esito è
+  «Completata con errori», mai «senza problemi».
+- **Dove si vedono.** Cartelle con permessi negati ed errori che non sono
+  guasti non cambiano il codice di uscita, quindi sotto il timer
+  `OnFailure` non scatta: è la regola dei codici di uscita, non un
+  difetto. Si vedono su stderr e nel journal, nel riepilogo, e dalla
+  0.1.14 anche nel log degli errori della unit (`--log-errors
+  %L/klamav-py/scan-errors.log`, `LogsDirectory=klamav-py`, cioè
+  `$XDG_STATE_HOME/log/klamav-py`); nella GUI nella lista della pagina
+  Scansione e nel log della programmata interna.
 - **Riepilogo come oggetto unico.** `progress`/`finished_scan` di
   `ScanWorker` e `HistoryManager.add_entry` passano un `ScanTotals`
   invece di interi posizionali; un contatore nuovo è un campo con default
@@ -393,8 +416,9 @@ nulla fa perdere tempo.
 - **La unit spedita non si modifica** per le personalizzazioni: per il TCP il
   drop-in aggiunge `PrivateNetwork=no` e *estende*
   `RestrictAddressFamilies`, mantenendo il filtro.
-- **Codici di uscita della CLI**: 0 nessuna infezione (anche con errori di
-  lettura), 1 infezioni, 2 errore bloccante. `OnFailure` notifica 1 e 2.
+- **Codici di uscita della CLI**: vedi la precedenza in «Scansione
+  programmata» (0.1.14: i guasti di I/O senza infezioni escono con 2).
+  `OnFailure` notifica 1 e 2; nessuna `SuccessExitStatus=` nella unit.
 
 ### Aggiornamento firme
 

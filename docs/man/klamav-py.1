@@ -244,7 +244,9 @@ Any other error on a subdirectory (an I/O error from a failing disk, an
 NFS mount that stopped responding) is a fault, not a permission: it is an
 .B ERRORE
 line with the directory and the reason, and it counts among the errors
-like an unreadable file.
+like an unreadable file and, like a read fault on a file, sets the exit
+status to 2 when there are no infections (see
+.BR "EXIT STATUS" ).
 In that case
 .B \-\-exclude
 is only meant for a mount known to be permanently unavailable.
@@ -253,26 +255,41 @@ A summary with the totals follows and, if there were errors, a count
 per error type.
 .
 .SH EXIT STATUS
-.TP
-.B 0
-No infections found, even if some files or subdirectories could not be
-read (read errors, or subdirectories whose permissions deny access) or
-verified.
-.TP
-.B 1
-Infections found, even if quarantining some of them failed.
+For
+.BR scan ,
+the first of the following cases that applies, in this order:
 .TP
 .B 2
-Fatal error: the path to scan does not exist, is a broken symbolic link,
-is neither a directory nor a regular file (a FIFO, a device such as
+Fatal error, the scan does not start or stops: the path to scan does not
+exist, is a broken symbolic link, is neither a directory nor a regular
+file (a FIFO, a device such as
 .IR /dev/null ),
 or is a directory that cannot be read, each with its own message;
-unusable quarantine directory, clamd
-unreachable or protocol error,
+unusable quarantine directory, clamd unreachable or protocol error,
 .B \-\-log\-errors
 file cannot be opened, invalid command line.
 A communication error after the scan has started takes precedence over
 infections already found.
+.TP
+.B 1
+At least one infection found, even if quarantining some of them failed
+and even if there were I/O faults.
+.TP
+.B 2
+No infections, but at least one I/O fault: an error reading a file or a
+subdirectory that is neither a denied permission nor a file that vanished
+during the scan (for example an I/O error from a failing disk, or an NFS
+mount that stopped responding).
+Part of the tree was not checked, so the scan does not count as clean.
+.TP
+.B 0
+Otherwise: no infections and no I/O faults.
+.PP
+Errors for denied permissions (on files or subdirectories), files that
+vanished during the scan, files not verified because they are too large,
+and clamd communication errors on a single file do not change the code.
+When there were I/O faults, the last line of the summary says so, even
+with exit status 1.
 .PP
 For
 .BR ping :
@@ -289,8 +306,8 @@ change.
 In the scheduled scan, codes 1 and 2 trigger the desktop notification
 through
 .BR klamav-scan-notify.service .
-Errors and unreadable subdirectories leave the code at 0: they show up in
-the journal and, one per line, in
+Errors that do not change the code and unreadable subdirectories do not
+notify: they show up in the journal and, one per line, in
 .IR \%~/.local/state/log/klamav\-py/scan\-errors.log
 (see
 .BR FILES ).

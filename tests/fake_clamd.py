@@ -82,7 +82,14 @@ class FakeClamd:
             except OSError:
                 return
             with conn:
-                self._handle(conn)
+                try:
+                    self._handle(conn)
+                except (ConnectionError, OSError):
+                    # Il client ha chiuso a metà comando (per esempio un
+                    # INSTREAM interrotto da un errore di lettura del file):
+                    # come clamd, si passa alla connessione successiva
+                    # invece di far morire il thread del server.
+                    continue
 
     def _handle(self, conn):
         cmd = _recv_command(conn)

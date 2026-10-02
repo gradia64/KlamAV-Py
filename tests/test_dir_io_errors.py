@@ -6,8 +6,9 @@ Nella 0.1.13 ogni errno diverso da ENOENT/ENOTDIR su una sottocartella era
 non risponde più) finivano nel contatore a parte, con il suggerimento di
 --exclude, e non fra gli errori. Ora solo EACCES ed EPERM restano «cartella
 non leggibile»; gli altri errno passano per il percorso degli errori dei
-file: stesso conteggio, stesso codice di uscita, stessa riga nella GUI e
-nel log della pianificazione interna, nessun suggerimento di esclusione.
+file: stesso conteggio, stessa riga nella GUI e nel log della
+pianificazione interna, nessun suggerimento di esclusione. Il codice di
+uscita (2 senza rilevamenti) è in test_io_fault_exit.py.
 
 os.scandir è strumentato: fallisce solo per la sottocartella scelta, quindi
 la radice e il resto dell'albero si leggono davvero.
@@ -137,9 +138,9 @@ def test_cli_guasto_contato_fra_gli_errori(tmp_path, broken, cli_env, capsys, co
     root = _tree(tmp_path)
     broken(root / "guasta", code)
     log = tmp_path / "errori.log"
-    # Codice degli errori: 0, come per un file illeggibile (vedi STATO DI
+    # Guasto di I/O senza rilevamenti: uscita 2 (punto 1-bis, vedi STATO DI
     # USCITA in klamav-py(1)).
-    assert cli.main(["scan", str(root), "--quiet", "--log-errors", str(log)]) == 0
+    assert cli.main(["scan", str(root), "--quiet", "--log-errors", str(log)]) == 2
     out = capsys.readouterr()
     assert "3 file scansionati, 0 infetti, 1 errori." in out.out
     assert f"ERRORE su {root / 'guasta'}: cartella non letta" in out.err

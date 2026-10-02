@@ -223,3 +223,71 @@ def test_programmata_non_completata_motivo_scritto_una_volta(app, tmp_path, monk
     # aborted ed error portano lo stesso testo: una riga sola.
     assert len(lines) == 1 and lines[0].startswith("ERRORE — Scansione non eseguita.")
     assert messages[-1].startswith("Scansione programmata non completata")
+
+
+# -- guasti di I/O (punto 1-bis): mai «senza problemi» ------------------------
+
+def _ok_client():
+    from klamav_py.clamd_client import ClamdClient
+
+    class Client(ClamdClient):
+        def __init__(self, **kw):
+            super().__init__(unix_socket="/nonexistent")
+
+        def _instream_one(self, target, max_stream_size):
+            return ScanResult(str(target), "OK")
+
+        def scan_stream(self, path, **kw):
+            kw["persistent"] = False
+            return super().scan_stream(path, **kw)
+
+    return Client
+
+
+@pytest.fixture
+def eio_tree(tmp_path, monkeypatch):
+    import errno
+
+    root = tmp_path / "radice"
+    (root / "guasta").mkdir(parents=True)
+    (root / "a.txt").write_text("a")
+    real = os.scandir
+
+    def scandir(path="."):
+        if Path(os.fsdecode(path)) == root / "guasta":
+            raise OSError(errno.EIO, os.strerror(errno.EIO), os.fsdecode(path))
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    return root
+
+
+def test_manuale_guasto_di_io_non_e_senza_problemi(page, eio_tree, monkeypatch):
+    client = _ok_client()
+    monkeypatch.setattr(mw.ClamdEndpoint, "new_client", lambda self, **k: client())
+    _scan(page, eio_tree)
+    ((title, text),) = page.reports
+    assert "Completata senza problemi" not in text and "Esito: Completata con errori" in text
+    assert "Errori: 1" in text
+    assert page.history.get_entries()[0]["errors"] == 1
+
+
+def test_programmata_guasto_di_io_non_e_senza_problemi(app, tmp_path, eio_tree, monkeypatch):
+    monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", tmp_path / "logs")
+    client = _ok_client()
+
+    class SyncWorker(ScanWorker):
+        def __init__(self, **kw):
+            super().__init__(client_factory=client, **kw)
+
+        def start(self):
+            self.run()
+
+    monkeypatch.setattr(mw, "ScanWorker", SyncWorker)
+    fake, messages, entries = _window(tmp_path, eio_tree)
+    mw.MainWindow._run_scheduled_scan(fake)
+    assert "senza problemi" not in messages[-1] and "1 errori" in messages[-1]
+    ((args, _),) = entries
+    assert args[2].errors == 1
+    (log,) = (tmp_path / "logs").glob("scheduled-*.log")
+    assert "cartella non letta" in log.read_text()

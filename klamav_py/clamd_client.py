@@ -313,6 +313,46 @@ _VANISHED_DIR_ERRNOS = {errno.ENOENT, errno.ENOTDIR}
 # che degrada, ESTALE di un mount NFS che non risponde più) è un guasto, e
 # segue il percorso degli errori dei file.
 _UNREADABLE_DIR_ERRNOS = {errno.EACCES, errno.EPERM}
+# Un file sostituito durante la scansione da un symlink (ELOOP, per
+# O_NOFOLLOW) o da una cartella (EISDIR) è come un file sparito: un'entry
+# che non c'è più, non un guasto.
+_VANISHED_FILE_ERRNOS = _VANISHED_DIR_ERRNOS | {errno.ELOOP, errno.EISDIR}
+
+
+def is_io_fault(exc: OSError, *, directory: bool = False) -> bool:
+    """
+    Errore di lettura dal filesystem che rende la scansione non affidabile:
+    ogni errno tranne i permessi (stato atteso e permanente, rimedio
+    l'esclusione) e le entry sparite o sostituite durante la traversata.
+    EIO, ESTALE, ETIMEDOUT di un disco o di un mount guasto sono il caso
+    tipico. Un OSError senza errno (file diventato non regolare, vedi
+    _open_regular) non è un guasto.
+
+    Vale per le letture locali, non per la comunicazione con clamd: un
+    timeout o una sessione interrotta restano errori del singolo file.
+    """
+    if exc.errno is None or exc.errno in _UNREADABLE_DIR_ERRNOS:
+        return False
+    vanished = _VANISHED_DIR_ERRNOS if directory else _VANISHED_FILE_ERRNOS
+    return exc.errno not in vanished
+
+
+class _LocalReadError(Exception):
+    """Errore nel leggere il file da inviare (apertura o lettura), tenuto
+    distinto dagli OSError del socket verso clamd, che prima finivano
+    nello stesso except e producevano «sessione clamd interrotta» anche
+    per un EIO del disco."""
+
+    def __init__(self, exc: OSError) -> None:
+        super().__init__(str(exc))
+        self.exc = exc
+
+
+def _read_chunk(fh) -> bytes:
+    try:
+        return fh.read(CHUNK_SIZE)
+    except OSError as exc:
+        raise _LocalReadError(exc) from exc
 
 
 @dataclass
@@ -320,6 +360,10 @@ class ScanResult:
     path: str
     status: str  # "OK", "FOUND", "ERROR", "TOO_LARGE"
     signature: Optional[str] = None
+    # Solo per ERROR: guasto di I/O nella lettura locale (is_io_fault), che
+    # rende la scansione non affidabile. La CLI esce con 2 se non ci sono
+    # rilevamenti.
+    io_fault: bool = False
 
     @property
     def infected(self) -> bool:
@@ -512,6 +556,7 @@ class ClamdClient:
                 path=str(where),
                 status="ERROR",
                 signature=f"cartella non letta, contenuto non controllato: {exc.strerror or exc}",
+                io_fault=is_io_fault(exc, directory=True),
             ))
 
         if path.is_file():
@@ -698,12 +743,23 @@ class ClamdClient:
                         result = self._session.scan_one(target)
                     except ClamdUnavailable:
                         raise
+                    except _LocalReadError as read_exc:
+                        self.reset_session()
+                        yield self._read_error_result(target, read_exc.exc)
+                        continue
                     except (ClamdError, OSError) as retry_exc:
                         self.reset_session()
                         yield self._stream_failure_result(
                             target, retry_exc, max_stream_size, after_retry=True
                         )
                         continue
+                except _LocalReadError as exc:
+                    # Lettura del file interrotta a metà stream: la sessione
+                    # ha un INSTREAM incompleto e va ricreata, ma l'errore è
+                    # del file (del disco), non di clamd.
+                    self.reset_session()
+                    yield self._read_error_result(target, exc.exc)
+                    continue
                 except (ClamdError, OSError) as exc:
                     # La sessione è da buttare in ogni caso: clamd può
                     # aver chiuso la connessione (rifiuto per size limit,
@@ -875,6 +931,16 @@ class ClamdClient:
         )
 
     @staticmethod
+    def _read_error_result(target: Path, exc: OSError) -> ScanResult:
+        """Errore di lettura locale del file, con la sua classificazione."""
+        return ScanResult(
+            path=str(target),
+            status="ERROR",
+            signature=f"impossibile leggere il file: {exc}",
+            io_fault=is_io_fault(exc),
+        )
+
+    @staticmethod
     def _stream_failure_result(
         target: Path,
         exc: Exception,
@@ -923,9 +989,13 @@ class ClamdClient:
             with self._connect_for_scan() as sock:
                 sock.sendall(b"zINSTREAM\0")
                 try:
-                    with self._open_regular(target) as fh:
+                    try:
+                        fh = self._open_regular(target)
+                    except OSError as exc:
+                        raise _LocalReadError(exc) from exc
+                    with fh:
                         try:
-                            while chunk := fh.read(CHUNK_SIZE):
+                            while chunk := _read_chunk(fh):
                                 sock.sendall(struct.pack("!L", len(chunk)) + chunk)
                         finally:
                             self._drop_page_cache(fh)
@@ -938,6 +1008,8 @@ class ClamdClient:
                     # errore potrebbe essere arrivata prima della chiusura.
                     pass
                 raw = self._read_all(sock)
+        except _LocalReadError as exc:
+            return self._read_error_result(target, exc.exc)
         except (BrokenPipeError, ConnectionResetError) as exc:
             return self._stream_failure_result(target, exc, max_stream_size)
         except ClamdUnavailable:
@@ -1048,16 +1120,14 @@ class _ClamdSession:
         except OSError as exc:
             # Non abbiamo mandato nessun comando a clamd: la sessione resta
             # valida, riportiamo solo l'errore di lettura locale.
-            return ScanResult(
-                path=str(target),
-                status="ERROR",
-                signature=f"impossibile leggere il file: {exc}",
-            )
+            return self._client._read_error_result(target, exc)
 
         with fh:
             try:
                 self._sock.sendall(b"zINSTREAM\0")
-                while chunk := fh.read(CHUNK_SIZE):
+                # _read_chunk: un errore di lettura a metà stream sale come
+                # _LocalReadError e scan_stream ricrea la sessione.
+                while chunk := _read_chunk(fh):
                     self._sock.sendall(struct.pack("!L", len(chunk)) + chunk)
                 self._sock.sendall(struct.pack("!L", 0))  # chunk di lunghezza zero = fine stream
             except (BrokenPipeError, ConnectionResetError):

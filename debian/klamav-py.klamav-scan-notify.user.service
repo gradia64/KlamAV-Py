@@ -10,7 +10,7 @@ Type=oneshot
 # "$$" diventa "$" per la shell: le variabili le espande sh, non systemd.
 ExecStart=/bin/sh -c 'case "$$MONITOR_SERVICE_RESULT:$$MONITOR_EXIT_STATUS" in \
     exit-code:1) msg="La scansione programmata ha trovato file infetti." ;; \
-    exit-code:*) msg="La scansione programmata non è riuscita." ;; \
+    exit-code:*) msg="La scansione programmata non è riuscita o non ha potuto leggere parte dei file." ;; \
     *) exit 0 ;; \
   esac; \
   exec notify-send --app-name=KlamAV-Py --urgency=critical --icon=security-low \

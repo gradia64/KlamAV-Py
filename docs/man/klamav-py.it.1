@@ -246,8 +246,10 @@ Ogni altro errore su una sottocartella (un errore di I/O di un disco che
 degrada, un mount NFS che non risponde più) è un guasto e non un
 permesso: è una riga
 .B ERRORE
-con la cartella e il motivo, e conta fra gli errori come un file
-illeggibile.
+con la cartella e il motivo, conta fra gli errori come un file
+illeggibile e, come un guasto di lettura di un file, porta lo stato di
+uscita a 2 se non ci sono infezioni (vedere
+.BR "STATO DI USCITA" ).
 .B \-\-exclude
 serve in quel caso solo per un mount che si sa non disponibile in modo
 permanente.
@@ -255,27 +257,44 @@ Segue un riepilogo con i totali e, se ci sono errori, un conteggio per
 tipo di errore.
 .
 .SH STATO DI USCITA
-.TP
-.B 0
-Nessuna infezione trovata, anche in presenza di errori di lettura (di
-file o di sottocartelle), file non verificati o sottocartelle con
-permessi negati.
-.TP
-.B 1
-Infezioni trovate, anche se la quarantena di qualche file non è riuscita.
+Per
+.BR scan ,
+il primo dei casi seguenti che si applica, in quest'ordine:
 .TP
 .B 2
-Errore bloccante: percorso da scansionare inesistente, collegamento
-simbolico rotto, né directory né file regolare (una FIFO, un dispositivo
-come
+Errore bloccante, la scansione non parte o si interrompe: percorso da
+scansionare inesistente, collegamento simbolico rotto, né directory né
+file regolare (una FIFO, un dispositivo come
 .IR /dev/null ),
 o directory non leggibile, ciascuno con il suo messaggio; directory di
-quarantena non
-utilizzabile, clamd non raggiungibile o errore di protocollo, file di
+quarantena non utilizzabile, clamd non raggiungibile o errore di
+protocollo, file di
 .B \-\-log\-errors
 non apribile, riga di comando non valida.
 Un errore di comunicazione a scansione iniziata prevale su eventuali
 infezioni già trovate.
+.TP
+.B 1
+Almeno un'infezione trovata, anche se la quarantena di qualche file non è
+riuscita e anche se ci sono stati guasti di I/O.
+.TP
+.B 2
+Nessuna infezione, ma almeno un guasto di I/O: un errore di lettura di un
+file o di una sottocartella che non è un permesso negato né un file
+sparito durante la scansione (per esempio un errore di I/O di un disco che
+degrada, o un mount NFS che non risponde più).
+Parte dell'albero non è stata controllata, quindi la scansione non vale
+come pulita.
+.TP
+.B 0
+Altrimenti: nessuna infezione e nessun guasto di I/O.
+.PP
+Gli errori per permessi negati (di file o di sottocartelle), i file
+spariti durante la scansione, i file non verificati perché troppo grandi
+e gli errori di comunicazione con clamd su un singolo file non cambiano
+il codice.
+Quando ci sono guasti di I/O, l'ultima riga del riepilogo lo dice, anche
+con uscita 1.
 .PP
 Per
 .BR ping :
@@ -292,8 +311,8 @@ cambia.
 Nella scansione programmata i codici 1 e 2 attivano la notifica desktop
 tramite
 .BR klamav-scan-notify.service .
-Errori e sottocartelle non leggibili lasciano il codice a 0: si vedono nel
-journal e, uno per riga, in
+Gli errori che non cambiano il codice e le sottocartelle non leggibili
+non notificano: si vedono nel journal e, uno per riga, in
 .IR \%~/.local/state/log/klamav\-py/scan\-errors.log
 (vedere
 .BR FILE ).

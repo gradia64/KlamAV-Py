@@ -18,9 +18,12 @@ Type=oneshot
 # /opt, scansione di /home) è stata rimossa perché non poteva leggere home
 # private senza allargarne i permessi.
 #
-# Codici di uscita: 0 nessuna infezione (anche con errori di lettura),
-# 1 infezioni trovate, 2 errore bloccante. La directory di quarantena è
-# esclusa automaticamente dalla scansione.
+# Codici di uscita, in ordine di precedenza: 2 errore bloccante, 1
+# infezioni trovate (anche con guasti di I/O), 2 guasti di I/O senza
+# infezioni (disco o mount guasto: parte della home non controllata),
+# altrimenti 0 (anche con errori per permessi o file spariti). Nessuna
+# SuccessExitStatus=: 1 e 2 attivano sempre OnFailure. La directory di
+# quarantena è esclusa automaticamente dalla scansione.
 #
 # Errori e cartelle non leggibili, uno per riga, anche in un file oltre
 # che nel journal: %L/klamav-py è la LogsDirectory qui sotto, cioè

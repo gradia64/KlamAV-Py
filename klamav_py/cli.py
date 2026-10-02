@@ -23,17 +23,24 @@ acknowledged.py) non conta fra gli infetti. Resta una riga «GIÀ
 VALUTATO» a ogni scansione; se il contenuto cambia torna a essere
 segnalato.
 
-Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore di
-esecuzione (clamd irraggiungibile, percorso inesistente, collegamento
-rotto, né directory né file regolare, non leggibile, ecc.)
-— utile per `OnFailure=` in systemd o per script di monitoraggio.
+Codici di uscita, in ordine di precedenza — utili per `OnFailure=` in
+systemd o per script di monitoraggio:
+  2 = errore di esecuzione (clamd irraggiungibile, percorso inesistente,
+      collegamento rotto, né directory né file regolare, non leggibile,
+      ecc.): la scansione non parte o si interrompe;
+  1 = infezioni trovate, anche se ci sono stati guasti di I/O;
+  2 = guasti di I/O senza infezioni: errori di lettura di file o
+      sottocartelle che non sono permessi né entry sparite (EIO, ESTALE,
+      ETIMEDOUT di un disco o di un mount guasto, vedi
+      clamd_client.is_io_fault). Parte dell'albero non è stata controllata
+      e la scansione non vale come pulita;
+  0 = altrimenti.
 
-Una sottocartella con permessi negati non cambia il codice di uscita: una
-riga su stderr (e nel log degli errori) e un contatore a parte nel
-riepilogo, con il suggerimento di --exclude. Ogni altro errore su una
-sottocartella (EIO, ESTALE: disco o mount guasto) è un errore come quelli
-dei file, senza quel suggerimento. Sotto il timer nessuno dei due
-notifica: si vedono nel journal e nel log degli errori della unit.
+Gli errori per permessi, i file spariti durante la scansione e gli errori
+di comunicazione con clamd su un singolo file non cambiano il codice. Una
+sottocartella con permessi negati ha una riga su stderr (e nel log degli
+errori) e un contatore a parte nel riepilogo, con il suggerimento di
+--exclude; una sottocartella guasta è un errore come quelli dei file.
 """
 
 from __future__ import annotations
@@ -458,6 +465,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     scanned = 0
     infections = 0
     errors = 0
+    # Errori che sono guasti di I/O (ScanResult.io_fault): contati anche fra
+    # gli errori, decidono l'uscita 2 senza rilevamenti.
+    io_faults = 0
     too_large = 0
     report_only = 0
     unreadable_dirs = 0
@@ -534,6 +544,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
                     print(f"NON VERIFICATO (troppo grande): {result.path}")
             elif result.status == "ERROR":
                 errors += 1
+                if result.io_fault:
+                    io_faults += 1
                 error_categories[_error_category(result.signature or "")] += 1
                 print(f"ERRORE su {result.path}: {result.signature}", file=sys.stderr)
                 if log_fh:
@@ -610,9 +622,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
         for category, count in error_categories.most_common():
             print(f"  {count:5d}  {category}")
 
+    if io_faults:
+        # Ultima riga, anche quando l'uscita è 1 per i rilevamenti: un
+        # guasto non deve sparire dietro un'infezione.
+        print(
+            f"\nATTENZIONE: {io_faults} guasti di I/O (elencati sopra fra gli errori): "
+            "parte dell'albero non è stata controllata, la scansione non vale come pulita."
+        )
+
     if infections:
         return 1
-
+    if io_faults:
+        return 2
     return 0
 
 
