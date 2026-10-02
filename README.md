@@ -427,3 +427,17 @@ quella indicata sopra: il keyserver (o il file nel repository) garantisce
 solo di consegnare una chiave, non che sia quella giusta. Indica sempre il
 keyserver con `--keyserver`: senza, `gpg` usa quello configurato, che può
 non avere la chiave. I tag precedenti alla 0.1.10 non sono firmati.
+
+Dalla 0.1.15 anche i file allegati alla release (`.deb`, pacchetto Arch,
+sorgente) hanno una firma staccata `.sig`, più `SHA256SUMS` firmato. Con la
+chiave importata come sopra:
+
+```bash
+gpg --verify SHA256SUMS.sig SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+gpg --verify klamav-py_0.1.15-1_all.deb.sig klamav-py_0.1.15-1_all.deb
+```
+
+Le firme sono fatte con la sottochiave di firma
+`FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 FD2E`: `gpg` le attribuisce
+alla chiave primaria indicata sopra.

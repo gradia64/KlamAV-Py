@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Richiamato da release.yml: la stessa matrice prima di costruire i pacchetti.
+  workflow_call:
 
 permissions:
   contents: read

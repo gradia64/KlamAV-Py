@@ -12,6 +12,7 @@ pkgbase = klamav-py
 	makedepends = python-wheel
 	makedepends = python-setuptools
 	depends = python>=3.10
+	depends = hicolor-icon-theme
 	optdepends = pyside6: GUI (klamav-py-gui)
 	optdepends = clamav: demone clamd, richiesto per la scansione
 	optdepends = polkit: aggiornamento database virus da GUI (pkexec systemctl restart del servizio freshclam)

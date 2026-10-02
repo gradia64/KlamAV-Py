@@ -5,6 +5,21 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## Non rilasciato
+
+### Aggiunto
+- Rilascio automatico al push di un tag firmato: il workflow verifica che
+  il tag sia firmato con la chiave di rilascio, ripete i test, costruisce
+  il `.deb` su Debian sid e il pacchetto Arch dal tag firmato, firma tutti
+  gli allegati (`.sig` e `SHA256SUMS`), crea la release GitHub con le note
+  di questo file e aggiorna il pacchetto su AUR. Come verificare le firme:
+  README, «Verifica dei rilasci».
+
+### Corretto
+- Il pacchetto Arch non dipendeva da `hicolor-icon-theme`, pur
+  installando l'icona in quel tema (errore di namcap).
+
+---
 ## 0.1.14 — 2026-10-02
 
 ### Modificato

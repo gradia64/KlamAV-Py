@@ -1,0 +1,173 @@
+# Rilascio al push di un tag v*: verifica del tag, test, .deb costruito su
+# Debian sid, pacchetto Arch dal tag firmato, firma GPG degli artefatti,
+# release GitHub con le note da CHANGELOG.md e PKGBUILD pubblicato su AUR.
+#
+# Il tag lo firma solo il maintainer, con la chiave di rilascio: qui si
+# VERIFICA e basta (tools/verify-tag.sh). La CI firma solo gli artefatti,
+# con la sottochiave di firma; la chiave primaria non lascia mai la
+# macchina del maintainer. Vedi docs/RILASCIO.md.
+#
+# Secret del repository:
+#   GPG_PRIVATE_KEY, GPG_PASSPHRASE   sottochiave di firma (obbligatori)
+#   AUR_SSH_PRIVATE_KEY               push su AUR (se manca, passo saltato)
+#
+# Le action sono fissate per SHA (commento = versione).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read   # solo il job publish alza a write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Tag annotato e firmato con la chiave di rilascio
+        run: |
+          # checkout può riscrivere il tag come leggero: si riprende l'oggetto
+          # tag annotato com'è sul server prima di verificarne la firma.
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          tools/verify-tag.sh "$GITHUB_REF_NAME"
+
+      - name: Tag allineato alla versione
+        run: tools/check-version.sh "$GITHUB_REF_NAME"
+
+      - name: Note della release presenti
+        run: tools/release-notes.sh "${GITHUB_REF_NAME#v}" > /dev/null
+
+      # Prima di costruire: una release non firmata non deve partire.
+      - name: Secret di firma presenti
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "::error::secret GPG_PRIVATE_KEY mancante: le release devono essere firmate (docs/RILASCIO.md)"
+            exit 1
+          fi
+
+  tests:
+    needs: verify
+    uses: ./.github/workflows/tests.yml
+
+  deb:
+    needs: tests
+    runs-on: ubuntu-26.04
+    # Il .deb ufficiale si costruisce su Debian sid (CONTESTO, «Packaging»):
+    # una build su Ubuntu non è equivalente.
+    container: debian:sid
+    steps:
+      - name: Strumenti
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git ca-certificates dpkg-dev lintian
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Dipendenze di build da debian/control
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          apt-get build-dep -y -qq ./
+
+      - name: .deb e sorgente
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dpkg-buildpackage -us -uc -b
+          mkdir -p dist
+          mv ../klamav-py_*_all.deb dist/
+          # Sorgente del tag, riproducibile (data del commit, gzip senza nome).
+          git archive --format=tar --prefix="klamav-py-$version/" "$GITHUB_REF_NAME" \
+            | gzip -9n > "dist/klamav-py-$version.tar.gz"
+
+      - name: Lintian
+        run: lintian --fail-on error --info dist/*.deb
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: deb
+          path: dist/
+
+  arch:
+    needs: tests
+    runs-on: ubuntu-26.04
+    container: archlinux:base-devel
+    steps:
+      - name: Strumenti
+        run: pacman -Syu --noconfirm --needed git
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # Il PKGBUILD così com'è: clona il tag da GitHub e ne verifica la firma
+      # (?signed + validpgpkeys), come farà ogni utente AUR.
+      - name: Pacchetto Arch e .SRCINFO
+        run: tools/build-arch.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: aur
+          include-hidden-files: true   # .SRCINFO
+          path: build/aur/
+
+  publish:
+    needs: [deb, arch]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write   # creare la release e caricare i file
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: deb
+          path: dist/
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: aur
+          path: build/aur/
+
+      - name: Firma degli artefatti
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          mv build/aur/*.pkg.tar.zst dist/
+          tools/sign-release.sh dist
+          cp arch/klamav-py-release-key.asc dist/
+
+      - name: Release GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          tools/release-notes.sh "$version" > "$RUNNER_TEMP/note.md"
+          # Una release già creata a mano (per esempio con note in più per
+          # chi aggiorna) resta com'è: si caricano solo i file.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+              --title "KlamAV-Py $version" --notes-file "$RUNNER_TEMP/note.md"
+          fi
+
+      - name: Pubblica su AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "::notice::secret AUR_SSH_PRIVATE_KEY assente: pubblicazione su AUR saltata"
+            exit 0
+          fi
+          tools/publish-aur.sh

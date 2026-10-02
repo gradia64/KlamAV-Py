@@ -504,16 +504,32 @@ Ordine, per ogni versione:
    con un'altra chiave, fa fallire `makepkg` per tutti gli utenti AUR, e
    rifarlo con lo stesso nome dopo la pubblicazione lascia copie
    sbagliate in giro.
-4. `.deb` costruito su Debian sid dal tag.
-5. Release GitHub `KlamAV-Py <versione>`: descrizione = voce di
-   `CHANGELOG.md` (Modificato, Aggiunto, Corretto) più eventuali note per
-   chi aggiorna; `.deb` allegato. Il controllo aggiornamenti della GUI la
-   segnala da lì.
-6. `.SRCINFO` rigenerato e pacchetto AUR aggiornato.
+4. Push del tag: il resto lo fa `.github/workflows/release.yml` (dalla
+   0.1.15; configurazione e comandi in `docs/RILASCIO.md`). Verifica che
+   il tag sia firmato dalla chiave di rilascio e allineato alla versione,
+   ripete i test, costruisce il `.deb` su Debian sid (lintian) e il
+   pacchetto Arch dal PKGBUILD così com'è (firma del tag verificata da
+   makepkg, namcap), firma gli artefatti, crea la release GitHub
+   `KlamAV-Py <versione>` con la voce di `CHANGELOG.md` come descrizione
+   e pubblica PKGBUILD e `.SRCINFO` rigenerato su AUR. Il controllo
+   aggiornamenti della GUI segnala la release da lì. Una release creata a
+   mano prima del push (note in più per chi aggiorna) resta com'è: il
+   workflow carica solo i file.
+
+- **La CI firma gli artefatti, mai i tag**, e solo con la sottochiave di
+  firma (`707F1CD9C887FD2E`) nei secret: la primaria resta offline, e
+  una compromissione della CI si risolve revocando la sottochiave, senza
+  toccare `validpgpkeys`. Ogni firma è verificata con la sola chiave
+  pubblica del repository prima della pubblicazione.
+- **Il pacchetto Arch della CI è quello di AUR**: stesso PKGBUILD, stessa
+  sorgente (il tag firmato su GitHub). Per questo il job gira dopo il
+  push del tag e non prima.
+- **Chiave host di AUR fissata** in `tools/publish-aur.sh`, verificata
+  contro l'impronta pubblicata da aur.archlinux.org.
 
 Un assistente automatico (sessione LLM in un ambiente cloud) può preparare i
-punti 1, 2 e le note del punto 5, ma non 3 e 4: non ha la chiave di rilascio,
-e la rete dell'ambiente può non raggiungere i mirror Debian.
+punti 1, 2 e le note della release, ma non il 3: non ha la chiave di
+rilascio.
 
 ### Quarantena
 
@@ -714,6 +730,7 @@ raggruppati e brevi. Non mettere sullo stesso piano un difetto della classe
   `docs/CHANGELOG-archive.md` per le versioni fino alla 0.1.3 e le prime
   tornate di audit.
 - `docs/man/`: pagine man di CLI e GUI, in italiano e inglese.
+- `docs/RILASCIO.md`: workflow di rilascio, secret e comandi.
 - `SECURITY.md`: come segnalare una vulnerabilità in privato. Le
   vulnerabilità non vanno aperte come issue pubbliche né aggiunte a questo
   documento prima della correzione.

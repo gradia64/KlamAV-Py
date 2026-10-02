@@ -1,0 +1,5 @@
+# Etichette di runner che actionlint non conosce ancora: ubuntu-26.04 è
+# l'immagine della CI (tests.yml, release.yml), disponibile su GitHub.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
