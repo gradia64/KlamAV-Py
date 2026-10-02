@@ -34,7 +34,7 @@ from klamav_py.clamd_client import (  # noqa: E402
     ClamdEndpoint,
     ScanResult,
     UnreadableRoot,
-    unreadable_root_problem,
+    root_problem,
 )
 from klamav_py.gui.scan_worker import ScanWorker  # noqa: E402
 from klamav_py.scan_totals import ScanTotals  # noqa: E402
@@ -140,13 +140,13 @@ def test_radice_illeggibile_durante_la_traversata_e_bloccante(tmp_path, chmod_re
 @non_root
 def test_sonda_della_radice(tmp_path, chmod_restore):
     root = _tree(tmp_path)
-    assert unreadable_root_problem(root) is None
+    assert root_problem(root) is None
     vuota = tmp_path / "vuota"
     vuota.mkdir()
-    assert unreadable_root_problem(vuota) is None
-    assert unreadable_root_problem(root / "c.txt") is None  # un file non si sonda
+    assert root_problem(vuota) is None
+    assert root_problem(root / "c.txt") is None  # un file regolare è una radice valida
     chmod_restore(root, 0o300)
-    assert "non è leggibile" in unreadable_root_problem(root)
+    assert "non è leggibile" in root_problem(root)
 
 
 # -- worker della GUI ------------------------------------------------------
@@ -325,7 +325,10 @@ def test_cli_sottocartella_illeggibile_uscita_0(tmp_path, chmod_restore, cli_env
     log = tmp_path / "errori.log"
     assert cli.main(["scan", str(root), "--quiet", "--log-errors", str(log)]) == 0
     out = capsys.readouterr()
-    assert f"CARTELLA NON LEGGIBILE: {root / 'chiusa'}" in out.err
+    # Il motivo è strerror, tradotto se un test precedente ha impostato
+    # la locale: si confronta con quello del sistema.
+    reason = os.strerror(errno.EACCES)
+    assert f"CARTELLA NON LEGGIBILE — {root / 'chiusa'}: {reason}" in out.err
     assert "2 file scansionati, 0 infetti, 0 errori." in out.out
     assert "1 cartelle non leggibili" in out.out and "--exclude" in out.out
     assert str(root / "chiusa") in log.read_text()

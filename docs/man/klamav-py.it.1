@@ -233,7 +233,11 @@ non verificati o sottocartelle non leggibili.
 Infezioni trovate, anche se la quarantena di qualche file non è riuscita.
 .TP
 .B 2
-Errore bloccante: percorso inesistente o non leggibile, directory di
+Errore bloccante: percorso da scansionare inesistente, collegamento
+simbolico rotto, né directory né file regolare (una FIFO, un dispositivo
+come
+.IR /dev/null ),
+o directory non leggibile, ciascuno con il suo messaggio; directory di
 quarantena non
 utilizzabile, clamd non raggiungibile o errore di protocollo, file di
 .B \-\-log\-errors

@@ -5,6 +5,18 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## Non rilasciato
+
+### Modificato
+- Un percorso da scansionare non valido ha un messaggio per ciascun caso:
+  inesistente, collegamento simbolico rotto (con la destinazione), né
+  directory né file regolare (`klamav-py scan /dev/null`, una FIFO), non
+  leggibile. Prima `/dev/null` diceva «non è leggibile: Not a directory»
+  e un collegamento rotto «percorso inesistente». Il codice di uscita
+  resta 2. La riga «CARTELLA NON LEGGIBILE» ha lo stesso formato nella
+  CLI e nella GUI.
+
+---
 ## 0.1.13 — 2026-09-30
 
 ### Modificato

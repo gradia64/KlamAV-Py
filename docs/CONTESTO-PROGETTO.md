@@ -268,13 +268,22 @@ nulla fa perdere tempo.
   minuto; notifica, voce in cronologia e file di log una volta sola finché
   una scansione non arriva alla fine (un log per tentativo faceva uscire
   dalla rotazione quelli delle scansioni vere).
-- **Radice non leggibile = bloccante.** Per ogni radice che è una
-  directory, con o senza `strict_roots`, una sonda esplicita
-  (`clamd_client.unreadable_root_problem`, `os.scandir` aperto e chiuso,
-  non `os.access`) prima della traversata e della connessione a clamd:
-  GUI → `aborted`, CLI → uscita 2. Un errore di `os.walk` sulla radice
-  (corsa con la sonda) è `UnreadableRoot`, stesso esito. Una directory
-  vuota ma leggibile resta una scansione pulita.
+- **Radice: una sola regola, sempre bloccante** (`clamd_client.root_problem`,
+  0.1.14). Quattro casi con un messaggio ciascuno: inesistente
+  (`lexists`, così un symlink rotto non passa per inesistente),
+  collegamento simbolico rotto con la destinazione, né directory né file
+  regolare (FIFO, `/dev/null`), directory non leggibile (`os.scandir`
+  aperto e chiuso, non `os.access`). Un file regolare, anche tramite
+  symlink, è una radice valida. La usano la sonda prima della traversata
+  e della connessione a clamd (la CLI su ogni radice, prima di
+  `resolve()`; il worker sulle radici che sono directory, con o senza
+  `strict_roots`) e l'`onerror` di `_iter_files` quando `os.walk` fallisce
+  sulla radice (corsa con la sonda, oppure radice che non è una directory):
+  `UnreadableRoot` con lo stesso testo. GUI → `aborted`, CLI → uscita 2.
+  Una directory vuota ma leggibile resta una scansione pulita. La riga
+  `CARTELLA NON LEGGIBILE` ha un solo formato
+  (`clamd_client.unreadable_dir_line`), uguale su stderr della CLI, nella
+  pagina Scansione e nel log della pianificazione interna.
 - **Sottocartelle non leggibili: contatore a parte, non errori.**
   `_iter_files` usa `onerror` e riporta la sola cartella più alta; ENOENT
   ed ENOTDIR (cartella sparita o sostituita durante la traversata) non si

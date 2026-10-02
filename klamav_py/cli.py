@@ -21,7 +21,8 @@ VALUTATO» a ogni scansione; se il contenuto cambia torna a essere
 segnalato.
 
 Codici di uscita: 0 = pulito, 1 = infezioni trovate, 2 = errore di
-esecuzione (clamd irraggiungibile, path inesistente o non leggibile, ecc.)
+esecuzione (clamd irraggiungibile, percorso inesistente, collegamento
+rotto, né directory né file regolare, non leggibile, ecc.)
 — utile per `OnFailure=` in systemd o per script di monitoraggio.
 
 Una sottocartella non leggibile non cambia il codice di uscita: una riga
@@ -55,7 +56,8 @@ from .clamd_client import (
     ClamdError,
     ClamdUnavailable,
     UnreadableRoot,
-    unreadable_root_problem,
+    root_problem,
+    unreadable_dir_line,
 )
 from .private_files import open_private_for_write
 from .quarantine import Quarantine, QuarantineError
@@ -329,8 +331,14 @@ def _prepare_exclusions(raws: list[Path], scan_root: Path) -> list[Path] | None:
 
 def cmd_scan(args: argparse.Namespace) -> int:
     scan_root_input = args.path.expanduser()
-    if not scan_root_input.exists():
-        print(f"Percorso inesistente: {args.path}", file=sys.stderr)
+    # Prima della traversata e della connessione a clamd, e prima di
+    # resolve(), che renderebbe un symlink rotto un percorso inesistente
+    # qualunque: os.walk non percorrerebbe una radice illeggibile, e
+    # l'uscita sarebbe 0 senza aver controllato nulla. Vedi
+    # clamd_client.root_problem.
+    problem = root_problem(scan_root_input)
+    if problem:
+        print(f"Percorso {problem}", file=sys.stderr)
         return 2
 
     # resolve() su TUTTI i percorsi coinvolti: il matching delle
@@ -342,13 +350,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
     # mostrati nei risultati (es. /home/utente invece di un symlink):
     # su sistemi tipici sono identici.
     scan_root = scan_root_input.resolve()
-    # Prima della traversata e della connessione a clamd: os.walk non
-    # percorrerebbe una radice illeggibile, e l'uscita sarebbe 0 senza aver
-    # controllato nulla.
-    problem = unreadable_root_problem(scan_root)
-    if problem:
-        print(f"Percorso {problem}", file=sys.stderr)
-        return 2
     exclude_dirs = _prepare_exclusions(args.exclude, scan_root)
     if exclude_dirs is None:
         return 2
@@ -438,7 +439,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         nonlocal unreadable_dirs
         unreadable_dirs += 1
         reason = exc.strerror or str(exc)
-        print(f"CARTELLA NON LEGGIBILE: {path} ({reason})", file=sys.stderr)
+        print(unreadable_dir_line(path, reason), file=sys.stderr)
         if log_fh:
             log_fh.write(f"{path}\tcartella non leggibile: {reason}\n")
 

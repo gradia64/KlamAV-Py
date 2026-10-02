@@ -23,7 +23,7 @@ from ..clamd_client import (
     ClamdError,
     ClamdUnavailable,
     UnreadableRoot,
-    unreadable_root_problem,
+    root_problem,
 )
 from ..quarantine import Quarantine
 from ..quarantine_location import root_inside
@@ -234,7 +234,7 @@ class ScanWorker(QThread):
         if not roots:
             return None
         for path in dirs:
-            problem = unreadable_root_problem(path)
+            problem = root_problem(path)
             if problem:
                 return f"La cartella da scansionare {problem}"
         if quarantine_root is not None:
@@ -447,9 +447,11 @@ class ScanWorker(QThread):
                     last_emit = now
 
         except UnreadableRoot as exc:
-            # La sonda in _blocking_problem era passata: permessi cambiati
-            # nel frattempo. Stesso esito della sonda.
-            message = f"Scansione non eseguita. La cartella da scansionare {exc}"
+            # La sonda in _blocking_problem era passata (permessi cambiati
+            # nel frattempo), oppure la radice non è una directory: un file
+            # non si sonda, e un FIFO o un dispositivo arrivano qui. Stessa
+            # regola e stesso testo della sonda (clamd_client.root_problem).
+            message = f"Scansione non eseguita. Il percorso da scansionare {exc}"
             self.error.emit(message)
             self.aborted.emit(message)
         except ClamdUnavailable as exc:

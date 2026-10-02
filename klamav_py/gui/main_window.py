@@ -68,7 +68,9 @@ from ..acknowledged import (
     RegistryError,
     delete_if_same,
 )
-from ..clamd_client import DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult
+from ..clamd_client import (
+    DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult, unreadable_dir_line,
+)
 from ..quarantine import Quarantine, peek_entries
 from ..quarantine_policy import REASON_MAIL_STORE
 from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
@@ -351,12 +353,6 @@ REPORTS_HINT = (
 def _acknowledged_line(path: str, signature: str) -> str:
     """Riga di log per una segnalazione già valutata (acknowledged.py)."""
     return f"GIÀ VALUTATO — {path} ({signature})"
-
-
-def _unreadable_dir_line(path: str, reason: str) -> str:
-    """Riga di log per una cartella non leggibile, uguale nella lista della
-    pagina Scansione e nel log delle scansioni programmate."""
-    return f"CARTELLA NON LEGGIBILE — {path}: {reason}"
 
 
 def _totals_summary(totals: ScanTotals) -> str:
@@ -1188,7 +1184,7 @@ class ScanPage(QWidget):
         # Fuori dal tetto MAX_RESULT_ROWS: se ne riporta solo la cartella
         # più alta (os.walk non scende in una cartella illeggibile), quindi
         # sono poche, e ognuna è copertura mancante.
-        item = QListWidgetItem(_unreadable_dir_line(path, reason))
+        item = QListWidgetItem(unreadable_dir_line(path, reason))
         item.setIcon(QIcon.fromTheme("dialog-warning"))
         self.results_list.addItem(item)
         self.results_list.scrollToBottom()
@@ -4052,7 +4048,7 @@ X-GNOME-Autostart-enabled=true
             self._bg_log_write(f"ERRORE — {message}")
 
     def _on_bg_unreadable_dir(self, path: str, reason: str) -> None:
-        self._bg_log_write(_unreadable_dir_line(path, reason))
+        self._bg_log_write(unreadable_dir_line(path, reason))
 
     def _on_bg_acknowledged(self, path: str, signature: str) -> None:
         self._bg_log_write(_acknowledged_line(path, signature))

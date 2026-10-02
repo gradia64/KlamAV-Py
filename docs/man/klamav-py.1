@@ -232,8 +232,11 @@ read or verified.
 Infections found, even if quarantining some of them failed.
 .TP
 .B 2
-Fatal error: nonexistent or unreadable path, unusable quarantine
-directory, clamd
+Fatal error: the path to scan does not exist, is a broken symbolic link,
+is neither a directory nor a regular file (a FIFO, a device such as
+.IR /dev/null ),
+or is a directory that cannot be read, each with its own message;
+unusable quarantine directory, clamd
 unreachable or protocol error,
 .B \-\-log\-errors
 file cannot be opened, invalid command line.

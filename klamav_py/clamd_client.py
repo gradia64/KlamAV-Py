@@ -224,37 +224,84 @@ class ClamdUnavailable(ClamdError):
 
 class UnreadableRoot(Exception):
     """
-    La radice di una scansione è una directory che non si può leggere
-    (cartella di un altro utente, 0300, 0700 altrui).
+    La radice di una scansione non si può percorrere: non esiste, è un
+    collegamento simbolico rotto, non è né una directory né un file
+    regolare, oppure è una directory che non si può leggere (cartella di un
+    altro utente, 0300, 0700 altrui). Il messaggio è quello di
+    root_problem, unica regola per la radice.
 
     os.walk ingoia gli errori di scandir: senza questo controllo la
     traversata non produceva nulla e la scansione finiva «completata, 0
     file, 0 errori», cioè pulita senza aver controllato nulla. Chi scansiona
-    la sonda prima (unreadable_root_problem) e la tratta come errore
-    bloccante; l'eccezione copre la corsa fra la sonda e la traversata.
+    sonda prima con root_problem e lo tratta come errore bloccante;
+    l'eccezione copre la corsa fra la sonda e la traversata.
     Non è un OSError di proposito: i chiamanti leggono OSError come
     «clamd non raggiungibile».
     """
 
-    def __init__(self, path: Path, exc: OSError) -> None:
-        super().__init__(f"«{path}» non è leggibile: {exc.strerror or exc}")
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
         self.path = path
 
 
-def unreadable_root_problem(path: Path) -> Optional[str]:
-    """Motivo per cui la radice `path`, se directory, non si può
-    percorrere, o None. Una sonda esplicita (scandir aperto e chiuso) e non
-    os.access: è la stessa operazione che fa os.walk, quindi vale anche con
-    ACL, LSM e filesystem di rete. Una directory vuota ma leggibile passa:
-    zero file lì è una scansione pulita legittima."""
-    if not path.is_dir():
-        return None
+def root_problem(path: Path, scandir_error: Optional[OSError] = None) -> Optional[str]:
+    """
+    Unica regola per la radice di una scansione, usata dalla sonda dei
+    chiamanti (prima della traversata e della connessione a clamd) e da
+    _iter_files quando os.walk fallisce sulla radice. Ritorna il motivo per
+    cui `path` non si può scansionare, con il percorso fra «», oppure None.
+
+    Quattro casi, tutti bloccanti:
+    - non esiste (os.path.lexists: un symlink rotto non passa per
+      inesistente);
+    - collegamento simbolico rotto, con la destinazione;
+    - né directory né file regolare (FIFO, socket, dispositivi come
+      /dev/null): prima uscivano come «non è leggibile: Not a directory»;
+    - directory non leggibile. Una sonda esplicita (scandir aperto e
+      chiuso) e non os.access: è la stessa operazione che fa os.walk, quindi
+      vale anche con ACL, LSM e filesystem di rete. `scandir_error` è
+      l'errore che os.walk ha già incontrato, e prende il posto della sonda.
+
+    Un file regolare, anche raggiunto tramite symlink, è una radice valida:
+    i suoi errori di lettura sono errori di scansione come per ogni altro
+    file. Una directory vuota ma leggibile passa: zero file lì è una
+    scansione pulita legittima.
+    """
+    path = Path(path)
+    if not os.path.lexists(path):
+        return f"«{path}» non esiste"
     try:
-        with os.scandir(path):
-            pass
+        st = os.stat(path)
+    except FileNotFoundError:
+        # lexists vero e stat no: il collegamento (o uno della catena)
+        # punta a qualcosa che non c'è.
+        try:
+            dest = os.readlink(path)
+        except OSError:
+            dest = "?"
+        return f"«{path}» è un collegamento simbolico rotto: «{dest}» non esiste"
     except OSError as exc:
-        return str(UnreadableRoot(path, exc))
+        return f"«{path}» non è leggibile: {exc.strerror or exc}"
+    if stat.S_ISREG(st.st_mode):
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return f"«{path}» non è una directory né un file regolare"
+    if scandir_error is None:
+        try:
+            with os.scandir(path):
+                pass
+        except OSError as exc:
+            scandir_error = exc
+    if scandir_error is not None:
+        return f"«{path}» non è leggibile: {scandir_error.strerror or scandir_error}"
     return None
+
+
+def unreadable_dir_line(path: "Path | str", reason: str) -> str:
+    """Riga per una sottocartella non leggibile, uguale su stderr della
+    CLI, nella lista della pagina Scansione e nel log delle scansioni
+    programmate della GUI."""
+    return f"CARTELLA NON LEGGIBILE — {path}: {reason}"
 
 
 # Una cartella sparita (ENOENT) o sostituita da un file (ENOTDIR) durante la
@@ -429,15 +476,18 @@ class ClamdClient:
         on_unreadable_dir(cartella, errore) le riporta; os.walk non ci
         scende, quindi si riporta solo la più alta. Le esclusioni sono
         sfoltite prima dello scandir e non arrivano mai qui. Un errore
-        sulla radice stessa (corsa con la sonda di chi chiama) è
-        UnreadableRoot: bloccante, mai una scansione vuota.
+        sulla radice stessa (corsa con la sonda di chi chiama, oppure una
+        radice che non è una directory né un file regolare) è
+        UnreadableRoot con il motivo di root_problem: bloccante, mai una
+        scansione vuota.
         """
         exclude = [Path(e) for e in (exclude_dirs or [])]
 
         def onerror(exc: OSError) -> None:
             where = Path(exc.filename) if exc.filename is not None else path
             if where == path:
-                raise UnreadableRoot(path, exc) from exc
+                problem = root_problem(path, exc) or f"«{path}» non è leggibile: {exc.strerror or exc}"
+                raise UnreadableRoot(path, problem) from exc
             if exc.errno in _VANISHED_DIR_ERRNOS:
                 return
             if on_unreadable_dir is not None:
