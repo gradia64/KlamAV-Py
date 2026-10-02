@@ -62,6 +62,15 @@ sono in `docs/CHANGELOG-archive.md`.
   Cronologia dicevano «Completata senza problemi». Ora dicono «Scansione
   non completata» con il motivo, e la Cronologia registra «Manuale (non
   completata)».
+- Dalla finestra, un percorso da scansionare non valido ha lo stesso
+  messaggio della CLI per ogni caso (un collegamento rotto non è più
+  «non esiste»), e in una selezione multipla da Dolphin una destinazione
+  sparita o non valida ferma la scansione con il suo motivo, invece di
+  essere tolta in silenzio dall'elenco.
+- Real-Time: un file sparito fra la modifica e la scansione risultava
+  «Analizzato», con una voce in Cronologia per una scansione di zero
+  file. Ora la riga dice «Non analizzato» con il motivo, senza voce in
+  Cronologia.
 - La scansione programmata interna non riportava nel suo log i problemi
   che la scansione manuale mostra in lista, come un registro delle prese
   visione danneggiato. Ora finiscono nel log e la notifica finale ne

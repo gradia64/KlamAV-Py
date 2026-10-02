@@ -127,9 +127,11 @@ def test_selezione_multipla_in_scan_page(tmp_path):
         f.write_text("x")
         files.append(f)
     p = _ScanPage()
+    # Una destinazione sparita resta nella selezione: la segnala il worker
+    # (root_problem) e ferma la scansione, invece di sparire in silenzio.
     p.start_external_scan(files + [tmp_path / "sparito"])
-    assert p._external_targets == files
-    assert p.path_edit.text() == f"{files[0]} (+2 altri)"
+    assert p._external_targets == files + [tmp_path / "sparito"]
+    assert p.path_edit.text() == f"{files[0]} (+3 altri)"
     p._on_path_edited("modificato a mano")
     assert p._external_targets is None
 
@@ -156,6 +158,8 @@ def test_worker_scansiona_tutte_le_destinazioni(tmp_path):
             yield ScanResult(str(target), "OK")
             yield ScanResult(str(target) + "/x", "ERROR", "Permission denied")
 
+    for name in ("a", "b"):
+        (tmp_path / name).write_text("x")  # le destinazioni passano da root_problem
     w = ScanWorker(endpoint=ClamdEndpoint(), target=[tmp_path / "a", tmp_path / "b"], client_factory=Client)
     fine = []
     w.finished_scan.connect(lambda *a: fine.append(a))

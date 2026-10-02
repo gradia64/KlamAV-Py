@@ -910,7 +910,10 @@ class ScanPage(QWidget):
         esternamente (es. Dolphin): un percorso o una lista, la selezione
         multipla passata con %F. Una sola scansione per tutta la selezione."""
         targets = list(target) if isinstance(target, (list, tuple)) else [target]
-        targets = [Path(t) for t in targets if t and Path(t).exists()]
+        # Niente filtro sull'esistenza: una destinazione sparita o non
+        # valida la segnala il worker (root_problem) e ferma la scansione,
+        # invece di sparire in silenzio da una selezione multipla.
+        targets = [Path(t) for t in targets if t]
         if not targets:
             return
         if len(targets) == 1:
@@ -934,18 +937,20 @@ class ScanPage(QWidget):
             self.path_edit.setText(chosen)
 
     def _start_scan(self) -> None:
+        # La validità delle destinazioni la decide il worker, fuori dal
+        # thread della GUI, con la regola unica della radice
+        # (clamd_client.root_problem): un symlink rotto ha il suo messaggio,
+        # e una destinazione non valida ferma tutta la selezione.
         external = getattr(self, "_external_targets", None)
         if external:
-            targets = [t for t in external if t.exists()]
-            if not targets:
-                QMessageBox.warning(self, "Percorso non valido", "Nessuno dei file selezionati esiste più.")
-                return
-            target = targets
+            target = list(external)
         else:
-            target = Path(self.path_edit.text())
-            if not target.exists():
-                QMessageBox.warning(self, "Percorso non valido", f"{target} non esiste.")
+            text = self.path_edit.text().strip()
+            if not text:
+                # Path("") è la directory corrente: mai una scansione a caso.
+                QMessageBox.warning(self, "Percorso non valido", "Indica un file o una cartella da scansionare.")
                 return
+            target = Path(text)
 
         # Guard "una scansione alla volta": una scansione manuale non
         # parte se una programmata è già in corso (e viceversa la
@@ -2004,7 +2009,7 @@ class RealTimePage(QWidget):
             # tipo di messaggio per un antivirus.
             text = f"[{time_str}] {status}: {file_name}"
             item = QListWidgetItem(text)
-            if status.startswith("Non verificato"):
+            if status.startswith(("Non verificato", "Non analizzato")):
                 item.setIcon(QIcon.fromTheme("dialog-information"))
                 item.setForeground(QColor("gray"))
             else:
@@ -3554,6 +3559,8 @@ class MainWindow(QMainWindow):
         self._realtime_watch_truncated = False
         self.realtime_worker = None
         self._current_realtime_target = ""
+        # Motivo per cui il file in corso non è stato analizzato (aborted).
+        self._realtime_aborted: str | None = None
         self._load_realtime()
 
         # Riconciliazione periodica (punto 4 dell'analisi): se una
@@ -4617,7 +4624,13 @@ X-GNOME-Autostart-enabled=true
             quarantine_dir=Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))),
             auto_quarantine=True
         )
+        self._realtime_aborted = None
         self.realtime_worker.result_ready.connect(self._on_realtime_result)
+        # File sparito fra accodamento ed esecuzione (o clamd, esclusioni):
+        # prima la scansione risultava eseguita su zero file e la riga
+        # restava «Analizzato».
+        self.realtime_worker.aborted.connect(self._on_realtime_aborted)
+        self.realtime_worker.error.connect(self._on_realtime_error)
         self.realtime_worker.finished_scan.connect(self._on_realtime_finished)
         self.realtime_worker.acknowledged.connect(self._on_realtime_acknowledged)
         self.realtime_worker.report_only_found.connect(self.reports_page.add_report)
@@ -4674,13 +4687,37 @@ X-GNOME-Autostart-enabled=true
         else:
             self.realtime_page.add_outcome_entry(f"quarantena FALLITA — {detail}", warning=True)
 
+    def _on_realtime_aborted(self, message: str) -> None:
+        # Prima di error (stesso testo) e di finished_scan.
+        self._realtime_aborted = message
+        reason = message.removeprefix("Scansione non eseguita. ")
+        self.realtime_page.add_log_entry(
+            f"{Path(self._current_realtime_target).name} — {reason}", False,
+            status="Non analizzato",
+        )
+
+    def _on_realtime_error(self, message: str) -> None:
+        # Il motivo di aborted è già nella riga «Non analizzato»; la
+        # quarantena fallita ha già la sua riga d'esito. Restano i problemi
+        # che la scansione manuale mostra in lista (registro delle prese
+        # visione).
+        if message == getattr(self, "_realtime_aborted", None):
+            return
+        if message.startswith("Quarantena fallita"):
+            return
+        self.realtime_page.add_outcome_entry(message, warning=True)
+
     def _on_realtime_acknowledged(self, path: str, signature: str) -> None:
         # Nessuna notifica: l'utente l'ha già valutato.
         self.realtime_page.add_log_entry(Path(path).name, False, status="Già valutato")
 
     def _on_realtime_finished(self, totals: ScanTotals) -> None:
-        self.history_manager.add_entry("Real-Time", self._current_realtime_target, totals)
-        self.history_page.refresh()
+        # Un file non analizzato (sparito prima della scansione) non è una
+        # scansione: nessuna voce in Cronologia.
+        if getattr(self, "_realtime_aborted", None) is None:
+            self.history_manager.add_entry("Real-Time", self._current_realtime_target, totals)
+            self.history_page.refresh()
+        self._realtime_aborted = None
 
         # Rilascio differito, vedi _retire_qthread; qui il rilascio è
         # ancora più critico perché _process_realtime_queue() può creare

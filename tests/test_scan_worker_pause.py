@@ -101,7 +101,9 @@ def make_worker(files):
 
     worker = ScanWorker(
         endpoint=ClamdEndpoint.unix("/finto/clamd.ctl"),
-        target=Path("/finto/target"),
+        # Una directory che esiste: la radice passa da root_problem prima
+        # della traversata (finta, qui: i file li produce BarrierClient).
+        target=Path(__file__).resolve().parent,
         quarantine_dir=None,
         auto_quarantine=False,
         client_factory=factory,

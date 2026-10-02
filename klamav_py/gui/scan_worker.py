@@ -203,26 +203,38 @@ class ScanWorker(QThread):
         stat() su un mount di rete irraggiungibile bloccherebbero il
         thread della GUI.
 
-        Solo le radici che sono directory: un file viene scansionato
-        comunque (_iter_files non applica le esclusioni ai file), e un
-        file del Real-Time sparito nel frattempo non è un errore.
+        Esclusioni e quarantena solo per le radici che sono directory: un
+        file viene scansionato comunque (_iter_files non applica le
+        esclusioni ai file).
 
-        Una radice directory illeggibile ferma la scansione con o senza
-        strict_roots: os.walk non la percorrerebbe e la scansione finirebbe
-        pulita a zero file (vedi clamd_client.UnreadableRoot).
+        Ogni destinazione passa prima da root_problem, con o senza
+        strict_roots: inesistente (anche un file del Real-Time sparito fra
+        accodamento ed esecuzione), symlink rotto, né directory né file
+        regolare, directory illeggibile. os.walk non percorrerebbe una
+        radice del genere e la scansione finirebbe pulita a zero file (vedi
+        clamd_client.UnreadableRoot). strict_roots aggiunge solo il
+        controllo «percorso assoluto»: la cartella della pianificazione
+        interna è già una directory per la validazione al salvataggio.
         """
+        chosen = [Path(t).expanduser() for t in self.targets]
         if self.strict_roots:
-            for t in self.targets:
-                if not Path(t).expanduser().is_absolute():
+            for t, path in zip(self.targets, chosen):
+                if not path.is_absolute():
                     # Risolto sulla cwd, arbitraria per una GUI lanciata dal
                     # menu: meglio un errore che una cartella a caso.
                     return f"La cartella da scansionare «{t}» non è un percorso assoluto."
-        resolved = [Path(t).expanduser().resolve() for t in self.targets]
+        # Regola unica della radice (clamd_client.root_problem), come nella
+        # CLI: su ogni destinazione nella forma scelta dall'utente, prima di
+        # resolve() (che renderebbe un symlink rotto un percorso inesistente
+        # qualunque) e prima di scansionarne una. Una destinazione non
+        # valida in una selezione multipla ferma tutta la scansione: niente
+        # scansioni parziali presentate come complete.
+        for path in chosen:
+            problem = root_problem(path)
+            if problem:
+                return f"Il percorso da scansionare {problem}"
+        resolved = [path.resolve() for path in chosen]
         if self.strict_roots:
-            for original, path in zip(self.targets, resolved):
-                if not path.is_dir():
-                    what = "non è una directory" if path.exists() else "non esiste"
-                    return f"La cartella da scansionare «{original}» {what}."
             # Da qui la traversata usa la forma risolta (effetto voluto).
             self.targets = resolved
             self.target = resolved[0]
@@ -234,10 +246,6 @@ class ScanWorker(QThread):
             roots = {f"cartella da scansionare n. {i}": p for i, p in enumerate(dirs, 1)}
         if not roots:
             return None
-        for path in dirs:
-            problem = root_problem(path)
-            if problem:
-                return f"La cartella da scansionare {problem}"
         if quarantine_root is not None:
             problem = root_inside(quarantine_root, roots)
             if problem:

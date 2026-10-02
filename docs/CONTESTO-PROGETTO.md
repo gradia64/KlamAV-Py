@@ -301,15 +301,24 @@ nulla fa perdere tempo.
   regolare (FIFO, `/dev/null`), directory non leggibile (`os.scandir`
   aperto e chiuso, non `os.access`). Un file regolare, anche tramite
   symlink, è una radice valida. La usano la sonda prima della traversata
-  e della connessione a clamd (la CLI su ogni radice, prima di
-  `resolve()`; il worker sulle radici che sono directory, con o senza
-  `strict_roots`) e l'`onerror` di `_iter_files` quando `os.walk` fallisce
-  sulla radice (corsa con la sonda, oppure radice che non è una directory):
-  `UnreadableRoot` con lo stesso testo. GUI → `aborted`, CLI → uscita 2.
-  Una directory vuota ma leggibile resta una scansione pulita. La riga
-  `CARTELLA NON LEGGIBILE` ha un solo formato
+  e della connessione a clamd (CLI e worker su ogni destinazione, nella
+  forma scelta dall'utente e prima di `resolve()`; con `strict_roots` il
+  worker aggiunge solo il controllo «percorso assoluto») e l'`onerror` di
+  `_iter_files` quando `os.walk` fallisce sulla radice (corsa con la
+  sonda): `UnreadableRoot` con lo stesso testo. GUI → `aborted`, CLI →
+  uscita 2. Una directory vuota ma leggibile resta una scansione pulita.
+  La pagina Scansione non filtra più le destinazioni nel thread della
+  GUI: una destinazione non valida in una selezione multipla ferma tutta
+  la scansione prima di scansionare qualunque file (niente scansioni
+  parziali). La riga `CARTELLA NON LEGGIBILE` ha un solo formato
   (`clamd_client.unreadable_dir_line`), uguale su stderr della CLI, nella
   pagina Scansione e nel log della pianificazione interna.
+- **Real-Time, file sparito prima della scansione** (0.1.14): è
+  `aborted` come ogni radice non valida; la pagina Real-Time mostra «Non
+  analizzato» con il motivo e non si scrive una voce in Cronologia (non è
+  stata una scansione). Il Real-Time collega anche `error`, saltando il
+  motivo di `aborted` e la quarantena fallita, che hanno già la loro
+  riga.
 - **Sottocartelle con permessi negati: contatore a parte, non errori.**
   `_iter_files` usa `onerror` e riporta la sola cartella più alta; ENOENT
   ed ENOTDIR (cartella sparita o sostituita durante la traversata) non si

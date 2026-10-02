@@ -160,9 +160,13 @@ def test_file_nella_quarantena_non_e_un_errore(tmp_path):
     assert got["aborted"] == [] and len(Client.visti) == 1
 
 
-def test_file_sparito_non_e_un_errore(tmp_path):
+def test_file_sparito_non_analizzato(tmp_path):
+    # Prima un file del Real-Time sparito fra accodamento ed esecuzione
+    # «non era un errore» e la scansione risultava eseguita su zero file.
+    # Ora passa da root_problem come ogni radice: non analizzato, con il
+    # motivo (il Real-Time lo mostra senza voce in Cronologia).
     got = _run_capture(target=tmp_path / "sparito", quarantine_dir=tmp_path / "q")
-    assert got["aborted"] == []
+    assert Client.visti == [] and "non esiste" in got["aborted"][0]
 
 
 def test_esclusione_valida_non_ferma_la_scansione(tmp_path):
@@ -187,10 +191,20 @@ def test_strict_cartella_mancante(tmp_path):
     assert Client.visti == [] and "non esiste" in got["aborted"][0]
 
 
-def test_strict_cartella_file(tmp_path):
+def test_strict_file_regolare_scansionato(tmp_path):
+    # strict_roots controlla solo «percorso assoluto»: il resto è la regola
+    # unica della radice, per cui un file regolare è una radice valida (la
+    # pianificazione interna ne salva comunque solo cartelle).
     (tmp_path / "f").write_text("x")
     got = _run_capture(target=tmp_path / "f", strict_roots=True)
-    assert Client.visti == [] and "non è una directory" in got["aborted"][0]
+    assert got["aborted"] == [] and len(Client.visti) == 1
+
+
+def test_strict_fifo_messaggio_della_sonda(tmp_path):
+    import os
+    os.mkfifo(tmp_path / "coda")
+    got = _run_capture(target=tmp_path / "coda", strict_roots=True)
+    assert Client.visti == [] and "non è una directory né un file regolare" in got["aborted"][0]
 
 
 def test_strict_percorso_relativo(tmp_path, monkeypatch):

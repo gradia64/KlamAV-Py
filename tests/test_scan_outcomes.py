@@ -52,6 +52,10 @@ def page(app, tmp_path, monkeypatch):
     reports = []
     monkeypatch.setattr(QMessageBox, "exec", lambda self: reports.append(
         (self.windowTitle(), self.text())))
+    # Un avviso modale bloccherebbe il test: si registra come un referto.
+    for name in ("warning", "information"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(
+            lambda parent, title, text, *a, **k: reports.append((title, text))))
     history = mw.HistoryManager(tmp_path / "data" / "history.json")
     p = mw.ScanPage(mw.ClamdEndpoint(), Quarantine(tmp_path / "q"), history)
     p.show()
@@ -291,3 +295,111 @@ def test_programmata_guasto_di_io_non_e_senza_problemi(app, tmp_path, eio_tree, 
     assert args[2].errors == 1
     (log,) = (tmp_path / "logs").glob("scheduled-*.log")
     assert "cartella non letta" in log.read_text()
+
+
+# -- radice nella GUI: una sola regola (post-review 0.1.14) -------------------
+
+class _Recorder:
+    """Client che registra le destinazioni scansionate (nessun clamd)."""
+
+    seen: list = []
+
+    def __init__(self, **kw):
+        self.skipped = Counter()
+
+    def scan_stream(self, target, **kw):
+        _Recorder.seen.append(Path(target))
+        yield ScanResult(str(target), "OK")
+
+
+def test_manuale_symlink_rotto_messaggio_dedicato(page, tmp_path):
+    link = tmp_path / "rotto"
+    link.symlink_to(tmp_path / "sparito")
+    _scan(page, link)
+    # Il percorso scelto dall'utente, non quello risolto.
+    _assert_not_completed(page, f"«{link}» è un collegamento simbolico rotto")
+
+
+def test_programmata_symlink_rotto_messaggio_dedicato(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", tmp_path / "logs")
+    link = tmp_path / "rotto"
+    link.symlink_to(tmp_path / "sparito")
+
+    class SyncWorker(ScanWorker):
+        def start(self):
+            self.run()
+
+    monkeypatch.setattr(mw, "ScanWorker", SyncWorker)
+    fake, messages, entries = _window(tmp_path, link)
+    mw.MainWindow._run_scheduled_scan(fake)
+    assert f"«{link}» è un collegamento simbolico rotto" in messages[-1]
+    assert entries[0][0][0] == "Programmata (non completata)"
+
+
+def test_fifo_fermata_dalla_sonda_prima_della_traversata(tmp_path):
+    fifo = tmp_path / "coda"
+    os.mkfifo(fifo)
+    _Recorder.seen = []
+    w = ScanWorker(endpoint=mw.ClamdEndpoint(), target=fifo, client_factory=_Recorder)
+    aborted = []
+    w.aborted.connect(aborted.append)
+    w.run()
+    assert _Recorder.seen == []
+    assert aborted == [f"Scansione non eseguita. Il percorso da scansionare «{fifo}» "
+                       "non è una directory né un file regolare"]
+
+
+def test_selezione_multipla_con_destinazione_non_valida_nessun_file(tmp_path):
+    buono = tmp_path / "a.txt"
+    buono.write_text("x")
+    rotto = tmp_path / "rotto"
+    rotto.symlink_to(tmp_path / "sparito")
+    _Recorder.seen = []
+    w = ScanWorker(endpoint=mw.ClamdEndpoint(), target=[buono, rotto, tmp_path],
+                   client_factory=_Recorder)
+    aborted = []
+    w.aborted.connect(aborted.append)
+    w.run()
+    # Nessuna scansione parziale: nemmeno la prima destinazione, valida.
+    assert _Recorder.seen == []
+    assert len(aborted) == 1 and f"«{rotto}»" in aborted[0]
+
+
+def test_realtime_file_sparito_non_analizzato_senza_cronologia(app, tmp_path, monkeypatch):
+    from collections import deque
+
+    class SyncWorker(ScanWorker):
+        def __init__(self, **kw):
+            super().__init__(client_factory=_Recorder, **kw)
+
+        def start(self):
+            self.run()
+
+    monkeypatch.setattr(mw, "ScanWorker", SyncWorker)
+    entries = []
+    page = mw.RealTimePage()
+    sparito = tmp_path / "scaricato.part"
+    fake = SimpleNamespace(
+        realtime_worker=None, clamd_health=SimpleNamespace(is_down=False),
+        _realtime_queue=deque([str(sparito)]), _realtime_queued=set(),
+        _realtime_overflow_notified=False, _current_realtime_target="",
+        _realtime_aborted=None, realtime_page=page,
+        settings=_Settings({"quarantine_dir": str(tmp_path / "q")}),
+        _clamd_endpoint=lambda: mw.ClamdEndpoint(),
+        reports_page=SimpleNamespace(add_report=lambda r: None),
+        history_manager=SimpleNamespace(add_entry=lambda *a, **k: entries.append(a)),
+        history_page=SimpleNamespace(refresh=lambda: None),
+        tray_icon=SimpleNamespace(showMessage=lambda *a, **k: None),
+    )
+    for name in ("_process_realtime_queue", "_on_realtime_result", "_on_realtime_finished",
+                 "_on_realtime_acknowledged", "_on_realtime_quarantine_outcome",
+                 "_on_realtime_aborted", "_on_realtime_error"):
+        if hasattr(mw.MainWindow, name):
+            setattr(fake, name, functools.partial(getattr(mw.MainWindow, name), fake))
+    fake._on_quarantine_changed = lambda *a: None
+    _Recorder.seen = []
+    mw.MainWindow._process_realtime_queue(fake)
+
+    rows = [page.log_list.item(i).text() for i in range(page.log_list.count())]
+    assert any("Non analizzato: scaricato.part" in r and "non esiste" in r for r in rows), rows
+    assert entries == [] and _Recorder.seen == []
