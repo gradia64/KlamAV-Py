@@ -328,6 +328,12 @@ def is_io_fault(exc: OSError, *, directory: bool = False) -> bool:
     tipico. Un OSError senza errno (file diventato non regolare, vedi
     _open_regular) non è un guasto.
 
+    Sparite o sostituite: ENOENT ed ENOTDIR per file e cartelle. ELOOP ed
+    EISDIR solo per i file (directory=False): aprendo un file con
+    O_NOFOLLOW vogliono dire che al suo posto ora c'è un symlink o una
+    cartella. Per una cartella (directory=True) restano guasti: os.walk non
+    segue i symlink e non apre file, quindi lì non hanno quel significato.
+
     Vale per le letture locali, non per la comunicazione con clamd: un
     timeout o una sessione interrotta restano errori del singolo file.
     """

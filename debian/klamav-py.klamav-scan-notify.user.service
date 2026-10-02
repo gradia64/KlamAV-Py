@@ -9,7 +9,7 @@ Type=oneshot
 # manuale) non è un problema da segnalare.
 # "$$" diventa "$" per la shell: le variabili le espande sh, non systemd.
 ExecStart=/bin/sh -c 'case "$$MONITOR_SERVICE_RESULT:$$MONITOR_EXIT_STATUS" in \
-    exit-code:1) msg="La scansione programmata ha trovato file infetti." ;; \
+    exit-code:1) msg="La scansione programmata ha trovato file infetti. Controlla anche il riepilogo per eventuali altri problemi (file non letti)." ;; \
     exit-code:*) msg="La scansione programmata non è riuscita o non ha potuto leggere parte dei file." ;; \
     *) exit 0 ;; \
   esac; \

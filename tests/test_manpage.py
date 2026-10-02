@@ -74,8 +74,10 @@ _FONT_RE = re.compile(r"^\.(?:B|I|BI|BR|IB|IR|RB|RI|SM|SB)\s+\S")
 def described_options(lines: list[str]) -> dict[str, bool]:
     """
     Per ogni opzione che apre una voce (.TP, più eventuali .TQ della stessa
-    voce), se almeno una delle sue voci ha una descrizione: testo, o una
-    macro di carattere con testo, prima della voce o sezione successiva.
+    voce), se TUTTE le sue voci hanno una descrizione: testo, o una macro
+    di carattere con testo, prima della voce o sezione successiva. Una
+    voce vuota conta anche se l'opzione è descritta altrove (per esempio
+    --report-only fra le opzioni globali e fra quelle di scan).
     """
     described: dict[str, bool] = {}
     i, n = 0, len(lines)
@@ -98,7 +100,7 @@ def described_options(lines: list[str]) -> dict[str, bool]:
             m = _OPT_RE.match(tag)
             if m:
                 opt = m.group(1).replace("\\-", "-")
-                described[opt] = described.get(opt, False) or has_text
+                described[opt] = described.get(opt, True) and has_text
         i = j
     return described
 
@@ -233,6 +235,28 @@ def test_controllo_descrizioni_vede_i_buchi(tmp_path):
     assert _undescribed([it, en], opts) == {
         "x.it.1": ["--vuota"],
         "x.1": ["--prima", "--seconda", "--solo-macro", "--vuota"],
+    }
+    # Una voce vuota pesa anche se l'opzione ha un'altra voce descritta.
+    en.write_text(".SH OPTIONS\n.TP\n.B \\-\\-piena\nText.\n"
+                  ".TP\n.B \\-\\-piena\n.SH END\n", encoding="utf-8")
+    assert _undescribed([en], {"--piena"}) == {"x.1": ["--piena"]}
+
+
+def test_voce_globale_senza_testo_segnalata(tmp_path):
+    # Mutazione sulla pagina vera: si toglie il testo della voce globale di
+    # --report-only (e --quarantine-all, nella stessa voce .TQ). Le due
+    # opzioni restano descritte fra quelle di scan, ma la voce vuota va
+    # segnalata.
+    page = MAN_DIR / "klamav-py.1"
+    text = page.read_text(encoding="utf-8")
+    start = text.index(".BI \\-\\-report\\-only \" directory\"\n.TQ\n.B \\-\\-quarantine\\-all\n")
+    head = text.index("\n.TQ\n.B \\-\\-quarantine\\-all\n", start) + len("\n.TQ\n.B \\-\\-quarantine\\-all\n")
+    end = text.index("\n.SS", head) + 1
+    mutated = tmp_path / page.name
+    mutated.write_text(text[:head] + text[end:], encoding="utf-8")
+    assert _undescribed([page], cli_options()) == {}
+    assert _undescribed([mutated], cli_options()) == {
+        "klamav-py.1": ["--quarantine-all", "--report-only"],
     }
 
 

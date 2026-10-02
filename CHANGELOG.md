@@ -14,12 +14,13 @@ sono in `docs/CHANGELOG-archive.md`.
   sottocartella, faceva uscire la CLI con 0: sotto il timer di sistema,
   nessuna notifica. Ora, senza infezioni, l'uscita è 2 e la notifica
   scatta; con infezioni resta 1, e l'ultima riga del riepilogo segnala
-  comunque il guasto. Nella 0.1.13 un guasto su una sottocartella finiva
-  inoltre fra le «cartelle non leggibili», con il suggerimento di
-  escluderla: ora è una riga «ERRORE» con la cartella e il motivo. Fra le
-  cartelle non leggibili restano solo i permessi negati, che come i file
-  spariti non cambiano il codice di uscita. Un errore di lettura a metà
-  file non viene più riportato come «sessione clamd interrotta».
+  comunque il guasto, e la notifica invita a controllarlo. Nella 0.1.13 un
+  guasto su una sottocartella finiva inoltre fra le «cartelle non
+  leggibili», con il suggerimento di escluderla: ora è una riga «ERRORE»
+  con la cartella e il motivo. Fra le cartelle non leggibili restano solo
+  i permessi negati, che come i file spariti non cambiano il codice di
+  uscita. Un errore di lettura a metà file non viene più riportato come
+  «sessione clamd interrotta».
 - La scansione programmata di sistema scrive errori e cartelle non
   leggibili dell'ultima esecuzione anche in
   `~/.local/state/log/klamav-py/scan-errors.log`, oltre che nel journal.
@@ -86,7 +87,8 @@ sono in `docs/CHANGELOG-archive.md`.
   delle prese visione messo da parte, esiti delle scansioni della GUI,
   policy di `--acknowledge`, ambito della presa visione; le man page
   devono descrivere ogni opzione in entrambe le lingue, e i sottoprocessi
-  dei test usano una HOME temporanea. Totale: 935 test.
+  dei test usano una HOME temporanea; radice e Real-Time nella GUI, voci
+  delle man page senza testo. Totale: 942 test.
 
 ---
 ## 0.1.13 — 2026-09-30

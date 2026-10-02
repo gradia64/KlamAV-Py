@@ -195,5 +195,8 @@ def test_classificazione():
     for code in (errno.EACCES, errno.EPERM, errno.ENOENT, errno.ENOTDIR):
         assert not is_io_fault(e(code)) and not is_io_fault(e(code), directory=True)
     # File sostituito da un symlink o da una cartella: sparito, non guasto.
-    assert not is_io_fault(e(errno.ELOOP)) and not is_io_fault(e(errno.EISDIR))
+    # L'esenzione vale solo per i file: su una cartella restano guasti.
+    for code in (errno.ELOOP, errno.EISDIR):
+        assert not is_io_fault(e(code), directory=False)
+        assert is_io_fault(e(code), directory=True)
     assert not is_io_fault(OSError("non è un file regolare"))

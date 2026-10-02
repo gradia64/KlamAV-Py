@@ -340,8 +340,10 @@ nulla fa perdere tempo.
   traversata (ENOENT, ENOTDIR; per i file anche ELOOP ed EISDIR) sono
   stati attesi e permanenti o innocui: non cambiano il codice di uscita,
   altrimenti una cartella creata con sudo farebbe fallire ogni notte.
-  Ogni altro errno nella lettura locale di un file o di una sottocartella
-  è un guasto (`clamd_client.is_io_fault`, `ScanResult.io_fault`): parte
+  L'esenzione ELOOP/EISDIR vale **solo per i file** (`O_NOFOLLOW` su un
+  file sostituito da un symlink o da una cartella); su una cartella
+  restano guasti. Ogni altro errno nella lettura locale di un file o di
+  una sottocartella è un guasto (`clamd_client.is_io_fault`, `ScanResult.io_fault`): parte
   dell'albero non è stata controllata e la scansione non può valere come
   pulita. Solo le letture locali: gli errori di comunicazione con clamd
   su un singolo file (timeout, sessione interrotta) non lo sono, e
@@ -412,7 +414,14 @@ nulla fa perdere tempo.
   sessione dopo registrazione, revoca o ricarica). Dice dove sono le
   prese visione precedenti e che non sono cancellate. Il codice di uscita
   delle opzioni non cambia: l'operazione è riuscita sul registro nuovo,
-  come già per `--list-acknowledged`.
+  come già per `--list-acknowledged`. Eccezione apparente:
+  `--unacknowledge` con un registro corrotto esce con 2, perché sul
+  registro nuovo, vuoto, non c'è nessuna voce da revocare (è il rifiuto
+  normale, con l'avviso in più). Il registro corrotto si segnala al primo
+  accesso che lo trova, non a ogni scansione: la lettura è pigra (una
+  scansione lo apre solo al primo rilevamento «solo segnalazione»), e
+  dopo la messa da parte le scansioni successive trovano un registro
+  valido.
 - **Una sola policy per scan e `--acknowledge`** (`cli.build_policy`,
   0.1.14): cartelle predefinite più le `--report-only`, disattivata da
   `--quarantine-all`. Le due opzioni esistono anche fra le opzioni globali

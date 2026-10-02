@@ -129,7 +129,16 @@ La directory passata a `--quarantine` è sempre esclusa automaticamente dall'att
 - `--version` — stampa la versione ed esce (opzione globale, non del sottocomando scan).
 - `--no-persistent` / `--session-batch-size N` — controllo della sessione persistente (vedi sezione dedicata).
 
-Codici di uscita, in ordine di precedenza — utili per OnFailure= in systemd o per script di monitoraggio: 2 = errore di esecuzione (clamd irraggiungibile; percorso inesistente, collegamento rotto, né directory né file regolare, o non leggibile); 1 = infezioni trovate, anche con guasti di I/O; 2 = guasti di I/O senza infezioni (vedi sotto); 0 = altrimenti. Una sottocartella con permessi negati non cambia il codice: compare su stderr come `CARTELLA NON LEGGIBILE` e ha un contatore a parte nel riepilogo; se è attesa (cartelle create con sudo, bind mount di container) va esclusa con `--exclude`. Un altro errore di lettura, su un file o su una sottocartella (EIO di un disco che degrada, ESTALE o ETIMEDOUT di un mount NFS che non risponde), è un guasto: conta fra gli errori e, senza infezioni, la scansione esce con 2 perché parte dell'albero non è stata controllata; l'ultima riga del riepilogo lo dice anche con uscita 1. Permessi negati e file spariti durante la scansione non cambiano il codice. `--exclude` serve solo per un mount che si sa non disponibile in modo permanente.
+Codici di uscita di `scan` — utili per OnFailure= in systemd o per script di monitoraggio. Vale il primo caso che si applica, in quest'ordine:
+
+| Ordine | Uscita | Caso |
+| --- | --- | --- |
+| 1 | 2 | Errore bloccante, la scansione non parte o si interrompe: clamd irraggiungibile; percorso inesistente, collegamento rotto, né directory né file regolare, o non leggibile; quarantena o `--log-errors` non utilizzabili |
+| 2 | 1 | Almeno un'infezione trovata, anche con guasti di I/O |
+| 3 | 2 | Almeno un guasto di I/O senza infezioni (vedi sotto) |
+| 4 | 0 | Altrimenti |
+
+Permessi negati, file spariti durante la scansione, file troppo grandi ed errori di clamd su un singolo file non cambiano il codice. Una sottocartella con permessi negati non cambia il codice: compare su stderr come `CARTELLA NON LEGGIBILE` e ha un contatore a parte nel riepilogo; se è attesa (cartelle create con sudo, bind mount di container) va esclusa con `--exclude`. Un altro errore di lettura, su un file o su una sottocartella (EIO di un disco che degrada, ESTALE o ETIMEDOUT di un mount NFS che non risponde), è un guasto: conta fra gli errori e, senza infezioni, la scansione esce con 2 perché parte dell'albero non è stata controllata; l'ultima riga del riepilogo lo dice anche con uscita 1.
 
 ## Segnalazioni non spostate e presa visione
 
