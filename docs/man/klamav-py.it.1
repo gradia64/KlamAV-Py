@@ -261,6 +261,11 @@ Per
 .PP
 Per le opzioni delle prese visione: 0 se ogni valore è stato gestito, 2
 se almeno uno è stato rifiutato (quello non modifica il registro).
+Un registro non valido viene messo da parte con un avviso su standard
+error, che indica il file
+.I acknowledged.json.corrupt-*
+dove restano le prese visione precedenti; il codice di uscita non
+cambia.
 .PP
 Nella scansione programmata i codici 1 e 2 attivano la notifica desktop
 tramite
@@ -334,7 +339,9 @@ Registro delle prese visione (0600), scritto in modo atomico, con il lock
 .IR acknowledged.json.lock .
 Un registro non valido viene rinominato in
 .I acknowledged.json.corrupt-*
-e mai cancellato.
+e mai cancellato, con un avviso (su standard error, o nella pagina
+Segnalazioni della GUI): le prese visione precedenti restano in quel
+file, e le segnalazioni corrispondenti tornano nuove.
 Le voci che nessuna scansione ritrova da 90 giorni vengono tolte.
 .
 .SH SICUREZZA

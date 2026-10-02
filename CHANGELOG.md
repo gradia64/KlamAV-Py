@@ -31,6 +31,17 @@ sono in `docs/CHANGELOG-archive.md`.
   resta 2. La riga «CARTELLA NON LEGGIBILE» ha lo stesso formato nella
   CLI e nella GUI.
 
+
+### Corretto
+- **Prese visione sparite senza spiegazione.** Con un registro delle
+  prese visione danneggiato, `--acknowledge`, `--unacknowledge` e la
+  pagina Segnalazioni lo mettevano da parte senza dire nulla:
+  `--acknowledge` rispondeva «Presa visione registrata» e le vecchie
+  segnalazioni tornavano nuove. Ora compare un avviso, su stderr o nella
+  pagina, con il file `acknowledged.json.corrupt-*` in cui le prese
+  visione precedenti restano, non cancellate. Il codice di uscita non
+  cambia.
+
 ---
 ## 0.1.13 — 2026-09-30
 

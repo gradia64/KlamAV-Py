@@ -75,6 +75,19 @@ class RegistryError(RuntimeError):
     pass
 
 
+def recovery_notice(backup: Path, reason: str) -> str:
+    """Avviso per un registro messo da parte (AckRegistry.last_recovery),
+    con lo stesso testo nella CLI, nelle scansioni e nella pagina
+    Segnalazioni. Senza, chi registrava o revocava una presa visione con
+    un registro corrotto vedeva solo le vecchie segnalazioni tornare
+    nuove, e pensava che le prese visione fossero state cancellate."""
+    return (
+        f"registro delle prese visione non valido ({reason}), messo da parte in {backup}. "
+        "Le prese visione precedenti sono in quel file, non sono state cancellate; "
+        "il registro riparte vuoto, quindi quelle segnalazioni tornano nuove."
+    )
+
+
 class _CorruptRegistry(Exception):
     pass
 
@@ -402,10 +415,7 @@ class ScanAcknowledgements:
                 self.problems.append(f"registro delle prese visione non leggibile: {exc}")
                 self._snapshot = AckSnapshot({})
             if self.registry.last_recovery is not None:
-                backup, reason = self.registry.last_recovery
-                self.problems.append(
-                    f"registro delle prese visione non valido ({reason}), messo da parte in {backup}"
-                )
+                self.problems.append(recovery_notice(*self.registry.last_recovery))
         return self._snapshot.check(identity, signature)
 
     def finish(self) -> None:

@@ -51,6 +51,7 @@ from .acknowledged import (
     RegistryError,
     ScanAcknowledgements,
     hash_file,
+    recovery_notice,
 )
 from .clamd_client import (
     DEFAULT_MAX_STREAM_SIZE,
@@ -655,10 +656,6 @@ def _list_acknowledged(registry: AckRegistry) -> bool:
     except OSError as exc:
         print(f"Registro delle prese visione non leggibile: {exc}", file=sys.stderr)
         return False
-    if registry.last_recovery is not None:
-        backup, reason = registry.last_recovery
-        print(f"ATTENZIONE: registro non valido ({reason}), messo da parte in {backup}",
-              file=sys.stderr)
     if not entries:
         print("Nessuna presa visione registrata.")
         return True
@@ -674,7 +671,13 @@ def _list_acknowledged(registry: AckRegistry) -> bool:
 def cmd_acknowledgements(args: argparse.Namespace) -> int:
     """--acknowledge, --unacknowledge e --list-acknowledged, in quest'ordine.
     Uscita 0 se tutto è andato, 2 se almeno un valore è stato rifiutato:
-    in quel caso quel valore non ha toccato il registro."""
+    in quel caso quel valore non ha toccato il registro.
+
+    Un registro non valido trovato da una qualunque delle tre operazioni è
+    messo da parte (.corrupt-*) con un avviso su stderr, una volta sola.
+    Non cambia il codice di uscita: l'operazione chiesta è riuscita sul
+    registro nuovo, come per --list-acknowledged e per le scansioni, che
+    escono per i rilevamenti e non per lo stato del registro."""
     registry = AckRegistry()
     ok = True
     if args.acknowledge:
@@ -686,6 +689,8 @@ def cmd_acknowledgements(args: argparse.Namespace) -> int:
         ok = _unacknowledge_one(value, registry) and ok
     if args.list_acknowledged:
         ok = _list_acknowledged(registry) and ok
+    if registry.last_recovery is not None:
+        print(f"ATTENZIONE: {recovery_notice(*registry.last_recovery)}", file=sys.stderr)
     return 0 if ok else 2
 
 

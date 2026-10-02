@@ -336,6 +336,14 @@ nulla fa perdere tempo.
   altrove. Hash solo sui file segnalati, riletti dopo il rilevamento con
   `O_NOFOLLOW`; un errore di lettura o un registro illeggibile valgono
   come segnalazione nuova.
+- **Registro messo da parte: sempre un avviso** (0.1.14), con lo stesso
+  testo (`acknowledged.recovery_notice`) nelle scansioni, in
+  `--acknowledge`/`--unacknowledge`/`--list-acknowledged` (una volta, su
+  stderr, alla fine) e nella pagina Segnalazioni (label persistente per la
+  sessione dopo registrazione, revoca o ricarica). Dice dove sono le
+  prese visione precedenti e che non sono cancellate. Il codice di uscita
+  delle opzioni non cambia: l'operazione è riuscita sul registro nuovo,
+  come già per `--list-acknowledged`.
 - **`--acknowledge` riscansiona** il file via clamd e registra solo un
   infetto «solo segnalazione» con contenuto stabile durante la verifica:
   non si fida di un percorso fornito a mano. La GUI registra invece il

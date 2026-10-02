@@ -67,6 +67,7 @@ from ..acknowledged import (
     PendingReport,
     RegistryError,
     delete_if_same,
+    recovery_notice,
 )
 from ..clamd_client import (
     DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult, unreadable_dir_line,
@@ -1526,6 +1527,16 @@ class ReportsPage(QWidget):
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
+        # Registro messo da parte da questa pagina (registrazione, revoca,
+        # ricarica): resta visibile, perché le segnalazioni che tornano
+        # nuove sono la conseguenza e senza spiegazione sembrano un errore.
+        self.recovery_label = QLabel("")
+        self.recovery_label.setWordWrap(True)
+        self.recovery_label.setStyleSheet("font-size: 12px; color: #d32f2f;")
+        self.recovery_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.recovery_label.setVisible(False)
+        layout.addWidget(self.recovery_label)
+
         self.pending_table = QTableWidget(0, 3)
         self.pending_table.setHorizontalHeaderLabels(["File", "Firma", "Rilevato"])
         self.pending_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -1675,12 +1686,22 @@ class ReportsPage(QWidget):
 
     # -- prese visione -----------------------------------------------------
 
+    def _show_recovery(self) -> None:
+        """Avviso del registro messo da parte, con il testo della CLI."""
+        if self.registry.last_recovery is None:
+            return
+        notice = recovery_notice(*self.registry.last_recovery)
+        self.recovery_label.setText(notice[0].upper() + notice[1:])
+        self.recovery_label.setVisible(True)
+
     def refresh_acknowledged(self) -> None:
+        # Registrazione e revoca finiscono qui: un unico punto per l'avviso.
         try:
             entries = self.registry.entries()
         except OSError as exc:
             entries = []
             QMessageBox.warning(self, "Prese visione", f"Registro non leggibile: {exc}")
+        self._show_recovery()
         self._ack_entries = entries
         self.ack_table.setRowCount(len(entries))
         for row, e in enumerate(entries):

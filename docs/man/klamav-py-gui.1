@@ -50,6 +50,10 @@ After checking one, it can be deleted, only if the path is still the same
 regular file that was detected, or acknowledged: later scans, including
 the scheduled system scan, no longer count its content as infected.
 The same page lists the acknowledgements and revokes them.
+If the register turns out to be invalid when recording, revoking or
+reloading, the page says so and names the
+.I acknowledged.json.corrupt-*
+file where the previous acknowledgements remain, not deleted.
 After deleting a message from a mail archive managed by Akonadi (KMail),
 .B akonadictl fsck
 may be needed.

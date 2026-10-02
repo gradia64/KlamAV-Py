@@ -53,6 +53,10 @@ ancora lo stesso file regolare rilevato, oppure registrarne la presa
 visione: le scansioni successive, anche quella programmata di sistema,
 non ne contano più il contenuto fra gli infetti.
 La stessa pagina elenca le prese visione e le revoca.
+Se nel registrare, revocare o ricaricare il registro risulta non valido,
+la pagina lo dice e indica il file
+.I acknowledged.json.corrupt-*
+dove restano le prese visione precedenti, non cancellate.
 Dopo aver eliminato un messaggio di un archivio di posta gestito da
 Akonadi (KMail) può servire
 .BR "akonadictl fsck" .

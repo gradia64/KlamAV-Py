@@ -258,6 +258,11 @@ For
 .PP
 For the acknowledgement options: 0 if every value was handled, 2 if at
 least one was refused (that one leaves the register unchanged).
+An invalid register is set aside with a warning on standard error naming
+the
+.I acknowledged.json.corrupt-*
+file where the previous acknowledgements remain; the exit status does not
+change.
 .PP
 In the scheduled scan, codes 1 and 2 trigger the desktop notification
 through
@@ -332,7 +337,9 @@ lock file
 .IR acknowledged.json.lock .
 An invalid register is renamed to
 .I acknowledged.json.corrupt-*
-and never deleted.
+and never deleted, with a warning (on standard error, or in the Reports
+page of the GUI): the previous acknowledgements remain in that file, and
+the matching detections are reported as new again.
 Entries not found by any scan for 90 days are removed.
 .
 .SH SECURITY
