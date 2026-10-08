@@ -738,7 +738,12 @@ oracolo); scansione di home altrui; esecuzione come root.
   HOME=...)`), come `tests/test_settings_permissions.py`: il monkeypatch
   di `conftest.py` (registro delle prese visione) non attraversa i
   sottoprocessi, che userebbero i dati reali di chi lancia la suite.
-  `tests/test_subprocess_home.py` lo verifica staticamente.
+  `tests/test_subprocess_home.py` lo verifica staticamente per ogni lancio
+  della CLI: `sys.executable`, il console script `klamav-py` o
+  `klamav-py-gui` (letterale o da `shutil.which`), `python -m klamav_py`,
+  anche tramite una variabile locale o una funzione di comodo dello stesso
+  file (0.1.15; prima solo `sys.executable`). Un argv costruito in un
+  altro modulo non si vede.
 - **Man page**: `tests/test_manpage.py` confronta i nomi delle opzioni con
   il parser e fra le lingue, e dalla 0.1.14 verifica che ogni opzione
   abbia una descrizione (testo dopo la voce `.TP`/`.TQ`) in ogni lingua.
