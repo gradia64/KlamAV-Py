@@ -51,6 +51,15 @@ sono in `docs/CHANGELOG-archive.md`.
   chiusura. Ora è nella colonna «Motivo» della Cronologia, anche per una
   programmata rinviata. Le voci già salvate restano leggibili, senza
   motivo.
+- **La finestra non si blocca più sulla quarantena.** All'avvio e al cambio
+  di cartella nelle Impostazioni la GUI preparava la quarantena e
+  recuperava le operazioni interrotte nel thread della finestra, e la
+  pagina Quarantena rileggeva l'indice allo stesso modo: con la quarantena
+  su un mount di rete lento o su un disco che degrada, la finestra restava
+  bloccata. Ora lo fa in background, e la pagina Quarantena mostra il
+  caricamento e poi l'elenco. Un errore nel preparare la cartella, che
+  prima impediva l'avvio della GUI, compare nella pagina Quarantena. Il
+  recupero è lo stesso di prima.
 - Il pacchetto Arch non dipendeva da `hicolor-icon-theme`, pur
   installando l'icona in quel tema (errore di namcap).
 

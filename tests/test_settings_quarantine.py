@@ -220,19 +220,21 @@ def test_vecchia_quarantena_non_vuota_chiede_conferma(env):
 # -- quarantena attiva nella GUI -----------------------------------------
 
 def test_cambio_directory_applicato_a_scansione_manuale_e_pagina(env, tmp_path):
+    # Dalla 0.1.15 la nuova Quarantine si crea nel worker della pagina
+    # Quarantena (test_quarantine_loader): qui si verifica che entrambe le
+    # pagine passino alla nuova directory.
     env.dialogs()
-    vecchia = mw.Quarantine(tmp_path / "vecchia")
-    refreshed = []
+    scan_page = mw.ScanPage(mw.ClamdEndpoint(), tmp_path / "vecchia", mw.HistoryManager(tmp_path / "h.json"))
+    loaded = []
     fake = SimpleNamespace(
         settings=QSettings(mw.APP_NAME, mw.APP_NAME),
-        scan_page=SimpleNamespace(quarantine=vecchia),
-        quarantine_page=SimpleNamespace(quarantine=vecchia, refresh=lambda: refreshed.append(1)),
+        scan_page=scan_page,
+        quarantine_page=SimpleNamespace(load=loaded.append),
     )
     fake.settings.setValue("quarantine_dir", str(tmp_path / "nuova"))
     mw.MainWindow._apply_quarantine_dir(fake)
-    assert fake.scan_page.quarantine.dir == tmp_path / "nuova"
-    assert fake.quarantine_page.quarantine is fake.scan_page.quarantine
-    assert refreshed == [1]
+    assert scan_page.quarantine_dir == tmp_path / "nuova" and scan_page.quarantine is None
+    assert loaded == [tmp_path / "nuova"]
 
 
 def test_quarantena_che_contiene_la_cartella_pianificata_rifiutata(env):

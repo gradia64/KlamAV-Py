@@ -98,6 +98,7 @@ from .db_info_worker import DbInfoWorker, probe_db_info
 from .ping_worker import PingWorker
 from .single_instance import IPC_MAX_PAYLOAD_BYTES, IPC_SEPARATOR
 from .update_check_worker import UpdateCheckWorker, UpdateInfo
+from .quarantine_loader import QuarantineLoadWorker, QuarantineSnapshot
 
 # Fonte unica in quarantine_location: lo stesso percorso è nell'ExecStart
 # di klamav-scan.service, e la coerenza è verificata dai test.
@@ -895,10 +896,15 @@ class HistoryManager:
 
 
 class ScanPage(QWidget):
-    def __init__(self, endpoint: ClamdEndpoint, quarantine: Quarantine, history: HistoryManager, parent=None) -> None:
+    def __init__(self, endpoint: ClamdEndpoint, quarantine_dir: Path, history: HistoryManager, parent=None) -> None:
         super().__init__(parent)
         self.endpoint = endpoint
-        self.quarantine = quarantine
+        # La directory basta al worker, che crea la sua Quarantine. L'oggetto
+        # della GUI, per mettere in quarantena i file selezionati, arriva
+        # dalla pagina Quarantena quando il recupero è finito
+        # (set_quarantine): fino ad allora è None.
+        self.quarantine_dir = Path(quarantine_dir)
+        self.quarantine: Quarantine | None = None
         self.history = history
         self.worker: ScanWorker | None = None
         self._scanned = self._infections = self._errors = self._too_large = 0
@@ -1114,7 +1120,7 @@ class ScanPage(QWidget):
         self.worker = ScanWorker(
             endpoint=self.endpoint,
             target=target,
-            quarantine_dir=self.quarantine.dir,
+            quarantine_dir=self.quarantine_dir,
             auto_quarantine=self.auto_quarantine_checkbox.isChecked(),
         )
         self.worker.scanning.connect(self._on_scanning)
@@ -1326,10 +1332,26 @@ class ScanPage(QWidget):
         self.status_label.setText(f"Log copiato negli appunti ({len(lines)} righe).")
         QTimer.singleShot(2500, lambda: self.status_label.setText(old_text))
 
+    def set_quarantine(self, quarantine: Quarantine) -> None:
+        """Quarantine pronta dalla pagina Quarantena: vale solo se è
+        ancora quella della directory attuale."""
+        if quarantine.dir == self.quarantine_dir:
+            self.quarantine = quarantine
+
+    def set_quarantine_dir(self, quarantine_dir: Path) -> None:
+        self.quarantine_dir = Path(quarantine_dir)
+        self.quarantine = None
+
     def _quarantine_selected(self) -> None:
         selected = self.results_list.selectedItems()
         if not selected:
             QMessageBox.information(self, "Nessuna selezione", "Seleziona uno o più file infetti dalla lista.")
+            return
+        if self.quarantine is None:
+            QMessageBox.information(
+                self, "Quarantena in caricamento",
+                "La quarantena non è ancora pronta (vedi la pagina Quarantena): riprova tra poco.",
+            )
             return
 
         moved = 0
@@ -1503,9 +1525,24 @@ class ScanPage(QWidget):
 
 
 class QuarantinePage(QWidget):
-    def __init__(self, quarantine: Quarantine, parent=None) -> None:
+    """
+    Elenco della quarantena. Creazione dell'oggetto Quarantine (con il
+    recupero delle operazioni interrotte), lettura dell'indice e
+    diagnostica girano in QuarantineLoadWorker, mai nel thread della GUI:
+    la pagina mostra «caricamento» e poi l'esito. Ripristino ed
+    eliminazione restano azioni sincrone su richiesta dell'utente.
+    """
+
+    # La Quarantine pronta (recupero fatto) per la directory attuale: la
+    # pagina Scansione la usa per mettere in quarantena i file selezionati.
+    quarantine_ready = Signal(object)
+
+    def __init__(self, quarantine_dir: Path, parent=None) -> None:
         super().__init__(parent)
-        self.quarantine = quarantine
+        self.quarantine_dir = Path(quarantine_dir)
+        self.quarantine: Quarantine | None = None
+        self.worker: QuarantineLoadWorker | None = None
+        self._reload_pending = False
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["File originale", "Firma", "In quarantena dal"])
@@ -1520,19 +1557,19 @@ class QuarantinePage(QWidget):
         refresh_button.setIcon(QIcon.fromTheme("view-refresh"))
         refresh_button.clicked.connect(self.refresh)
 
-        restore_button = QPushButton("Ripristina")
-        restore_button.setIcon(QIcon.fromTheme("document-revert"))
-        restore_button.clicked.connect(self._restore_selected)
+        self.restore_button = QPushButton("Ripristina")
+        self.restore_button.setIcon(QIcon.fromTheme("document-revert"))
+        self.restore_button.clicked.connect(self._restore_selected)
 
-        delete_button = QPushButton("Elimina definitivamente")
-        delete_button.setIcon(QIcon.fromTheme("edit-delete"))
-        delete_button.clicked.connect(self._delete_selected)
+        self.delete_button = QPushButton("Elimina definitivamente")
+        self.delete_button.setIcon(QIcon.fromTheme("edit-delete"))
+        self.delete_button.clicked.connect(self._delete_selected)
 
         buttons_row = QHBoxLayout()
         buttons_row.setSpacing(10)
         buttons_row.addWidget(refresh_button)
-        buttons_row.addWidget(restore_button)
-        buttons_row.addWidget(delete_button)
+        buttons_row.addWidget(self.restore_button)
+        buttons_row.addWidget(self.delete_button)
         buttons_row.addStretch()
 
         layout = QVBoxLayout(self)
@@ -1543,6 +1580,13 @@ class QuarantinePage(QWidget):
         title.setStyleSheet("font-size: 22px; font-weight: bold;")
         layout.addWidget(title)
         layout.addSpacing(10)
+
+        # Caricamento in corso nel worker (recupero compreso).
+        self.loading_label = QLabel("")
+        self.loading_label.setWordWrap(True)
+        self.loading_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+        self.loading_label.setVisible(False)
+        layout.addWidget(self.loading_label)
 
         # Visibile solo dopo un recupero da indice corrotto o con file non
         # indicizzati nella cartella: vedi Quarantine.corrupt_backups() e
@@ -1561,12 +1605,69 @@ class QuarantinePage(QWidget):
 
         self.refresh()
 
-    def _update_health_label(self) -> None:
-        try:
-            backups = self.quarantine.corrupt_backups()
-            orphans = self.quarantine.orphans()
-        except OSError:
-            backups, orphans = [], []
+    def load(self, quarantine_dir: Path) -> None:
+        """Nuova directory (Impostazioni): l'oggetto si ricrea nel worker,
+        con il recupero, e intanto la pagina non ne ha uno."""
+        self.quarantine_dir = Path(quarantine_dir)
+        self.quarantine = None
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Rilegge la quarantena nel worker. Una richiesta durante un
+        caricamento si ripete alla sua fine, con lo stato di allora."""
+        if self.worker is not None:
+            self._reload_pending = True
+            return
+        self._reload_pending = False
+        self.loading_label.setText(f"Caricamento della quarantena in «{self.quarantine_dir}»…")
+        self.loading_label.setVisible(True)
+        self.restore_button.setEnabled(False)
+        self.delete_button.setEnabled(False)
+        self.worker = QuarantineLoadWorker(self.quarantine_dir, self.quarantine)
+        self.worker.loaded.connect(self._on_loaded)
+        self.worker.start()
+
+    def _on_loaded(self, directory: Path, result) -> None:
+        # Rilascio differito, vedi _retire_qthread: l'emit è dentro run().
+        worker, self.worker = self.worker, None
+        if worker is not None:
+            _retire_qthread(worker)
+        if self._reload_pending or directory != self.quarantine_dir:
+            self.refresh()  # superato da una richiesta o da un cambio di cartella
+            return
+        self.loading_label.setVisible(False)
+        self.restore_button.setEnabled(True)
+        self.delete_button.setEnabled(True)
+        if isinstance(result, Exception):
+            self.table.setRowCount(0)
+            self.health_label.setText(f"Impossibile preparare la quarantena «{directory}»: {result}")
+            self.health_label.setVisible(True)
+            return
+        fresh = self.quarantine is not result.quarantine
+        self.quarantine = result.quarantine
+        self._show(result)
+        if fresh:
+            self.quarantine_ready.emit(result.quarantine)
+
+    def _show(self, snapshot: QuarantineSnapshot) -> None:
+        # list_entries() recupera da solo un indice corrotto: un errore di
+        # I/O vero (disco, permessi) arriva come snapshot.error, mostrato
+        # invece di sollevato.
+        if snapshot.error is not None:
+            self.table.setRowCount(0)
+            self.health_label.setText(f"Impossibile leggere la quarantena: {snapshot.error}")
+            self.health_label.setVisible(True)
+            return
+        self._update_health_label(snapshot.backups, snapshot.orphans)
+        self.table.setRowCount(len(snapshot.entries))
+        for row, entry in enumerate(snapshot.entries):
+            when = datetime.fromtimestamp(entry.timestamp).strftime("%Y-%m-%d %H:%M")
+            self.table.setItem(row, 0, QTableWidgetItem(entry.original_path))
+            self.table.setItem(row, 1, QTableWidgetItem(entry.signature or ""))
+            self.table.setItem(row, 2, QTableWidgetItem(when))
+            self.table.item(row, 0).setData(Qt.UserRole, entry.quarantined_path)
+
+    def _update_health_label(self, backups: list[Path], orphans: list[Path]) -> None:
         parti = []
         if backups:
             nomi = ", ".join(p.name for p in backups[-3:])
@@ -1576,7 +1677,7 @@ class QuarantinePage(QWidget):
             )
         if orphans:
             parti.append(
-                (f"{len(orphans)} file nella cartella {self.quarantine.dir} "
+                (f"{len(orphans)} file nella cartella {self.quarantine_dir} "
                  + ("non compare" if len(orphans) == 1 else "non compaiono")
                  + " nell'elenco: resta isolato in sola lettura"
                  + (" e il percorso originale è registrato nell'indice messo da parte."
@@ -1585,39 +1686,20 @@ class QuarantinePage(QWidget):
         self.health_label.setText(" ".join(parti))
         self.health_label.setVisible(bool(parti))
 
-    def refresh(self) -> None:
-        # list_entries() recupera da solo un indice corrotto: questa slot
-        # non può più propagare JSONDecodeError e lasciare la pagina vuota
-        # con un traceback su stderr. Resta il caso di un errore di I/O
-        # vero (disco, permessi), mostrato invece di sollevato.
-        try:
-            entries = self.quarantine.list_entries()
-        except OSError as exc:
-            self.table.setRowCount(0)
-            self.health_label.setText(f"Impossibile leggere la quarantena: {exc}")
-            self.health_label.setVisible(True)
-            return
-        self._update_health_label()
-        self.table.setRowCount(len(entries))
-        for row, entry in enumerate(entries):
-            when = datetime.fromtimestamp(entry.timestamp).strftime("%Y-%m-%d %H:%M")
-            self.table.setItem(row, 0, QTableWidgetItem(entry.original_path))
-            self.table.setItem(row, 1, QTableWidgetItem(entry.signature or ""))
-            self.table.setItem(row, 2, QTableWidgetItem(when))
-            self.table.item(row, 0).setData(Qt.UserRole, entry.quarantined_path)
-
     def _selected_quarantined_path(self) -> str | None:
+        if self.quarantine is None or self.worker is not None:
+            return None  # in caricamento: l'elenco può essere superato
         row = self.table.currentRow()
         if row < 0:
             return None
         return self.table.item(row, 0).data(Qt.UserRole)
 
     def _restore_selected(self) -> None:
-        qpath = self._selected_quarantined_path()
+        qpath, quarantine = self._selected_quarantined_path(), self.quarantine
         if qpath is None:
             return
         try:
-            target = self.quarantine.restore(qpath)
+            target = quarantine.restore(qpath)
         except Exception as exc:
             QMessageBox.warning(self, "Ripristino fallito", str(exc))
             return
@@ -1625,7 +1707,9 @@ class QuarantinePage(QWidget):
         self.refresh()
 
     def _delete_selected(self) -> None:
-        qpath = self._selected_quarantined_path()
+        # L'oggetto della voce selezionata: durante la conferma la pagina
+        # può passare a un'altra cartella (Impostazioni).
+        qpath, quarantine = self._selected_quarantined_path(), self.quarantine
         if qpath is None:
             return
         confirm = QMessageBox.question(
@@ -1634,7 +1718,7 @@ class QuarantinePage(QWidget):
         if confirm != QMessageBox.Yes:
             return
         try:
-            self.quarantine.delete(qpath)
+            quarantine.delete(qpath)
         except Exception as exc:
             QMessageBox.warning(self, "Eliminazione fallita", str(exc))
             return
@@ -3576,8 +3660,10 @@ class MainWindow(QMainWindow):
         # assenti dalle Impostazioni, come prima --socket.
         self._default_endpoint = endpoint or ClamdEndpoint()
         self._endpoint_problem_noted = False
+        # Solo il percorso: Quarantine (directory, indice, recupero delle
+        # operazioni interrotte) si crea nel worker della pagina Quarantena,
+        # non nel thread della GUI.
         saved_quar_dir = Path(self.settings.value("quarantine_dir", str(quarantine_dir)))
-        quarantine = Quarantine(saved_quar_dir)
 
         self.history_manager = HistoryManager()
 
@@ -3612,9 +3698,10 @@ class MainWindow(QMainWindow):
         self.content_stack = QStackedWidget()
         self.content_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        self.scan_page = ScanPage(self._clamd_endpoint(), quarantine, self.history_manager)
+        self.scan_page = ScanPage(self._clamd_endpoint(), saved_quar_dir, self.history_manager)
         self.history_page = HistoryPage(self.history_manager)
-        self.quarantine_page = QuarantinePage(quarantine)
+        self.quarantine_page = QuarantinePage(saved_quar_dir)
+        self.quarantine_page.quarantine_ready.connect(self.scan_page.set_quarantine)
         self.reports_page = ReportsPage()
         self.update_page = UpdatePage(self._clamd_endpoint)
         self.realtime_page = RealTimePage()
@@ -3862,6 +3949,7 @@ class MainWindow(QMainWindow):
             self.settings_page._update_check_worker,
             getattr(self, "_ping_worker", None),
             getattr(self, "_db_info_worker", None),
+            self.quarantine_page.worker,
             *list(_in_ritiro),
         ):
             if w is not None:
@@ -4024,19 +4112,20 @@ class MainWindow(QMainWindow):
 
     def _apply_quarantine_dir(self) -> None:
         """
-        Scansione manuale e pagina Quarantena usano un oggetto Quarantine
-        creato all'avvio, mentre programmata e Real-Time rileggono la
+        Scansione manuale e pagina Quarantena usano la directory letta
+        all'avvio (e l'oggetto Quarantine caricato per lei dalla pagina
+        Quarantena), mentre programmata e Real-Time rileggono la
         directory dalle Impostazioni a ogni esecuzione: senza questo, dopo un
         cambio di cartella le prime due restavano sulla vecchia fino al
         riavvio, e le quarantene divergevano dentro la GUI stessa.
         """
         new_dir = Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR)))
-        if new_dir == self.scan_page.quarantine.dir:
+        if new_dir == self.scan_page.quarantine_dir:
             return
-        quarantine = Quarantine(new_dir)
-        self.scan_page.quarantine = quarantine
-        self.quarantine_page.quarantine = quarantine
-        self.quarantine_page.refresh()
+        # Il recupero della nuova cartella gira nel worker della pagina
+        # Quarantena, che poi passa l'oggetto alla pagina Scansione.
+        self.scan_page.set_quarantine_dir(new_dir)
+        self.quarantine_page.load(new_dir)
 
     def _manage_autostart(self, enabled: bool) -> tuple[bool, str | None]:
         """

@@ -31,7 +31,6 @@ import klamav_py.gui.main_window as mw  # noqa: E402
 from klamav_py.acknowledged import AckRegistry  # noqa: E402
 from klamav_py.clamd_client import ScanResult  # noqa: E402
 from klamav_py.gui.scan_worker import ScanWorker  # noqa: E402
-from klamav_py.quarantine import Quarantine  # noqa: E402
 from klamav_py.quarantine_policy import QuarantinePolicy  # noqa: E402
 
 PHISHING = "Heuristics.Phishing.Email.SpoofedDomain"
@@ -57,7 +56,7 @@ def page(app, tmp_path, monkeypatch):
         monkeypatch.setattr(QMessageBox, name, staticmethod(
             lambda parent, title, text, *a, **k: reports.append((title, text))))
     history = mw.HistoryManager(tmp_path / "data" / "history.json")
-    p = mw.ScanPage(mw.ClamdEndpoint(), Quarantine(tmp_path / "q"), history)
+    p = mw.ScanPage(mw.ClamdEndpoint(), tmp_path / "q", history)
     p.show()
     p.reports = reports
     yield p

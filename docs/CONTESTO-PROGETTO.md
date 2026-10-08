@@ -46,6 +46,7 @@ Moduli principali, tutti in `klamav_py/`:
 | `private_files.py` | Creazione di file e directory privati (0600/0700) |
 | `gui/` | Finestra principale, worker QThread, IPC single-instance |
 | `gui/off_thread.py` | Controlli brevi (filesystem, `systemctl --user`) fuori dal thread della GUI |
+| `gui/quarantine_loader.py` | Preparazione, recupero e lettura della quarantena in un QThread |
 
 I moduli fuori da `gui/` non importano Qt: la CLI deve funzionare senza
 PySide6.
@@ -609,6 +610,20 @@ rilascio.
   un file di servizio. Se `staging` esiste ma non è il file verificato
   (salvataggio con temporaneo+rename durante la copia), la voce si
   aggiunge comunque e `staging` resta per il recupero manuale.
+- **Recupero fuori dal thread della GUI** (0.1.15). La GUI non costruisce
+  più `Quarantine` nel thread principale: all'avvio e in
+  `_apply_quarantine_dir` passa solo la directory, e
+  `gui/quarantine_loader.QuarantineLoadWorker` crea l'oggetto (directory,
+  indice, recupero), poi legge elenco, indici messi da parte e orfani; la
+  pagina mostra il caricamento e poi l'istantanea, e passa l'oggetto alla
+  pagina Scansione (`quarantine_ready`), che fino ad allora rifiuta
+  «Metti in quarantena» con un messaggio. Anche «Aggiorna» passa dal
+  worker, perché `list_entries()` può mettere da parte un indice
+  corrotto. QThread e non `run_off_gui_thread`: il recupero scrive, quindi
+  alla chiusura `_shutdown_workers` lo aspetta. Le funzioni di
+  `quarantine.py` sono le stesse: cambia solo il thread. Un errore del
+  costruttore, che prima impediva l'avvio della GUI, è un messaggio nella
+  pagina. `tests/test_quarantine_loader.py` strumenta `os` e `open`.
 - **Contare non è recuperare.** Chi deve solo guardare l'indice (le
   Impostazioni che contano le voci della quarantena che si lascia) usa
   `peek_entries()`: niente lock, niente recupero, niente creazione della
@@ -643,12 +658,12 @@ una riproduzione o una correzione migliore.
 
 Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.14:
 
-- **Recupero della quarantena nel thread della GUI.** Il costruttore di
-  `Quarantine` esegue il recupero, e si chiama nel thread della GUI
-  all'avvio e in `_apply_quarantine_dir`. La 0.1.13 ha tolto solo il caso
-  del conteggio (`peek_entries`); spostare fuori thread gli altri due era
-  previsto per la 0.1.14, ma non è entrato nella sua roadmap: resta da
-  pianificare.
+- **Quarantena nel thread della GUI, residui** (dopo la 0.1.15). Il
+  recupero e le letture della pagina Quarantena sono nel worker; restano
+  nel thread della GUI le azioni su richiesta: ripristino ed eliminazione
+  dalla pagina Quarantena, «Metti in quarantena» dei file selezionati
+  nella pagina Scansione, e `_quarantine_count` (`peek_entries`) al
+  salvataggio delle Impostazioni quando cambia la cartella.
 - **Finestra fra `open_private_fd(O_EXCL)` e `flock` in `_write_intent`:**
   un recupero concorrente può eliminare l'intento di un'operazione viva
   (esito: orfano visibile, come prima della 0.1.12). Correzione possibile:
