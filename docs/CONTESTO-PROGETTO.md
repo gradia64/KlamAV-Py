@@ -528,6 +528,16 @@ nulla fa perdere tempo.
   `debian/changelog` e `CHANGELOG.md`, verificata dai test. Una correzione al
   codice richiede un nuovo tag, quindi una nuova versione, non un pkgrel.
 - `debian/klamav-py/` è un artefatto di build in `.gitignore`.
+- **PySide6 6.12.0 esclusa con Python < 3.12** (0.1.15), in
+  `requirements.txt` e nell'extra `gui`: ogni emissione di un segnale
+  toglie un riferimento a `True`, e prima della 3.12 (bool non immortali)
+  l'interprete abortisce dopo poche centinaia di segnali. Trovata dalla CI
+  della 0.1.15 (`test_qthread_retire` su 3.10 e 3.11, il primo run con la
+  6.12.0); riprodotta con uno script di dieci righe, senza codice del
+  progetto. `tests/test_pyside_refcount.py` misura la perdita
+  direttamente: se una 6.12.x successiva ha ancora il difetto fallisce con
+  il motivo, e l'esclusione va estesa. I pacchetti Debian e Arch usano il
+  PySide6 della distribuzione, con Python ≥ 3.13.
 - **Il `.deb` si costruisce su Debian sid** (`dpkg-buildpackage -us -uc -b`
   dal tag firmato), come dalla 0.1.10. `python3-setuptools (>= 77)` in
   Build-Depends lo impone. Una build su Ubuntu 24.04 (debhelper 13.14,

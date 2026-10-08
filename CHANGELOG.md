@@ -52,6 +52,15 @@ sono in `docs/CHANGELOG-archive.md`.
   recupero è lo stesso di prima.
 - Il pacchetto Arch non dipendeva da `hicolor-icon-theme`, pur
   installando l'icona in quel tema (errore di namcap).
+- **GUI installata con pip su Python 3.10 o 3.11: esclusa PySide6
+  6.12.0.** Quella versione toglie un riferimento a `True` a ogni segnale,
+  e con Python precedente alla 3.12 la GUI abortisce dopo poche centinaia
+  di segnali, cioè alla prima scansione (`Fatal Python error:
+  bool_dealloc`). `requirements.txt` e l'extra `gui` la escludono per
+  quelle versioni di Python. Non riguarda i pacchetti Debian e Arch, né
+  Python 3.12 e successivi. Chi usa un venv: ripetere `pip install -r
+  requirements.txt`, poi `python -c "import PySide6;
+  print(PySide6.__version__)"` non deve dire 6.12.0.
 
 ### Aggiunto
 - Rilascio automatico al push di un tag firmato: il workflow verifica che
@@ -73,7 +82,8 @@ sono in `docs/CHANGELOG-archive.md`.
   GUI e in Cronologia (anche con voci della 0.1.14), recupero della
   quarantena fuori dal thread della GUI con il filesystem strumentato,
   guardia sulla HOME dei test estesa a ogni lancio della CLI, secret dei
-  workflow solo nel job di pubblicazione. Totale: 985 test.
+  workflow solo nel job di pubblicazione, refcount di `True` dopo
+  l'emissione di segnali (PySide6 6.12.0). Totale: 986 test.
 
 ---
 ## 0.1.14 — 2026-10-02

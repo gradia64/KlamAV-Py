@@ -1,1 +1,6 @@
-PySide6>=6.5
+# PySide6 6.12.0 toglie un riferimento a True a ogni emissione di un
+# segnale: con Python 3.10 e 3.11, dove True non è immortale, la GUI
+# abortisce dopo poche centinaia di segnali (bool_dealloc). Dalla 3.12
+# non ha effetto. Vedi tests/test_pyside_refcount.py.
+PySide6>=6.5,!=6.12.0; python_version < "3.12"
+PySide6>=6.5; python_version >= "3.12"

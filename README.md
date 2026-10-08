@@ -80,6 +80,8 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Con Python 3.10 e 3.11 `requirements.txt` esclude PySide6 6.12.0, che fa abortire la GUI dopo poche centinaia di segnali (`Fatal Python error: bool_dealloc`); dalla 3.12 non ha effetto. In un venv creato prima della 0.1.15 basta ripetere `pip install -r requirements.txt`; per controllare: `python -c "import PySide6; print(PySide6.__version__)"` non deve dire 6.12.0.
+
 Con il venv attivo (o chiamando direttamente venv/bin/python):
 
 ```bash
