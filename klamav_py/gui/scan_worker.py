@@ -289,10 +289,13 @@ class ScanWorker(QThread):
         too_large = 0
         unreadable_dirs = 0
         acknowledged = 0
+        io_faults = 0
         acks = ScanAcknowledgements(self.acknowledgements)
 
         def totals() -> ScanTotals:
-            return ScanTotals(scanned, infections, errors, too_large, unreadable_dirs, acknowledged)
+            return ScanTotals(
+                scanned, infections, errors, too_large, unreadable_dirs, acknowledged, io_faults,
+            )
 
         try:
             blocked = self._blocking_problem(quarantine_root)
@@ -413,6 +416,8 @@ class ScanWorker(QThread):
                     too_large += 1
                 elif result.status == "ERROR":
                     errors += 1
+                    if result.io_fault:
+                        io_faults += 1
 
                 outcome = None
                 if result.infected and self.auto_quarantine and quarantine is not None:

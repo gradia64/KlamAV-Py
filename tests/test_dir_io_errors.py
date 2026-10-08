@@ -180,10 +180,11 @@ def test_worker_guasto_e_un_errore(tmp_path, broken, code):
     got = _run_worker(root)
     assert got["unreadable"] == [] and got["aborted"] == []
     assert [(r.path, r.status) for r in got["results"]] == [(str(root / "guasta"), "ERROR")]
-    assert got["finished"] == [ScanTotals(scanned=3, errors=1)]
+    assert got["finished"] == [ScanTotals(scanned=3, errors=1, io_faults=1)]
 
 
 def test_pianificazione_guasto_nel_log_e_fra_gli_errori(tmp_path, broken, monkeypatch):
+    from klamav_py.scan_totals import io_fault_note
     monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", tmp_path / "logs")
     root = _tree(tmp_path)
     broken(root / "guasta", errno.EIO)
@@ -205,5 +206,6 @@ def test_pianificazione_guasto_nel_log_e_fra_gli_errori(tmp_path, broken, monkey
         mw.MainWindow._on_bg_result(fake, result)
     mw.MainWindow._on_bg_finished(fake, got["finished"][0])
     assert log == [f"ERRORE — {root / 'guasta'}: cartella non letta, contenuto non controllato: "
-                   f"{os.strerror(errno.EIO)}"]
+                   f"{os.strerror(errno.EIO)}",
+                   f"ATTENZIONE: {io_fault_note(1)}"]  # 0.1.15: come la CLI
     assert "1 errori" in messages[0] and "escludile" not in messages[0]

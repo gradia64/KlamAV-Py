@@ -28,6 +28,11 @@ class ScanTotals:
     # Rilevamenti «solo segnalazione» già valutati dall'utente
     # (acknowledged.py): non contano fra gli infetti.
     acknowledged: int = 0
+    # Errori che sono guasti di I/O (ScanResult.io_fault, regola in
+    # clamd_client.is_io_fault): contati ANCHE in errors, come nella CLI.
+    # Un sottoinsieme, non una categoria nuova: dice che parte dell'albero
+    # non è stata controllata (io_fault_note).
+    io_faults: int = 0
 
     def as_entry(self) -> dict:
         return asdict(self)
@@ -41,3 +46,16 @@ class ScanTotals:
             value = entry.get(f.name, 0)
             values[f.name] = value if isinstance(value, int) and not isinstance(value, bool) else 0
         return cls(**values)
+
+
+def io_fault_note(count: int) -> str:
+    """
+    Testo unico per i guasti di I/O di una scansione: ultima riga del
+    riepilogo della CLI, stato e referto della scansione manuale della GUI,
+    notifica e log della pianificazione interna. Dice che la scansione non
+    vale come pulita anche quando l'esito della GUI è solo «con errori».
+    """
+    return (
+        f"{count} guasti di I/O (elencati fra gli errori): parte dell'albero "
+        "non è stata controllata, la scansione non vale come pulita."
+    )

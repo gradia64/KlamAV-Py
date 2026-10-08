@@ -140,7 +140,12 @@ def test_guasto_su_una_sottocartella_senza_rilevamenti_esce_2(tmp_path, clamd, b
     broken_dir(root / "sub", errno.EIO)
     (root / GUASTO).unlink()
     assert _scan(clamd, root) == 2
-    assert "1 guasti di I/O" in capsys.readouterr().out.strip().splitlines()[-1]
+    # Lo stesso testo di stato, referto e notifica della GUI (0.1.15,
+    # scan_totals.io_fault_note; test_scan_outcomes per la GUI).
+    assert capsys.readouterr().out.strip().splitlines()[-1] == (
+        "ATTENZIONE: 1 guasti di I/O (elencati fra gli errori): parte dell'albero "
+        "non è stata controllata, la scansione non vale come pulita."
+    )
 
 
 @pytest.mark.parametrize("extra", SESSIONE, ids=IDS)

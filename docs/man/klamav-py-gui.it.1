@@ -72,6 +72,14 @@ Le cartelle con permessi negati durante una scansione sono elencate e
 contate a parte rispetto agli errori; ogni altro errore su una cartella
 (un errore di I/O, un mount NFS che non risponde più) è elencato e
 contato fra gli errori.
+Questi errori, e quelli di lettura di un file che non sono permessi negati
+né file spariti, sono guasti di I/O: parte dell'albero non è stata
+controllata.
+L'esito resta \(lqCompletata con errori\(rq, ma lo stato e il referto
+della scansione manuale e la notifica della scansione programmata interna
+lo dicono con la stessa frase dell'ultima riga del riepilogo di
+.BR klamav-py (1),
+e la Cronologia li conta in una colonna a parte.
 Un percorso da scansionare inesistente, collegamento simbolico rotto, né
 cartella né file regolare, o non leggibile ferma la scansione.
 .

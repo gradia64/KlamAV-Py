@@ -79,6 +79,7 @@ from .quarantine import Quarantine, QuarantineError
 from .quarantine_location import decide as decide_quarantine_dir
 from .quarantine_policy import QuarantinePolicy, default_report_only_dirs
 from .scan_exclusions import decide as decide_exclusion
+from .scan_totals import io_fault_note
 
 
 def _socket_endpoint(value: str) -> ClamdEndpoint:
@@ -625,10 +626,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if io_faults:
         # Ultima riga, anche quando l'uscita è 1 per i rilevamenti: un
         # guasto non deve sparire dietro un'infezione.
-        print(
-            f"\nATTENZIONE: {io_faults} guasti di I/O (elencati sopra fra gli errori): "
-            "parte dell'albero non è stata controllata, la scansione non vale come pulita."
-        )
+        print(f"\nATTENZIONE: {io_fault_note(io_faults)}")
 
     if infections:
         return 1

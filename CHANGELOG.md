@@ -32,6 +32,16 @@ sono in `docs/CHANGELOG-archive.md`.
   mostra `--log-errors` nell'ultima riga `ExecStart=`. Senza drop-in (mai
   salvato nulla di diverso dai predefiniti) la riga è quella della unit
   installata, che ha già l'opzione.
+- **I guasti di I/O si vedono anche nella GUI.** Un errore di lettura che
+  non è un permesso negato (un disco che degrada, un mount NFS che non
+  risponde) già contava fra gli errori, ma nella GUI non si distingueva da
+  un file illeggibile per permessi. Ora lo stato e il referto della
+  scansione manuale, la notifica e il log della pianificazione interna
+  dicono, con la stessa frase dell'ultima riga del riepilogo della CLI, che
+  parte dell'albero non è stata controllata; la Cronologia ha la colonna
+  «Guasti di I/O». Le voci già salvate valgono zero guasti. Nella CLI la
+  frase dice ora «elencati fra gli errori» invece di «elencati sopra fra
+  gli errori».
 
 ### Corretto
 - Il pacchetto Arch non dipendeva da `hicolor-icon-theme`, pur

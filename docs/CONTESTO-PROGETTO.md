@@ -335,9 +335,18 @@ nulla fa perdere tempo.
   non è un permesso che resterà uguale: `_iter_files` lo restituisce come
   `ScanResult` ERROR nel flusso dei file, quindi CLI, worker, pagina
   Scansione e log della programmata lo contano e lo mostrano come un file
-  illeggibile, senza categoria nuova né campo nuovo in `ScanTotals` e
-  senza suggerire `--exclude` (le man page lo indicano solo per un mount
-  che si sa non disponibile in modo permanente).
+  illeggibile, senza categoria nuova e senza suggerire `--exclude` (le
+  man page lo indicano solo per un mount che si sa non disponibile in
+  modo permanente).
+- **Guasti nominati nella GUI** (0.1.15). `ScanTotals.io_faults`, da
+  `ScanResult.io_fault`, è un **sottoinsieme** di `errors`, non una
+  categoria: la classificazione resta `is_io_fault` e l'esito della GUI
+  resta «Completata con errori». Una sola frase
+  (`scan_totals.io_fault_note`) per l'ultima riga del riepilogo della CLI,
+  stato e referto della manuale, notifica e ultima riga del log della
+  programmata interna; la Cronologia ha una colonna. Con guasti, icona di
+  avviso nella notifica (prima la spunta). La frase non dice più «sopra»,
+  che valeva solo per la CLI.
 - **Guasti di I/O contro stati attesi** (0.1.14, punto 1-bis). Permessi
   negati (EACCES, EPERM) e entry sparite o sostituite durante la
   traversata (ENOENT, ENOTDIR; per i file anche ELOOP ed EISDIR) sono

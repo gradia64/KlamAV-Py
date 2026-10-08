@@ -77,7 +77,7 @@ from ..quarantine import Quarantine, peek_entries
 from ..quarantine_policy import REASON_MAIL_STORE
 from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
 from ..scan_exclusions import decide as decide_exclusion
-from ..scan_totals import ScanTotals
+from ..scan_totals import ScanTotals, io_fault_note
 from ..systemd_dropin import (
     DropinConflict, daemon_reload, disable_timer, dropin_path, foreign_overrides,
     generation as dropin_generation, refresh_outdated, render_dropin, sync_dropin,
@@ -364,6 +364,8 @@ def _totals_summary(totals: ScanTotals) -> str:
             f"{totals.errors} errori")
     if totals.too_large:
         text += f", {totals.too_large} non verificati"
+    if totals.io_faults:
+        text += f" (di cui {totals.io_faults} guasti di I/O)"
     if totals.unreadable_dirs:
         text += f", {totals.unreadable_dirs} cartelle non leggibili"
     if totals.acknowledged:
@@ -1184,6 +1186,8 @@ class ScanPage(QWidget):
         self._errors = totals.errors
         self._too_large = totals.too_large
         text = f"{scanned} scansionati — {infections} infetti — {totals.errors} errori"
+        if totals.io_faults:
+            text += f" (di cui {totals.io_faults} guasti di I/O)"
         if totals.too_large:
             text += f" — {totals.too_large} non verificati (troppo grandi)"
         if totals.unreadable_dirs:
@@ -1387,6 +1391,10 @@ class ScanPage(QWidget):
                 status_text += f" {totals.unreadable_dirs} cartelle non leggibili."
             if totals.acknowledged:
                 status_text += f" {totals.acknowledged} già valutati."
+            if totals.io_faults:
+                # Ultima, come nella CLI: l'esito resta «con errori» (o
+                # «infezioni»), ma non deve sembrare un errore qualunque.
+                status_text += f" ATTENZIONE: {io_fault_note(totals.io_faults)}"
         self._set_status_text(status_text)
 
         omessi_err = getattr(self, "_omitted_errors", 0)
@@ -1428,6 +1436,8 @@ class ScanPage(QWidget):
                f"({UNREADABLE_DIRS_HINT})\n" if totals.unreadable_dirs else "")
             + (f"Segnalazioni già valutate: {totals.acknowledged}\n" if totals.acknowledged else "")
             + f"Esito: {esito}"
+            + (f"\n\nATTENZIONE: {io_fault_note(totals.io_faults)}"
+               if totals.io_faults and aborted is None else "")
             + (f"\n\n{REPORTS_HINT}" if getattr(self, "_new_reports", 0) else "")
         )
 
@@ -1441,10 +1451,12 @@ class ScanPage(QWidget):
 
         title = "Scansione completata" if aborted is None else "Scansione non completata"
         if hasattr(main_window, 'tray_icon'):
-            if aborted is not None:
+            if infections > 0 and aborted is None:
+                icon_type = "emblem-virus"
+            elif aborted is not None or totals.io_faults:
                 icon_type = "dialog-warning"
             else:
-                icon_type = "emblem-checked" if infections == 0 else "emblem-virus"
+                icon_type = "emblem-checked"
             main_window.tray_icon.showMessage(
                 f"{APP_NAME} — {title}", status_text, _icon(icon_type), 6000
             )
@@ -1456,7 +1468,7 @@ class ScanPage(QWidget):
         # avanza la notifica tray sopra.
         if self.isVisible() and self.window().isVisible():
             report_box = QMessageBox(self)
-            warn = infections > 0 or aborted is not None
+            warn = infections > 0 or aborted is not None or totals.io_faults > 0
             report_box.setIcon(QMessageBox.Warning if warn else QMessageBox.Information)
             report_box.setWindowTitle(title)
             report_box.setText(report_text)
@@ -2139,10 +2151,10 @@ class HistoryPage(QWidget):
         layout.addWidget(desc)
         layout.addSpacing(10)
 
-        self.table = QTableWidget(0, 9)
+        self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(
             ["Data e Ora", "Tipo", "Percorso", "Scansionati", "Infetti", "Errori", "Non verificati",
-             "Cartelle non leggibili", "Già valutati"]
+             "Cartelle non leggibili", "Già valutati", "Guasti di I/O"]
         )
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -2196,6 +2208,11 @@ class HistoryPage(QWidget):
             totals = ScanTotals.from_entry(entry)
             self.table.setItem(row, 7, QTableWidgetItem(str(totals.unreadable_dirs)))
             self.table.setItem(row, 8, QTableWidgetItem(str(totals.acknowledged)))
+            # Idem per io_faults (0.1.15): un sottoinsieme degli errori.
+            faults_item = QTableWidgetItem(str(totals.io_faults))
+            if totals.io_faults:
+                faults_item.setToolTip(io_fault_note(totals.io_faults))
+            self.table.setItem(row, 9, faults_item)
 
             # Il log dettagliato (se esiste) è raggiungibile dal tooltip
             # sulla riga: senza questo, il riferimento nel JSON sarebbe
@@ -4309,9 +4326,15 @@ X-GNOME-Autostart-enabled=true
             if getattr(self, "_bg_errors", 0):
                 status += (f" {self._bg_errors} problemi durante la scansione "
                            "(dettaglio nel log, vedi Pianificazione).")
-            self.tray_icon.showMessage(
-                APP_NAME, status, _icon("emblem-virus" if infections > 0 else "emblem-checked"), 5000
-            )
+            if totals.io_faults:
+                # I guasti distinti dagli altri errori, con il testo della
+                # CLI; anche come ultima riga del log, come nel riepilogo.
+                note = f"ATTENZIONE: {io_fault_note(totals.io_faults)}"
+                status += f" {note}"
+                self._bg_log_write(note)
+            icon = ("emblem-virus" if infections > 0
+                    else "dialog-warning" if totals.io_faults else "emblem-checked")
+            self.tray_icon.showMessage(APP_NAME, status, _icon(icon), 5000)
         elif first_abort:
             self._schedule_aborted_noted = True
             self.tray_icon.showMessage(

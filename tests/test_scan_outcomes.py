@@ -403,3 +403,114 @@ def test_realtime_file_sparito_non_analizzato_senza_cronologia(app, tmp_path, mo
     rows = [page.log_list.item(i).text() for i in range(page.log_list.count())]
     assert any("Non analizzato: scaricato.part" in r and "non esiste" in r for r in rows), rows
     assert entries == [] and _Recorder.seen == []
+
+
+# -- guasti di I/O nominati nella GUI (0.1.15) --------------------------------
+#
+# Nella 0.1.14 un guasto contava fra gli errori («Completata con errori»), ma
+# la GUI non lo distingueva da un file illeggibile per permessi: la CLI lo
+# dice nell'ultima riga del riepilogo, la GUI no. Ora stato, referto,
+# notifica, log e Cronologia lo nominano con il testo della CLI.
+
+FAULT_TEXT = "guasti di I/O (elencati fra gli errori): parte dell'albero non è stata controllata"
+
+
+@pytest.fixture
+def denied_tree(tmp_path, monkeypatch):
+    """Come eio_tree, ma la sottocartella ha i permessi negati (EACCES)."""
+    import errno
+
+    root = tmp_path / "radice"
+    (root / "chiusa").mkdir(parents=True)
+    (root / "a.txt").write_text("a")
+    real = os.scandir
+
+    def scandir(path="."):
+        if Path(os.fsdecode(path)) == root / "chiusa":
+            raise OSError(errno.EACCES, os.strerror(errno.EACCES), os.fsdecode(path))
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    return root
+
+
+def _history_column(history, header: str) -> list[str]:
+    """Valori di una colonna della pagina Cronologia, cercata per titolo."""
+    hp = mw.HistoryPage(history)
+    headers = [hp.table.horizontalHeaderItem(c).text() for c in range(hp.table.columnCount())]
+    assert header in headers, headers
+    col = headers.index(header)
+    return [hp.table.item(r, col).text() for r in range(hp.table.rowCount())]
+
+
+def test_manuale_guasto_nominato_in_stato_referto_e_cronologia(page, eio_tree, monkeypatch):
+    client = _ok_client()
+    monkeypatch.setattr(mw.ClamdEndpoint, "new_client", lambda self, **k: client())
+    _scan(page, eio_tree)
+    assert "1 " + FAULT_TEXT in page._status_full_text
+    ((title, text),) = page.reports
+    assert title == "Scansione completata" and "Esito: Completata con errori" in text
+    assert "1 " + FAULT_TEXT in text
+    (entry,) = page.history.get_entries()
+    assert entry.get("io_faults") == 1 and entry["errors"] == 1
+    assert _history_column(page.history, "Guasti di I/O") == ["1"]
+
+
+def test_programmata_guasto_nominato_in_notifica_log_e_cronologia(app, tmp_path, eio_tree, monkeypatch):
+    monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", tmp_path / "logs")
+    client = _ok_client()
+
+    class SyncWorker(ScanWorker):
+        def __init__(self, **kw):
+            super().__init__(client_factory=client, **kw)
+
+        def start(self):
+            self.run()
+
+    monkeypatch.setattr(mw, "ScanWorker", SyncWorker)
+    fake, messages, entries = _window(tmp_path, eio_tree)
+    mw.MainWindow._run_scheduled_scan(fake)
+    assert "1 errori" in messages[-1] and "1 " + FAULT_TEXT in messages[-1]
+    ((args, _),) = entries
+    assert getattr(args[2], "io_faults", 0) == 1
+    (log,) = (tmp_path / "logs").glob("scheduled-*.log")
+    assert log.read_text().splitlines()[-1].startswith("ATTENZIONE: 1 " + FAULT_TEXT)
+
+
+def test_solo_permessi_nessun_guasto(page, app, tmp_path, denied_tree, monkeypatch):
+    client = _ok_client()
+    monkeypatch.setattr(mw.ClamdEndpoint, "new_client", lambda self, **k: client())
+    _scan(page, denied_tree)
+    ((_, text),) = page.reports
+    assert "guast" not in page._status_full_text and "guast" not in text
+    assert page.history.get_entries()[0].get("io_faults", 0) == 0
+
+    monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", tmp_path / "logs")
+
+    class SyncWorker(ScanWorker):
+        def __init__(self, **kw):
+            super().__init__(client_factory=client, **kw)
+
+        def start(self):
+            self.run()
+
+    monkeypatch.setattr(mw, "ScanWorker", SyncWorker)
+    fake, messages, _ = _window(tmp_path, denied_tree)
+    mw.MainWindow._run_scheduled_scan(fake)
+    assert "cartelle non leggibili" in messages[-1] and "guast" not in messages[-1]
+
+
+def test_cronologia_della_0_1_14_si_legge(app, tmp_path):
+    """Voci scritte dalla 0.1.14: senza io_faults, valgono zero guasti."""
+    import json
+
+    path = tmp_path / "history.json"
+    path.write_text(json.dumps([
+        {"timestamp": "2026-10-01 10:00:00", "type": "Manuale", "target": "/home/u",
+         "scanned": 10, "infections": 0, "errors": 1, "too_large": 0,
+         "unreadable_dirs": 0, "acknowledged": 0},
+        {"timestamp": "2026-10-01 11:00:00", "type": "Programmata (non completata)",
+         "target": "/home/u", "scanned": 0, "infections": 0, "errors": 0},
+    ]))
+    history = mw.HistoryManager(path)
+    assert _history_column(history, "Guasti di I/O") == ["0", "0"]

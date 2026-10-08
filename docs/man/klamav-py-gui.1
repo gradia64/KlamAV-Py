@@ -70,6 +70,15 @@ Folders whose permissions deny access during a scan are listed and
 counted separately from errors; any other error on a folder (an I/O error,
 an NFS mount that stopped responding) is listed and counted among the
 errors.
+These errors, and read errors on a file that are neither denied
+permissions nor vanished files, are I/O faults: part of the tree was not
+checked.
+The outcome stays \(lqCompletata con errori\(rq (completed with errors),
+but the status and the
+report of the manual scan and the notification of the internal scheduled
+scan say so with the same sentence as the last line of the
+.BR klamav-py (1)
+summary, and History counts them in a separate column.
 A path to scan that does not exist, is a broken symbolic link, is neither
 a folder nor a regular file, or cannot be read stops the scan.
 .
