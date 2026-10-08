@@ -26,7 +26,27 @@ Cosa garantisce cosa:
   questo repository da quel tag. Non dice nulla di più del tag.
 - **Se la CI o i secret vengono compromessi**: si revoca solo la
   sottochiave della CI. Le firme dei tag passati restano valide, la
-  primaria e `validpgpkeys` non cambiano.
+  primaria e `validpgpkeys` non cambiano (piano in «Rotazione e revoca»).
+
+Cosa resta esposto se la CI, o l'environment `release`, viene
+compromessa, finché la sottochiave della CI non è revocata e la chiave
+pubblica ripubblicata:
+
+- **allegati delle release**: chi ha la sottochiave della CI firma file a
+  sua scelta, e la firma è valida per chiunque verifichi gli allegati;
+  il job `publish` ha anche il permesso di caricarli sulle release
+  esistenti (`--clobber`);
+- **tag per makepkg**: un tag firmato con la sottochiave della CI passa la
+  verifica di makepkg (vedi i limiti sotto), non quella di `verify`;
+- **AUR**: la chiave SSH di AUR permette di pubblicare un PKGBUILD
+  qualunque per `klamav-py` e `olladesk`, anche con un'altra sorgente o
+  un altro `validpgpkeys`: è l'esposizione più ampia, perché non passa da
+  nessuna firma.
+
+Restano fuori dalla portata della CI: la primaria e la sottochiave dei
+tag (mai nei secret), quindi i tag già pubblicati, la loro verifica con
+`git tag -v` e con `verify`, e la possibilità di certificare una nuova
+sottochiave.
 
 Limiti da sapere:
 
@@ -170,18 +190,30 @@ chi aggiorna) resta com'è: il workflow carica solo i file.
 
 ## Rotazione e revoca
 
-**Compromissione della CI o dei secret** (o solo il sospetto):
+**Compromissione della CI o dei secret** (o solo il sospetto), in
+quest'ordine:
 
-```bash
-gpg --edit-key EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
-#   selezionare la sottochiave F9F4…328D (key N), poi: revkey, save
-gpg --quick-add-key EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9 ed25519 sign 2y
-```
+1. Togli la chiave SSH della CI (`aur_klamav_ci`) dal profilo AUR e
+   cancella i secret dell'environment `release`: niente più pubblicazioni.
+2. Revoca la sottochiave della CI e creane una nuova:
+   ```bash
+   gpg --edit-key EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
+   #   selezionare la sottochiave F9F4…328D (key N), poi: revkey, save
+   gpg --quick-add-key EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9 ed25519 sign 2y
+   ```
+3. Ripubblica la chiave pubblica con la revoca (sezione 1: file nel
+   repository, keyserver, profilo GitHub): chi non la aggiorna continua a
+   considerare valida la sottochiave revocata.
+4. Controlla la storia git dei pacchetti AUR (`klamav-py` e `olladesk`) e
+   gli allegati delle release dopo la data sospetta; ripristina da tag
+   firmati ciò che non hai pubblicato tu.
+5. Aggiorna `CI_SIGNING_SUBKEY` in `tools/release-keys.sh`, ricarica
+   `GPG_PRIVATE_KEY` nell'environment con la nuova sottochiave e registra
+   su AUR una nuova chiave SSH della CI.
 
-Aggiorna `CI_SIGNING_SUBKEY` in `tools/release-keys.sh`, ripubblica la
-chiave pubblica (sezione 1), ricarica `GPG_PRIVATE_KEY` nell'environment e
-togli la chiave SSH della CI dal profilo AUR, sostituendola. La
-sottochiave dei tag non si tocca.
+Non cambiano: la sottochiave dei tag, `TAG_SIGNING_SUBKEYS`, la primaria e
+`validpgpkeys` nel PKGBUILD. Lo storico dei tag resta valido, perché
+nessun tag è firmato dalla sottochiave revocata.
 
 **Scadenze**: prorogale prima che scadano (tag 2028-09-25, CI
 2028-10-01), poi ripubblica la chiave pubblica:

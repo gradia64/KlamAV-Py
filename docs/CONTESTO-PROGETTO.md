@@ -538,10 +538,11 @@ Ordine, per ogni versione:
    documento. `tests/test_changelog.py` e `tests/test_manpage.py`
    verificano l'allineamento.
 2. Merge su `main` con la CI verde.
-3. Tag `v<versione>` firmato con la chiave di rilascio
-   (`EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9`) e verificato con
-   `git tag -v`. Lo crea solo il maintainer: un tag non firmato, o firmato
-   con un'altra chiave, fa fallire `makepkg` per tutti gli utenti AUR, e
+3. Tag `v<versione>` firmato con la sottochiave dei tag della chiave di
+   rilascio (primaria `EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9`) e
+   verificato con `tools/verify-tag.sh`. Lo crea solo il maintainer: un
+   tag non firmato, o firmato con un'altra chiave, fa fallire `makepkg`
+   per tutti gli utenti AUR, e
    rifarlo con lo stesso nome dopo la pubblicazione lascia copie
    sbagliate in giro.
 4. Push del tag: il resto lo fa `.github/workflows/release.yml` (dalla
@@ -567,6 +568,25 @@ Ordine, per ogni versione:
   Scartata la prima versione, con la sottochiave dei tag nei secret: la
   regola «la CI non firma tag» era garantita da un test sul workflow e non
   dalla crittografia, e revocarla avrebbe invalidato lo storico.
+- **Modello di fiducia** (dettaglio in `docs/RILASCIO.md`). La firma del
+  tag dice che il maintainer ha approvato quel codice, ed è quella che
+  verificano `git tag -v`, `verify` e makepkg; la firma degli allegati
+  dice solo che li ha prodotti la CI da quel tag. Con la CI compromessa
+  restano esposti, fino alla revoca: gli allegati (firma valida, upload
+  sulle release), un tag firmato con la sottochiave della CI per makepkg
+  (non per `verify`), e soprattutto AUR, perché la chiave SSH pubblica un
+  PKGBUILD qualunque senza passare da una firma. **Piano d'emergenza**:
+  chiave SSH tolta da AUR e secret cancellati, revoca della sola
+  sottochiave della CI, chiave pubblica ripubblicata con la revoca,
+  controllo di AUR e delle release, nuova sottochiave e nuova chiave SSH.
+  La sottochiave dei tag e `validpgpkeys` non cambiano, e lo storico dei
+  tag resta valido. Verificato nella 0.1.15: `verify-tag.sh` accetta solo
+  `TAG_SIGNING_SUBKEYS` (test con una chiave di prova a due sottochiavi);
+  `tests/test_release_tools.py` fallisce se un job diverso da `publish`
+  nell'environment `release`, un altro workflow o il livello del workflow
+  leggono i secret (prima guardava solo i job di `release.yml`), o se un
+  workflow imposta le variabili `KLAMAV_*` che sostituiscono i ruoli delle
+  chiavi.
 - **Secret solo nell'environment `release`**, limitato ai tag `v*` e con
   l'approvazione del maintainer: solo il job `publish` li vede, e niente
   arriva alla release o su AUR senza un clic. Limiti noti: makepkg
@@ -701,6 +721,17 @@ Annotati nella 0.1.14:
   di ricevere un errore, quindi la riclassificazione degli errno della
   0.1.14 non lo copre. Stesso tema della validazione fuori dal thread
   della GUI: un controllo su un mount appeso non ritorna.
+- **clamd sovraccarico che va in timeout senza cadere** (annotato nella
+  0.1.15, non corretto). Se clamd accetta le connessioni ma va in
+  timeout su molti file, non scatta `ClamdUnavailable` (solo per una
+  connessione rifiutata o impossibile): ogni file è un errore e la
+  scansione arriva alla fine con molti errori ma con uscita 0, perché un
+  timeout di clamd sul singolo file non è un guasto di I/O (decisione
+  0.1.14, «Guasti di I/O contro stati attesi»). Sotto il timer quindi
+  nessuna notifica; gli errori restano nel riepilogo, nel journal e nel
+  log degli errori della unit. Una correzione dovrebbe distinguere una
+  serie di timeout da casi isolati (soglia, o un PING dopo N timeout di
+  fila).
 - `update_check_worker.version_key("0.1.12-1") < version_key("0.1.12")`:
   una revisione di pacchetto in stile Debian si legge come pre-release.
   Limite noto, non toccato: i tag del progetto non hanno revisione.

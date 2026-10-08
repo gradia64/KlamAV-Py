@@ -281,20 +281,92 @@ def _jobs(text: str) -> dict:
     return dict(zip(parts[1::2], parts[2::2]))
 
 
+def _without_comments(text: str) -> str:
+    return "\n".join(line.split(" #", 1)[0] for line in text.splitlines()
+                     if not line.lstrip().startswith("#"))
+
+
+_SECRETS = re.compile(r"\bsecrets\b")
+
+
+def secret_readers(workflows: dict[str, str]) -> list[str]:
+    """«file:job» di ogni lettura dei secret fuori dal job publish di
+    release.yml nell'environment release: un altro job, un altro workflow,
+    o il livello del workflow (env: globale, valido per tutti i job).
+    Compresi `secrets: inherit` e `toJSON(secrets)`."""
+    found = []
+    for name, text in sorted(workflows.items()):
+        text = "\n" + _without_comments(text)
+        if "\njobs:\n" not in text:
+            if _SECRETS.search(text):
+                found.append(f"{name}:<workflow>")
+            continue
+        if _SECRETS.search(text[:text.index("\njobs:\n")]):
+            found.append(f"{name}:<workflow>")
+        for job, body in _jobs(text).items():
+            if not _SECRETS.search(body):
+                continue
+            if name == "release.yml" and job == "publish" and \
+                    re.search(r"^    environment: release$", body, re.M):
+                continue
+            found.append(f"{name}:{job}")
+    return found
+
+
+def _workflows() -> dict[str, str]:
+    return {p.name: p.read_text(encoding="utf-8")
+            for p in sorted((ROOT / ".github/workflows").glob("*.y*ml"))}
+
+
 def test_workflow_verifica_il_tag_e_isola_i_secret():
-    text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflows = _workflows()
+    text = workflows["release.yml"]
     jobs = _jobs(text)
     assert "tools/verify-tag.sh" in jobs["verify"] and "tools/check-version.sh" in jobs["verify"]
     # Nessun job firma tag o usa la chiave primaria: solo gli allegati.
     assert "git tag" not in text and "export-secret-keys" not in text
-    # I secret solo nel job publish, nell'environment protetto.
-    assert [name for name, body in jobs.items() if "secrets." in body] == ["publish"]
-    assert "environment: release" in jobs["publish"]
+    # I secret solo nel job publish, nell'environment protetto, in tutti i
+    # workflow (0.1.15: prima solo i job di release.yml).
+    assert "secrets." in jobs["publish"]
+    assert secret_readers(workflows) == []
+    # I ruoli delle chiavi di tools/release-keys.sh hanno un override da
+    # ambiente (KLAMAV_*, per i test): un workflow che lo impostasse
+    # farebbe accettare a verify-tag.sh un tag firmato da un'altra
+    # sottochiave, quella della CI compresa.
+    for name, body in workflows.items():
+        assert "KLAMAV_" not in body, name
     # Ogni action esterna è fissata per SHA.
     for ref in re.findall(r"uses:\s*([^\s#]+)", text):
         if ref.startswith("./"):
             continue
         assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", ref), ref
+
+
+@pytest.mark.parametrize("workflows", [
+    # Un altro job di release.yml.
+    {"release.yml": "jobs:\n  build:\n    steps:\n      - run: echo ${{ secrets.GPG_PASSPHRASE }}\n"},
+    # publish senza l'environment protetto.
+    {"release.yml": "jobs:\n  publish:\n    steps:\n      - env:\n"
+                    "          K: ${{ secrets.GPG_PRIVATE_KEY }}\n"},
+    # Un altro workflow, anche con secrets: inherit verso uno riutilizzabile.
+    {"tests.yml": "on: push\njobs:\n  test:\n    uses: ./x.yml\n    secrets: inherit\n"},
+    # env: a livello di workflow, visibile a tutti i job.
+    {"tests.yml": "on: push\nenv:\n  K: ${{ secrets.AUR_SSH_PRIVATE_KEY }}\njobs:\n"
+                  "  test:\n    steps: []\n"},
+], ids=["altro-job", "senza-environment", "altro-workflow", "env-globale"])
+def test_controllo_dei_secret_vede_le_letture_fuori_da_publish(workflows):
+    assert secret_readers(workflows), workflows
+
+
+def test_controllo_dei_secret_accetta_publish_e_commenti():
+    workflows = {
+        "release.yml": "# i secret GPG_PRIVATE_KEY e secrets.X nei commenti non contano\n"
+                       "jobs:\n  verify:\n    steps: []\n  publish:\n"
+                       "    environment: release\n    steps:\n      - env:\n"
+                       "          K: ${{ secrets.GPG_PRIVATE_KEY }}  # firma\n",
+        "tests.yml": "on: push\njobs:\n  test:\n    steps: []\n",
+    }
+    assert secret_readers(workflows) == []
 
 
 def test_ruoli_delle_chiavi_coerenti_con_la_chiave_pubblica(tmp_path):
