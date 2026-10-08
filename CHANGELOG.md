@@ -5,6 +5,22 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## Non rilasciato
+
+### Modificato
+- **GUI con pip su Python 3.10 o 3.11: PySide6 resta alla 6.11.x.** La
+  0.1.15 escludeva solo PySide6 6.12.0, che su quelle versioni fa
+  abortire la GUI alla prima scansione. Qt ha confermato
+  ([PYSIDE-3474](https://qt-project.atlassian.net/browse/PYSIDE-3474)) che
+  dalla 6.12 le wheel sono compilate apposta per Python 3.12, quindi
+  varrebbe anche per le versioni successive: `requirements.txt` e l'extra
+  `gui` ora chiedono PySide6 < 6.12 con Python < 3.12. Non riguarda i
+  pacchetti Debian e Arch, né Python 3.12 e successivi. Chi usa un venv
+  con Python 3.10 o 3.11: ripetere `pip install -r requirements.txt`, poi
+  `python -c "import PySide6; print(PySide6.__version__)"` deve dire 6.11
+  o precedente.
+
+---
 ## 0.1.15 — 2026-10-08
 
 ### Modificato

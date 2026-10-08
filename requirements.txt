@@ -1,7 +1,9 @@
-# PySide6 6.12.0 toglie un riferimento a True a ogni emissione di un
-# segnale: con Python 3.10 e 3.11, dove True non è immortale, la GUI
-# abortisce dopo poche centinaia di segnali (bool_dealloc). Dalla 3.12
-# non ha effetto. Vedi tests/test_pyside_refcount.py e, a monte,
+# Dalla 6.12 le wheel di PySide6 sono compilate con gli header di Python
+# 3.12 (scelta di Qt, PYSIDE-3424) ma restano marcate per Python >= 3.10:
+# con 3.10 e 3.11 ogni emissione di un segnale toglie un riferimento a
+# True, e la GUI abortisce dopo poche centinaia di segnali (bool_dealloc).
+# Per Python < 3.12 si resta quindi alla 6.11.x. Vedi
+# tests/test_pyside_refcount.py e
 # https://qt-project.atlassian.net/browse/PYSIDE-3474
-PySide6>=6.5,!=6.12.0; python_version < "3.12"
+PySide6>=6.5,<6.12; python_version < "3.12"
 PySide6>=6.5; python_version >= "3.12"
