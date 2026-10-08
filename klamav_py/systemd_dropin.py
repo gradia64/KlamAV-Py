@@ -25,8 +25,13 @@ Tre insidie che il modulo chiude, ognuna con i suoi test:
 - Quoting: ExecStart non passa da una shell. systemd fa il suo word
   splitting, espande gli specificatori (%) e le variabili ($): un percorso
   con spazi, "%" o "$" va quotato con le regole di systemd, non di sh.
-- Pulizia: il file si riconosce dall'intestazione e si cancella solo se è
-  nostro; un file con lo stesso nome scritto a mano non viene mai toccato.
+- Pulizia: il file si riconosce dall'intestazione (HEADER, la prima riga)
+  e si cancella solo se è nostro; un file con lo stesso nome scritto a
+  mano non viene mai toccato.
+
+All'avvio la GUI riporta al testo attuale un drop-in nostro scritto da una
+versione precedente (refresh_outdated): un cambio di EXEC_TEMPLATE arriva
+così al timer senza che l'utente debba salvare qualcosa.
 
 Niente Qt: lo usa la GUI, e i test girano senza PySide6.
 """
@@ -36,6 +41,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
 from pathlib import Path
 from typing import Iterable
 
@@ -289,6 +295,22 @@ def is_ours(path: Path) -> bool:
         return False
 
 
+# Scritture serializzate e numerate. La rigenerazione all'avvio gira in un
+# thread e calcola il testo da uno stato letto prima: se nel frattempo un
+# salvataggio ha scritto il drop-in (sync_dropin, thread della GUI), lo
+# stato del worker è superato e non deve sovrascriverlo. Dentro il lock
+# solo letture e scritture del file in ~/.config, come nei salvataggi.
+_write_lock = threading.Lock()
+_generation = 0
+
+
+def generation() -> int:
+    """Numero di chiamate a sync_dropin finora: da leggere insieme allo
+    stato da cui si genera il testo, e da passare a refresh_outdated."""
+    with _write_lock:
+        return _generation
+
+
 def sync_dropin(text: str | None, path: Path | None = None) -> bool:
     """
     Porta il drop-in allo stato voluto: scritto (atomico, 0600) se text non
@@ -298,7 +320,13 @@ def sync_dropin(text: str | None, path: Path | None = None) -> bool:
     per gli errori di scrittura: in entrambi i casi il chiamante non deve
     salvare le Impostazioni, o GUI e timer userebbero due quarantene diverse.
     """
-    path = path or dropin_path()
+    global _generation
+    with _write_lock:
+        _generation += 1
+        return _sync_locked(text, path or dropin_path())
+
+
+def _sync_locked(text: str | None, path: Path) -> bool:
     exists = path.exists() or path.is_symlink()
     if exists and not is_ours(path):
         raise DropinConflict(
@@ -321,6 +349,34 @@ def sync_dropin(text: str | None, path: Path | None = None) -> bool:
     ensure_private_dir(path.parent)
     write_private_text(path, text)
     return True
+
+
+def refresh_outdated(text: str | None, since: int, path: Path | None = None) -> bool:
+    """
+    Rigenerazione all'avvio della GUI: porta a `text` (render_dropin con le
+    impostazioni salvate) solo un drop-in che esiste, è nostro (prima riga
+    HEADER) e ha un contenuto diverso. Ritorna True se il file è stato
+    riscritto o rimosso.
+
+    Serve quando cambia il testo generato fra una versione e l'altra
+    (EXEC_TEMPLATE, 0.1.14: --log-errors): senza, il timer restava al
+    comando vecchio finché l'utente non salvava Impostazioni o
+    Pianificazione, e niente glielo diceva. Un drop-in assente non viene
+    creato (nasce solo da un salvataggio, come prima). Un file senza
+    HEADER, scritto a mano, non viene mai toccato: a differenza del
+    salvataggio (sync_dropin, DropinConflict) qui l'utente non ha chiesto
+    nulla.
+
+    `since` è generation() letto insieme allo stato da cui viene `text`:
+    se nel frattempo un salvataggio ha scritto il drop-in, non si tocca
+    nulla (il salvataggio è più recente). OSError per gli errori di
+    lettura o scrittura, come sync_dropin.
+    """
+    path = path or dropin_path()
+    with _write_lock:
+        if _generation != since or not is_ours(path):
+            return False
+        return _sync_locked(text, path)
 
 
 # -- systemd utente ------------------------------------------------------

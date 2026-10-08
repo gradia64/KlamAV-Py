@@ -79,8 +79,9 @@ from ..quarantine_location import decide as decide_quarantine_dir, default_quara
 from ..scan_exclusions import decide as decide_exclusion
 from ..scan_totals import ScanTotals
 from ..systemd_dropin import (
-    DropinConflict, daemon_reload, disable_timer, foreign_overrides, render_dropin,
-    sync_dropin, timer_enabled,
+    DropinConflict, daemon_reload, disable_timer, dropin_path, foreign_overrides,
+    generation as dropin_generation, refresh_outdated, render_dropin, sync_dropin,
+    timer_enabled,
 )
 from ..private_files import (
     ensure_private_dir, ensure_private_file, open_private_for_write, write_private_text,
@@ -631,6 +632,91 @@ def schedule_roots(target: str, home: Path | None = None) -> dict[str, Path]:
         if path.is_absolute():
             roots["pianificazione interna"] = path
     return roots
+
+
+@dataclass(frozen=True)
+class DropinState:
+    """
+    Stato completo da cui nasce il drop-in di klamav-scan.service
+    (quarantena, endpoint, esclusioni; vedi render_dropin): UNICO punto in
+    cui le Impostazioni diventano il testo del drop-in, per i salvataggi
+    di Impostazioni e Pianificazione e per la rigenerazione all'avvio.
+    Con tre copie, una versione nuova di EXEC_TEMPLATE o un campo nuovo
+    potevano arrivare a un percorso e non agli altri.
+
+    from_settings legge le QSettings (thread della GUI); i valori passati
+    sostituiscono quelli salvati, perché un salvataggio genera il drop-in
+    prima di scrivere le QSettings. render() fa resolve() e può girare
+    fuori dal thread della GUI.
+    """
+
+    quarantine: Path
+    endpoint: ClamdEndpoint
+    excludes: tuple[str, ...]
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: QSettings,
+        *,
+        quarantine: Path | None = None,
+        endpoint: ClamdEndpoint | None = None,
+        excludes: list[str] | None = None,
+    ) -> "DropinState":
+        """ValueError se l'endpoint salvato non è valido (load_endpoint)."""
+        if endpoint is None:
+            endpoint = load_endpoint(settings)
+        if quarantine is None:
+            quarantine = Path(settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR)))
+        if excludes is None:
+            excludes = load_schedule_excludes(settings)
+        return cls(quarantine.expanduser(), endpoint, tuple(excludes))
+
+    def render(self) -> str | None:
+        return render_dropin(
+            self.quarantine.resolve(), home=Path.home(), endpoint=self.endpoint,
+            excludes=self.excludes,
+        )
+
+
+def refresh_dropin_at_startup(state: DropinState, since: int) -> tuple[bool, str | None]:
+    """
+    Rigenerazione all'avvio della GUI (refresh_outdated, `since` letto con
+    lo stato) e daemon-reload se il drop-in è cambiato. Tocca il filesystem
+    e chiama systemctl --user: la GUI la esegue con run_off_gui_thread.
+    Ritorna (riscritto, motivo del reload fallito o None); OSError e
+    ValueError arrivano al chiamante.
+    """
+    if not refresh_outdated(state.render(), since):
+        return False, None
+    return True, daemon_reload()
+
+
+def dropin_refresh_notice(result) -> str | None:
+    """Avviso della rigenerazione all'avvio, dal risultato di
+    refresh_dropin_at_startup (o dall'eccezione); None se non è cambiato
+    nulla. Stesso testo nella pagina Pianificazione e su stderr."""
+    path = dropin_path()
+    if isinstance(result, Exception):
+        return (
+            f"Il drop-in della scansione programmata di sistema («{path}») è stato "
+            "scritto da una versione precedente e non è stato possibile aggiornarlo: "
+            f"{result}. Il timer di sistema usa ancora il comando vecchio; salva le "
+            "Impostazioni per riprovare."
+        )
+    rewritten, problem = result
+    if not rewritten:
+        return None
+    text = (
+        f"Il drop-in della scansione programmata di sistema («{path}») è stato "
+        f"aggiornato alla versione {__version__}, con le impostazioni salvate."
+    )
+    if problem:
+        text += (
+            " Il timer lo userà dal prossimo avvio della sessione "
+            f"(systemctl --user daemon-reload non riuscito: {problem})."
+        )
+    return text
 
 
 def dropin_followup(changed: bool, tcp: bool) -> tuple[str | None, list]:
@@ -2189,6 +2275,14 @@ class SchedulerPage(QWidget):
         self.system_timer_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
         self.system_timer_label.setVisible(False)
         layout.addWidget(self.system_timer_label)
+        # Esito della rigenerazione del drop-in all'avvio
+        # (MainWindow._refresh_system_dropin): visibile per la sessione,
+        # finché un salvataggio non riscrive comunque il drop-in.
+        self.dropin_notice_label = QLabel("")
+        self.dropin_notice_label.setWordWrap(True)
+        self.dropin_notice_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
+        self.dropin_notice_label.setVisible(False)
+        layout.addWidget(self.dropin_notice_label)
         layout.addSpacing(10)
 
         schedule_group = QGroupBox("Pianificazione Automatica")
@@ -2373,6 +2467,10 @@ class SchedulerPage(QWidget):
     def set_next_run(self, text: str) -> None:
         self.next_run_label.setText(text)
 
+    def set_dropin_notice(self, text: str) -> None:
+        self.dropin_notice_label.setText(text)
+        self.dropin_notice_label.setVisible(bool(text))
+
     def _browse_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Seleziona cartella da scansionare", self.target_edit.text())
         if path:
@@ -2524,7 +2622,7 @@ class SchedulerPage(QWidget):
         """
         title = "Pianificazione Scansioni"
         try:
-            endpoint = load_endpoint(self.settings)
+            state = DropinState.from_settings(self.settings, excludes=excludes)
         except ValueError as exc:
             QMessageBox.warning(
                 self, title,
@@ -2532,11 +2630,8 @@ class SchedulerPage(QWidget):
                 "nelle Impostazioni.\n\nLa pianificazione non è stata salvata.",
             )
             return None
-        quarantine = Path(self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))).expanduser()
         try:
-            changed = sync_dropin(render_dropin(
-                quarantine.resolve(), home=Path.home(), endpoint=endpoint, excludes=excludes,
-            ))
+            changed = sync_dropin(state.render())
         except (DropinConflict, OSError) as exc:
             reason = str(exc) if isinstance(exc, DropinConflict) else (
                 f"Impossibile aggiornare la scansione programmata di sistema:\n{exc}"
@@ -2546,7 +2641,7 @@ class SchedulerPage(QWidget):
                 tail += " Il timer di sistema era già stato disattivato."
             QMessageBox.warning(self, title, f"{reason}\n\n{tail}")
             return None
-        return changed, endpoint.is_tcp
+        return changed, state.endpoint.is_tcp
 
 
     def _load_settings(self) -> None:
@@ -2707,6 +2802,7 @@ class SchedulerPage(QWidget):
             )
 
         self._save_end()
+        self.set_dropin_notice("")  # drop-in appena riscritto, vedi sopra
         self.schedule_saved.emit()
         self.refresh_system_timer()
 
@@ -3137,10 +3233,9 @@ class SettingsPage(QWidget):
         try:
             # Stato completo: anche le cartelle escluse della Pianificazione,
             # altrimenti questo salvataggio le toglierebbe dal timer.
-            changed = sync_dropin(render_dropin(
-                path, home=Path.home(), endpoint=endpoint,
-                excludes=load_schedule_excludes(self.settings),
-            ))
+            changed = sync_dropin(DropinState.from_settings(
+                self.settings, quarantine=path, endpoint=endpoint,
+            ).render())
         except DropinConflict as exc:
             QMessageBox.warning(self, title, f"{exc}\n\nLe impostazioni non sono state salvate.")
             return None
@@ -3602,6 +3697,35 @@ class MainWindow(QMainWindow):
         if scan_target:
             self.scan_page.start_external_scan(scan_target)
 
+        self._refresh_system_dropin()
+
+    def _refresh_system_dropin(self) -> None:
+        """
+        Una volta per avvio: un drop-in nostro scritto da una versione
+        precedente torna al testo che il salvataggio produrrebbe adesso
+        (refresh_outdated), con daemon-reload. Lettura, scrittura e
+        systemctl --user fuori dal thread della GUI; l'esito, se c'è,
+        nella pagina Pianificazione e su stderr. Un fallimento non si
+        ritenta nella stessa sessione: il prossimo salvataggio delle
+        Impostazioni o della Pianificazione riscrive comunque il drop-in.
+        """
+        since = dropin_generation()
+        try:
+            state = DropinState.from_settings(self.settings)
+        except ValueError as exc:
+            self._dropin_refreshed(exc)
+            return
+        run_off_gui_thread(
+            lambda: refresh_dropin_at_startup(state, since), self._dropin_refreshed
+        )
+
+    def _dropin_refreshed(self, result) -> None:
+        notice = dropin_refresh_notice(result)
+        if notice is None:
+            return
+        self.scheduler_page.set_dropin_notice(notice)
+        print(f"{APP_NAME}: {notice}", file=sys.stderr)
+
     def _reset_tray_tooltip(self) -> None:
         """Riporta il tooltip della tray al riposo: chiamato a fine di
         ogni attività che lo ha modificato (scansione manuale,
@@ -3802,6 +3926,9 @@ class MainWindow(QMainWindow):
             )
 
     def _on_settings_saved(self) -> None:
+        # Il salvataggio ha appena riscritto il drop-in: l'esito della
+        # rigenerazione all'avvio è superato.
+        self.scheduler_page.set_dropin_notice("")
         endpoint = self._clamd_endpoint()
         self.scan_page.endpoint = endpoint
         self._start_ping(endpoint)

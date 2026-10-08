@@ -142,6 +142,15 @@ Il file è riconosciuto dall'intestazione
 .RI \(lq "Generato da KlamAV-Py" \(rq:
 non va modificato a mano, e un file con lo stesso nome privo di tale
 intestazione non viene mai toccato.
+All'avvio, se il drop-in è stato scritto da una versione precedente e il
+suo contenuto differisce da quello che le impostazioni salvate produrrebbero
+ora, l'applicazione lo riscrive, esegue
+.B systemctl \-\-user daemon\-reload
+e lo dice una volta nella pagina Pianificazione e su stderr; se la
+riscrittura non riesce lo dice con il motivo, e non riprova fino al
+prossimo avvio.
+All'avvio un drop-in assente non viene creato, e un file senza
+l'intestazione non viene toccato.
 Gli altri drop-in della unit che impostano
 .B ExecStart
 (per esempio un

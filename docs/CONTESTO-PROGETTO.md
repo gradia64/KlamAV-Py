@@ -271,7 +271,10 @@ nulla fa perdere tempo.
   la scrittura del drop-in (Pianificazione e Impostazioni, con
   `dropin_followup`/`dropin_notes`) e avviso di doppia pianificazione. Il
   drop-in e le QSettings si scrivono nel thread della GUI (file locali);
-  reload fallito e override estranei restano avvisi mostrati dopo.
+  reload fallito e override estranei restano avvisi mostrati dopo. Fa
+  eccezione la rigenerazione all'avvio (0.1.15), che scrive dal worker.
+  `tests/test_dropin_refresh.py` strumenta `subprocess` e verifica che
+  nessuna chiamata a `systemctl --user` parta dal thread della GUI.
 - **Cartella della pianificazione interna**: al salvataggio, con la
   pianificazione interna attiva, dev'essere un percorso assoluto di una
   directory esistente. A ogni scansione la verifica il worker
@@ -446,8 +449,25 @@ nulla fa perdere tempo.
   stesso percorso nella unit e nel template del drop-in (`ERRORS_LOG`):
   systemd la crea 0700 e la sandbox (`ProtectSystem=strict`) la lascia
   scrivibile, verificato con una unit utente reale. Il file si riscrive a
-  ogni scansione. Un drop-in scritto da una versione precedente non ha
-  l'opzione finché la GUI non lo riscrive (al salvataggio).
+  ogni scansione. Un drop-in scritto da una versione precedente la riceve
+  dalla rigenerazione all'avvio (0.1.15, sotto).
+- **Rigenerazione del drop-in all'avvio** (0.1.15). Un drop-in nostro
+  (prima riga `HEADER`, già presente dalla 0.1.10: nessun marcatore
+  nuovo) che differisce da quello che il salvataggio produrrebbe ora si
+  riscrive all'avvio della GUI, con daemon-reload, tutto fuori dal thread
+  della GUI (`refresh_dropin_at_startup`); un drop-in assente non si crea
+  e un file senza `HEADER` non si tocca, né si segnala (i drop-in
+  estranei restano un avviso di `foreign_overrides`). Esito una volta,
+  nella pagina Pianificazione e su stderr; un fallimento non si ritenta
+  fino al prossimo avvio, perché ogni salvataggio riscrive comunque il
+  drop-in. Il testo nasce da una sola regola (`DropinState`) per avvio e
+  salvataggi. Le scritture sono serializzate da un lock con un contatore
+  (`systemd_dropin.generation`): se un salvataggio arriva mentre il worker
+  dell'avvio lavora su uno stato letto prima, il worker non lo
+  sovrascrive. Limite: una finestra aperta prima dell'aggiornamento del
+  pacchetto esegue ancora il codice vecchio (istanza singola: rilanciarla
+  la riporta in primo piano), quindi la rigenerazione avviene solo dopo
+  «Esci» e riapertura; il CHANGELOG lo dice a chi aggiorna.
 - **La unit spedita non si modifica** per le personalizzazioni: per il TCP il
   drop-in aggiunge `PrivateNetwork=no` e *estende*
   `RestrictAddressFamilies`, mantenendo il filtro.

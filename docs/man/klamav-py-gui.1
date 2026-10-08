@@ -140,6 +140,14 @@ The file is recognized by its header
 (the text written in the file is in Italian):
 it must not be edited by hand, and a file with the same name without that
 header is never touched.
+At startup, if the drop-in was written by a previous version and its
+content differs from what the saved settings would produce now, the
+application rewrites it, runs
+.B systemctl \-\-user daemon\-reload
+and says so once in the Scheduling page and on stderr; if rewriting fails
+it says so with the reason, and does not retry until the next start.
+At startup a missing drop-in is not created, and a file without the header
+is not touched.
 Other drop-ins of the unit that set
 .B ExecStart
 (for example an

@@ -17,6 +17,22 @@ sono in `docs/CHANGELOG-archive.md`.
   serve la chiave pubblica aggiornata. Come verificare le firme: README,
   «Verifica dei rilasci».
 
+### Modificato
+- **Il timer di sistema riceve le opzioni nuove senza salvare nulla.** Il
+  drop-in con cui quarantena, connessione e cartelle escluse della GUI
+  arrivano al timer (`~/.config/systemd/user/klamav-scan.service.d/50-klamav-py.conf`)
+  restava alla versione che lo aveva scritto, finché non si salvavano
+  Impostazioni o Pianificazione: dalla 0.1.14 senza `--log-errors`. Ora la
+  GUI, all'avvio, riscrive un drop-in suo rimasto a una versione precedente
+  e lo dice nella pagina Pianificazione. Un file con quel nome scritto a
+  mano (senza la prima riga `# Generato da KlamAV-Py`) non viene toccato.
+  Dopo l'aggiornamento: chiudere KlamAV-Py con «Esci» dal menu della tray e
+  riaprirlo, perché una finestra già aperta continua a eseguire la versione
+  precedente. Per controllare: `systemctl --user cat klamav-scan.service`
+  mostra `--log-errors` nell'ultima riga `ExecStart=`. Senza drop-in (mai
+  salvato nulla di diverso dai predefiniti) la riga è quella della unit
+  installata, che ha già l'opzione.
+
 ### Corretto
 - Il pacchetto Arch non dipendeva da `hicolor-icon-theme`, pur
   installando l'icona in quel tema (errore di namcap).
@@ -42,8 +58,12 @@ sono in `docs/CHANGELOG-archive.md`.
   leggibili dell'ultima esecuzione anche in
   `~/.local/state/log/klamav-py/scan-errors.log`, oltre che nel journal.
   Chi ha salvato quarantena, connessione o cartelle escluse dalla GUI con
-  una versione precedente ottiene l'opzione al prossimo salvataggio delle
-  Impostazioni o della Pianificazione.
+  una versione precedente ottiene l'opzione quando la GUI riscrive il suo
+  drop-in: con la 0.1.14 a un salvataggio delle Impostazioni o della
+  Pianificazione fatto dopo aver chiuso («Esci» dalla tray) e riaperto la
+  GUI, perché una finestra aperta prima dell'aggiornamento esegue ancora
+  la versione precedente; dalla 0.1.15 all'avvio, senza salvare (vedi la
+  0.1.15).
 - Un percorso da scansionare non valido ha un messaggio per ciascun caso:
   inesistente, collegamento simbolico rotto (con la destinazione), né
   directory né file regolare (`klamav-py scan /dev/null`, una FIFO), non
