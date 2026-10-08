@@ -44,6 +44,13 @@ sono in `docs/CHANGELOG-archive.md`.
   gli errori».
 
 ### Corretto
+- **Il motivo di una scansione non completata resta in Cronologia.** La
+  voce diceva solo «Manuale (non completata)» o «Programmata (non
+  completata)»: il motivo (cartella inesistente o non leggibile, clamd
+  irraggiungibile) stava nello stato e nel referto, che spariscono alla
+  chiusura. Ora è nella colonna «Motivo» della Cronologia, anche per una
+  programmata rinviata. Le voci già salvate restano leggibili, senza
+  motivo.
 - Il pacchetto Arch non dipendeva da `hicolor-icon-theme`, pur
   installando l'icona in quel tema (errore di namcap).
 

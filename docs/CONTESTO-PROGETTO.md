@@ -292,7 +292,10 @@ nulla fa perdere tempo.
   collega `aborted`; stato, referto (titolo «Scansione non completata»,
   esito «Non completata: <motivo>»), notifica e Cronologia («Manuale (non
   completata)») usano il testo della pianificazione interna per lo stesso
-  caso. `aborted` è emesso **prima** di `error` con lo stesso testo: la
+  caso. Dalla 0.1.15 il motivo resta anche nella voce di Cronologia
+  (chiave `reason`, colonna «Motivo»), per la manuale, la programmata non
+  completata e la programmata rinviata.
+  `aborted` è emesso **prima** di `error` con lo stesso testo: la
   programmata collega anche `error` (riga `ERRORE SISTEMA` nel log, come
   nella lista della manuale, e conteggio nella notifica finale) e salta il
   messaggio uguale al motivo di `aborted`, già scritto una volta per serie
@@ -384,6 +387,13 @@ nulla fa perdere tempo.
   `ScanWorker` e `HistoryManager.add_entry` passano un `ScanTotals`
   invece di interi posizionali; un contatore nuovo è un campo con default
   0, e le voci di cronologia vecchie si leggono con `from_entry`.
+- **Formato della voce di Cronologia** (0.1.15, un'unica estensione per
+  guasti e motivo): `timestamp`, `type`, `target`, i campi di
+  `ScanTotals` (`io_faults` compreso) e le chiavi facoltative `log_file`
+  e `reason`. Ogni chiave successiva alla prima versione ha un valore per
+  chi non la ha e un solo punto di lettura: `ScanTotals.from_entry` per i
+  contatori (assente = 0), `HistoryManager.entry_reason` per il motivo
+  (assente o non stringa = nessuno). Nessuna migrazione del file.
 
 ### Segnalazioni non spostate e presa visione
 

@@ -826,21 +826,38 @@ class HistoryManager:
                 file=sys.stderr,
             )
 
+    # Formato della voce: timestamp, type, target, i campi di ScanTotals,
+    # e due chiavi facoltative, log_file e reason. Ogni chiave aggiunta
+    # dopo la prima versione ha un valore per le voci che non la hanno, e
+    # un solo punto di lettura: ScanTotals.from_entry per i contatori
+    # (assenti = 0, così io_faults della 0.1.15), entry_reason per il
+    # motivo (assente = nessun motivo). Le voci vecchie restano leggibili
+    # senza migrazione.
+
+    @staticmethod
+    def entry_reason(entry: dict) -> str:
+        """Motivo di una scansione non completata o rinviata; "" per le
+        altre voci e per quelle scritte prima della 0.1.15."""
+        reason = entry.get("reason")
+        return reason if isinstance(reason, str) else ""
+
     def add_entry(
         self,
         scan_type: str,
         target: str,
         totals: ScanTotals | None = None,
         log_file: str | None = None,
+        reason: str | None = None,
     ):
-        # I contatori sono i campi di ScanTotals. Le voci scritte da
-        # versioni precedenti non hanno i campi più recenti (too_large,
-        # unreadable_dirs): si leggono con ScanTotals.from_entry, che li
-        # vale 0. None = nessun file controllato (scansione rinviata).
+        # I contatori sono i campi di ScanTotals. None = nessun file
+        # controllato (scansione rinviata).
         # log_file, se presente, punta al log dettagliato su disco
         # (scansioni background: il dettaglio infetti/errori non vive
         # in nessuna lista UI, quindi senza questo riferimento sarebbe
         # irrecuperabile).
+        # reason: perché la scansione non è stata completata o è stata
+        # rinviata. Stato, referto e notifica non sopravvivono alla
+        # sessione: senza, in Cronologia restava solo «(non completata)».
         entries = self.get_entries()
         entry = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -850,6 +867,8 @@ class HistoryManager:
         }
         if log_file is not None:
             entry["log_file"] = log_file
+        if reason:
+            entry["reason"] = reason
         entries.append(entry)
         if len(entries) > 1000:
             entries = entries[-1000:]
@@ -1445,6 +1464,7 @@ class ScanPage(QWidget):
             "Manuale" if aborted is None else "Manuale (non completata)",
             self.path_edit.text(),
             totals,
+            reason=aborted,
         )
         if hasattr(main_window, 'history_page'):
             main_window.history_page.refresh()
@@ -2151,10 +2171,10 @@ class HistoryPage(QWidget):
         layout.addWidget(desc)
         layout.addSpacing(10)
 
-        self.table = QTableWidget(0, 10)
+        self.table = QTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels(
             ["Data e Ora", "Tipo", "Percorso", "Scansionati", "Infetti", "Errori", "Non verificati",
-             "Cartelle non leggibili", "Già valutati", "Guasti di I/O"]
+             "Cartelle non leggibili", "Già valutati", "Guasti di I/O", "Motivo"]
         )
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -2213,6 +2233,14 @@ class HistoryPage(QWidget):
             if totals.io_faults:
                 faults_item.setToolTip(io_fault_note(totals.io_faults))
             self.table.setItem(row, 9, faults_item)
+            # Motivo di una scansione non completata o rinviata (0.1.15):
+            # anche nel tooltip del tipo, perché la colonna è l'ultima.
+            reason = HistoryManager.entry_reason(entry)
+            reason_item = QTableWidgetItem(reason)
+            reason_item.setToolTip(reason)
+            self.table.setItem(row, 10, reason_item)
+            if reason:
+                self.table.item(row, 1).setToolTip(reason)
 
             # Il log dettagliato (se esiste) è raggiungibile dal tooltip
             # sulla riga: senza questo, il riferimento nel JSON sarebbe
@@ -4150,13 +4178,15 @@ X-GNOME-Autostart-enabled=true
             if not self._schedule_skip_noted:
                 self._schedule_skip_noted = True
                 target_str = self.settings.value("schedule_target", str(Path.home()))
-                self.history_manager.add_entry("Programmata (rinviata)", target_str)
+                reason = "Un'altra scansione è in corso. Partirà appena termina."
+                self.history_manager.add_entry(
+                    "Programmata (rinviata)", target_str, reason=reason
+                )
                 if hasattr(self, "history_page"):
                     self.history_page.refresh()
                 self.tray_icon.showMessage(
                     APP_NAME,
-                    "Scansione programmata rinviata: un'altra scansione è in corso. "
-                    "Partirà appena termina.",
+                    f"Scansione programmata rinviata: {reason}",
                     _icon("dialog-information"),
                     4000,
                 )
@@ -4373,6 +4403,7 @@ X-GNOME-Autostart-enabled=true
                 target_str,
                 totals,
                 log_file=str(log_path) if log_path else None,
+                reason=aborted,
             )
             self.history_page.refresh()
 

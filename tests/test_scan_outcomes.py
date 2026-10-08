@@ -514,3 +514,59 @@ def test_cronologia_della_0_1_14_si_legge(app, tmp_path):
     ]))
     history = mw.HistoryManager(path)
     assert _history_column(history, "Guasti di I/O") == ["0", "0"]
+
+
+# -- motivo nella voce di Cronologia (0.1.15) ---------------------------------
+#
+# La voce diceva «Manuale (non completata)» o «Programmata (non completata)»
+# con il percorso; il motivo stava solo nello stato e nel referto, che non
+# sopravvivono alla sessione. «Dopo il riavvio» qui è un HistoryManager e
+# una pagina Cronologia nuovi sullo stesso file.
+
+def _reasons_after_restart(path) -> list[str]:
+    return _history_column(mw.HistoryManager(path), "Motivo")
+
+
+def test_manuale_non_completata_motivo_in_cronologia(page, tmp_path):
+    fifo = tmp_path / "coda"
+    os.mkfifo(fifo)
+    _scan(page, fifo)
+    (entry,) = page.history.get_entries()
+    assert "non è una directory né un file regolare" in entry.get("reason", "")
+    (reason,) = _reasons_after_restart(page.history.file_path)
+    assert reason.startswith("Scansione non eseguita.") and str(fifo) in reason
+
+
+def test_programmata_non_completata_motivo_in_cronologia(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", tmp_path / "logs")
+
+    class SyncWorker(ScanWorker):
+        def start(self):
+            self.run()
+
+    monkeypatch.setattr(mw, "ScanWorker", SyncWorker)
+    sparita = tmp_path / "sparita"
+    fake, _, _ = _window(tmp_path, sparita)
+    fake.history_manager = mw.HistoryManager(tmp_path / "data" / "history.json")
+    mw.MainWindow._run_scheduled_scan(fake)
+
+    (entry,) = fake.history_manager.get_entries()
+    assert entry["type"] == "Programmata (non completata)"
+    (reason,) = _reasons_after_restart(fake.history_manager.file_path)
+    assert reason.startswith("Scansione non eseguita.") and "non esiste" in reason
+
+
+def test_completata_senza_motivo_e_voci_vecchie_leggibili(app, tmp_path):
+    import json
+
+    path = tmp_path / "history.json"
+    path.write_text(json.dumps([
+        {"timestamp": "2026-10-01 10:00:00", "type": "Manuale (non completata)",
+         "target": "/x", "scanned": 0, "infections": 0, "errors": 0},
+        {"timestamp": "2026-10-01 11:00:00", "type": "Manuale", "target": "/x",
+         "reason": ["non", "una", "stringa"]},
+    ]))
+    history = mw.HistoryManager(path)
+    history.add_entry("Manuale", "/y", mw.ScanTotals(scanned=1))
+    assert "reason" not in history.get_entries()[-1]
+    assert _reasons_after_restart(path) == ["", "", ""]
