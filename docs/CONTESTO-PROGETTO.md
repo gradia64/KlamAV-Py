@@ -537,7 +537,9 @@ nulla fa perdere tempo.
   progetto. `tests/test_pyside_refcount.py` misura la perdita
   direttamente: se una 6.12.x successiva ha ancora il difetto fallisce con
   il motivo, e l'esclusione va estesa. I pacchetti Debian e Arch usano il
-  PySide6 della distribuzione, con Python ≥ 3.13.
+  PySide6 della distribuzione, con Python ≥ 3.13. Segnalata a monte come
+  [PYSIDE-3474](https://qt-project.atlassian.net/browse/PYSIDE-3474)
+  (8 ottobre 2026): seguirla per togliere o estendere l'esclusione.
 - **Il `.deb` si costruisce su Debian sid** (`dpkg-buildpackage -us -uc -b`
   dal tag firmato), come dalla 0.1.10. `python3-setuptools (>= 77)` in
   Build-Depends lo impone. Una build su Ubuntu 24.04 (debhelper 13.14,

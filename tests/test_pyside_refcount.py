@@ -12,6 +12,7 @@ Trovato nella CI della 0.1.15 (test_qthread_retire falliva su 3.10 e 3.11
 dopo il passaggio da 6.11.2 a 6.12.0). requirements.txt e pyproject.toml
 escludono la 6.12.0 per Python < 3.12; questo test dice subito, e con il
 motivo giusto, se una versione successiva ha ancora il difetto.
+Segnalato a monte: https://qt-project.atlassian.net/browse/PYSIDE-3474
 """
 
 from __future__ import annotations
