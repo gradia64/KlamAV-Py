@@ -12,7 +12,7 @@ Non sostituisce la lettura del codice: i docstring dei moduli spiegano il
 dal codice non si vede, cioè da dove viene una regola e cosa è già stato
 valutato e scartato. La sezione 9 indica dove trovare il resto.
 
-Aggiornato alla versione 0.1.14.
+Aggiornato alla versione 0.1.15.
 
 ---
 
@@ -63,7 +63,7 @@ revisioni indipendenti del codice (umane e assistite da LLM), e ogni
 reperto è stato verificato e, dove possibile, riprodotto con un test prima
 di essere corretto. Le gravità proposte dai revisori sono state ricalibrate
 sul modello di minaccia reale, in entrambe le direzioni. La suite è passata
-da una manciata di test sulla logica pura a oltre 750 test, compresi test
+da una manciata di test sulla logica pura a quasi mille test, compresi test
 della GUI in modalità offscreen e test con socket reali.
 
 **0.1.0–0.1.5 (agosto 2026) — la riscrittura.** CLI e GUI che parlano con
@@ -158,6 +158,18 @@ scan e `--acknowledge` (con `--report-only` e `--quarantine-all` anche
 fra le opzioni globali), log degli errori del timer nella
 `LogsDirectory=` della unit. Ambito della presa visione detto
 all'utente; test più rigorosi su man page e sottoprocessi.
+
+**0.1.15 (8 ottobre) — la GUI dice la stessa verità della CLI.** Il
+drop-in del timer scritto da una versione precedente si rigenera
+all'avvio della GUI, invece di aspettare un salvataggio che nessuno
+chiedeva (`--log-errors` della 0.1.14 mancava così a chi aggiornava). I
+guasti di I/O hanno la frase della CLI anche in stato, referto, notifica
+e Cronologia, e il motivo di una scansione non completata resta nella
+voce di Cronologia, con un'unica estensione del formato. Il recupero
+della quarantena, rinviato dalla 0.1.14, esce dal thread della GUI. Primo
+rilascio automatico dal tag firmato, con sottochiavi separate per tag e
+allegati; la guardia sulla HOME dei test copre ogni lancio della CLI, e
+il test dei secret ogni workflow.
 
 ---
 
@@ -676,7 +688,7 @@ rilascio.
 Già tracciati: segnalarli di nuovo è utile solo se si aggiunge uno scenario,
 una riproduzione o una correzione migliore.
 
-Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.14:
+Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.15:
 
 - **Quarantena nel thread della GUI, residui** (dopo la 0.1.15). Il
   recupero e le letture della pagina Quarantena sono nel worker; restano

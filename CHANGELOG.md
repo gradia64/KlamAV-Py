@@ -5,17 +5,7 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
-## Non rilasciato
-
-### Aggiunto
-- Rilascio automatico al push di un tag firmato: il workflow verifica che
-  il tag sia firmato con la chiave di rilascio, ripete i test, costruisce
-  il `.deb` su Debian sid e il pacchetto Arch dal tag firmato, firma tutti
-  gli allegati (`.sig` e `SHA256SUMS`), crea la release GitHub con le note
-  di questo file e aggiorna il pacchetto su AUR. Gli allegati sono firmati
-  con una sottochiave dedicata alla CI, separata da quella che firma i tag:
-  serve la chiave pubblica aggiornata. Come verificare le firme: README,
-  «Verifica dei rilasci».
+## 0.1.15 — 2026-10-08
 
 ### Modificato
 - **Il timer di sistema riceve le opzioni nuove senza salvare nulla.** Il
@@ -62,6 +52,28 @@ sono in `docs/CHANGELOG-archive.md`.
   recupero è lo stesso di prima.
 - Il pacchetto Arch non dipendeva da `hicolor-icon-theme`, pur
   installando l'icona in quel tema (errore di namcap).
+
+### Aggiunto
+- Rilascio automatico al push di un tag firmato: il workflow verifica che
+  il tag sia firmato dal maintainer, ripete i test, costruisce il `.deb`
+  su Debian sid e il pacchetto Arch dal tag firmato, firma tutti gli
+  allegati (`.sig` e `SHA256SUMS`), crea la release GitHub con le note di
+  questo file e aggiorna il pacchetto su AUR. Gli allegati sono firmati
+  con una sottochiave dedicata alla CI, separata da quella che firma i
+  tag: per verificarli serve la chiave pubblica aggiornata, da reimportare
+  con i comandi del README («Verifica dei rilasci») anche se l'avete già.
+  Per controllare: `gpg --list-keys --with-subkey-fingerprints
+  EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9` elenca due sottochiavi `[S]`,
+  fra cui `F9F4283586602F8DD724C467088861B04D8D328D`; con la chiave
+  vecchia ce n'è una sola, e `gpg --verify` sugli allegati segnala la
+  chiave pubblica mancante. Il pacchetto AUR e `git tag -v` non richiedono
+  l'aggiornamento: i tag sono firmati come prima.
+- Test: rigenerazione del drop-in all'avvio e nessuna chiamata a
+  `systemctl --user` dal thread della GUI, guasti di I/O e motivo nella
+  GUI e in Cronologia (anche con voci della 0.1.14), recupero della
+  quarantena fuori dal thread della GUI con il filesystem strumentato,
+  guardia sulla HOME dei test estesa a ogni lancio della CLI, secret dei
+  workflow solo nel job di pubblicazione. Totale: 985 test.
 
 ---
 ## 0.1.14 — 2026-10-02
