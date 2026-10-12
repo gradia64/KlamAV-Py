@@ -138,6 +138,13 @@ def test_retire_trattiene_un_riferimento():
 
 
 SCRIPT_RIPRODUZIONE = """
+import ctypes
+try:
+    # PR_SET_DUMPABLE = 4: niente core dump e niente notifica di crash
+    # (systemd-coredump, DrKonqi) per un abort voluto.
+    ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
+except (OSError, AttributeError):
+    pass
 import sys
 import time
 from PySide6.QtCore import QCoreApplication, QSemaphore, QThread, QTimer, Signal
