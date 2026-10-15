@@ -5,7 +5,7 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
-## Non rilasciato
+## 0.1.16 — 2026-10-15
 
 ### Modificato
 - **GUI con pip su Python 3.10 o 3.11: PySide6 resta alla 6.11.x.** La
@@ -50,6 +50,17 @@ sono in `docs/CHANGELOG-archive.md`.
   sistema non è più distribuita. Tolto anche `systemd/klamav-scan.timer`,
   rimasto dalla vecchia unit: nessun pacchetto lo installava, quindi chi
   aggiorna non deve fare nulla.
+
+### Aggiunto
+- Test e CI: le action di tutti i workflow sono fissate per SHA (prima
+  solo quelle del workflow di rilascio), e il controllo dei secret non si
+  lascia più ingannare da un « #» dentro una stringa; stato della pagina
+  Quarantena e guardie con un caricamento in corso; drop-in rimosso
+  all'avvio quando le impostazioni tornano predefinite; infetti e guasti
+  di I/O insieme; stessa icona per lo stesso esito in notifiche e referto;
+  nessun riferimento alla vecchia unit di sistema. I test che fanno
+  abortire apposta un processo non lasciano più core dump né notifiche di
+  crash nel desktop. Totale: 1023 test.
 
 ---
 ## 0.1.15 — 2026-10-08

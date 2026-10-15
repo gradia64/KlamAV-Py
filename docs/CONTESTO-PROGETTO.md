@@ -12,7 +12,7 @@ Non sostituisce la lettura del codice: i docstring dei moduli spiegano il
 dal codice non si vede, cioè da dove viene una regola e cosa è già stato
 valutato e scartato. La sezione 9 indica dove trovare il resto.
 
-Aggiornato alla versione 0.1.15.
+Aggiornato alla versione 0.1.16.
 
 ---
 
@@ -63,7 +63,7 @@ revisioni indipendenti del codice (umane e assistite da LLM), e ogni
 reperto è stato verificato e, dove possibile, riprodotto con un test prima
 di essere corretto. Le gravità proposte dai revisori sono state ricalibrate
 sul modello di minaccia reale, in entrambe le direzioni. La suite è passata
-da una manciata di test sulla logica pura a quasi mille test, compresi test
+da una manciata di test sulla logica pura a oltre mille test, compresi test
 della GUI in modalità offscreen e test con socket reali.
 
 **0.1.0–0.1.5 (agosto 2026) — la riscrittura.** CLI e GUI che parlano con
@@ -170,6 +170,16 @@ della quarantena, rinviato dalla 0.1.14, esce dal thread della GUI. Primo
 rilascio automatico dal tag firmato, con sottochiavi separate per tag e
 allegati; la guardia sulla HOME dei test copre ogni lancio della CLI, e
 il test dei secret ogni workflow.
+
+**0.1.16 (15 ottobre) — i controlli controllano davvero, e la GUI non
+resta muta.** Le verifiche della 0.1.15 hanno trovato controlli della CI
+con falsi negativi (action per tag mobile in `tests.yml`, commenti YAML
+tagliati dentro le stringhe), avvisi e pulsanti che non dicevano la cosa
+giusta (impostazioni non valide presentate come un drop-in vecchio,
+Ripristina ed Elimina attivi senza quarantena, la spunta verde con soli
+errori) e percorsi difensivi mai esercitati. Ognuno ha ora una regola
+sola (`DropinSettingsError`, `QuarantineStatus`, `scan_outcome`) e un
+test; tolto anche il timer di sistema rimasto dalla 0.1.9.
 
 ---
 
@@ -741,7 +751,7 @@ rilascio.
 Già tracciati: segnalarli di nuovo è utile solo se si aggiunge uno scenario,
 una riproduzione o una correzione migliore.
 
-Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.15:
+Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.16:
 
 - **Quarantena nel thread della GUI, residui** (dopo la 0.1.15). Il
   recupero e le letture della pagina Quarantena sono nel worker; restano
@@ -802,6 +812,16 @@ Annotati nella 0.1.14:
   Limite noto, non toccato: i tag del progetto non hanno revisione.
 - Residuo nei test: `tests/test_settings_exclusions.py` imposta
   `_schedule_missing_noted`, attributo non più usato in produzione.
+
+Annotati nella 0.1.16:
+
+- **Messaggi di `error` nella scansione manuale:** la programmata interna
+  li conta (`_bg_errors`) e passano a `scan_outcome` come problemi
+  (icona di avviso); nella manuale compaiono in lista come «ERRORE
+  SISTEMA» ma non cambiano esito né icona. Stessa regola, ingressi
+  diversi: da allineare se si decide che contano anche lì.
+- **Drop-in rimosso all'avvio** (impostazioni tornate predefinite):
+  l'avviso dice «aggiornato alla versione …», non «rimosso».
 
 ---
 
