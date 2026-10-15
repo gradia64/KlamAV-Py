@@ -569,3 +569,69 @@ def test_completata_senza_motivo_e_voci_vecchie_leggibili(app, tmp_path):
     history.add_entry("Manuale", "/y", mw.ScanTotals(scanned=1))
     assert "reason" not in history.get_entries()[-1]
     assert _reasons_after_restart(path) == ["", "", ""]
+
+
+# -- infetti e guasti insieme (0.1.16) ----------------------------------------
+#
+# I test qui sopra coprono i guasti senza infetti. Con entrambi, i contatori
+# dicono quanti degli errori sono guasti, la notifica tiene l'icona degli
+# infetti e il testo nomina comunque il guasto.
+
+def _infected_client():
+    base = _ok_client()
+
+    class Client(base):
+        def _instream_one(self, target, max_stream_size):
+            if Path(target).name == "a.txt":
+                return ScanResult(str(target), "FOUND", "Eicar-Test-Signature")
+            return super()._instream_one(target, max_stream_size)
+
+    return Client
+
+
+@pytest.fixture
+def icons(monkeypatch):
+    """_icon sostituita: la notifica riceve il nome del tema."""
+    monkeypatch.setattr(mw, "_icon", lambda *names: names[0])
+
+
+def test_manuale_infetti_e_guasti_contatori_e_notifica(page, eio_tree, icons, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    client = _infected_client()
+    monkeypatch.setattr(mw.ClamdEndpoint, "new_client", lambda self, **k: client())
+    shown = []
+    # La pagina è la finestra: window() la restituisce, e la tray è sua.
+    page.tray_icon = SimpleNamespace(showMessage=lambda *a: shown.append(a))
+    _scan(page, eio_tree)
+    assert "1 infetti" in page.counts_label.text()
+    assert "1 errori (di cui 1 guasti di I/O)" in page.counts_label.text()
+    ((title, text, icon, _),) = shown
+    assert icon == "emblem-virus"
+    assert "1 " + FAULT_TEXT in text
+    ((_, report),) = page.reports
+    assert "Esito: Infezioni rilevate" in report and "1 " + FAULT_TEXT in report
+
+
+def test_programmata_infetti_e_guasti_contatori_e_notifica(app, tmp_path, eio_tree, icons, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", tmp_path / "logs")
+    client = _infected_client()
+
+    class SyncWorker(ScanWorker):
+        def __init__(self, **kw):
+            super().__init__(client_factory=client, **kw)
+
+        def start(self):
+            self.run()
+
+    monkeypatch.setattr(mw, "ScanWorker", SyncWorker)
+    fake, _, entries = _window(tmp_path, eio_tree)
+    shown = []
+    fake.tray_icon.showMessage = lambda *a: shown.append(a)
+    mw.MainWindow._run_scheduled_scan(fake)
+    ((args, _),) = entries
+    # Il riepilogo della pagina Pianificazione (_totals_summary).
+    assert "1 infetti, 1 errori (di cui 1 guasti di I/O)" in mw._totals_summary(args[2])
+    (_, status, icon, _) = shown[-1]
+    assert icon == "emblem-virus"
+    assert "1 infetti" in status and "1 " + FAULT_TEXT in status

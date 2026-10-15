@@ -162,3 +162,123 @@ def test_messaggio_della_scansione_per_stato():
     assert "Impossibile preparare: X" in failed and "Aggiorna" in failed
     # Senza pagina Quarantena (finestra minima): come il caricamento.
     assert message(None) == message(status_cls(status_cls.LOADING))
+
+
+# -- guardie con un caricamento in corso (0.1.15, test nella 0.1.16) ----------
+
+class _Gate:
+    """load_quarantine trattenuto su un Event finché il test non lo apre:
+    il caricamento resta in corso senza sleep."""
+
+    def __init__(self, monkeypatch):
+        self.real = ql.load_quarantine
+        self.calls: list[Path] = []
+        self.open = threading.Event()
+        self.started = threading.Event()
+        monkeypatch.setattr(ql, "load_quarantine", self._load)
+
+    def _load(self, directory, quarantine=None):
+        self.calls.append(Path(directory))
+        self.started.set()
+        assert self.open.wait(10), "caricamento mai sbloccato"
+        return self.real(directory, quarantine)
+
+
+def _quarantined(qdir: Path, home: Path, name: str):
+    """Una voce in quarantena in qdir, scritta da un altro oggetto."""
+    from klamav_py.quarantine import Quarantine
+
+    home.mkdir(parents=True, exist_ok=True)
+    victim = home / name
+    victim.write_bytes(name.encode())
+    Quarantine(qdir).quarantine_file(victim, "Sig." + name)
+
+
+def _names(page) -> list[str]:
+    return sorted(Path(page.table.item(r, 0).text()).name for r in range(page.table.rowCount()))
+
+
+def test_esito_di_una_cartella_superata_scartato(app, tmp_path):
+    """_on_loaded con la directory di prima: niente elenco né oggetto di
+    quella cartella, e un nuovo caricamento per quella attuale."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    _quarantined(a, tmp_path / "home", "da_a.exe")
+    _quarantined(b, tmp_path / "home", "da_b.exe")
+    win, scan, page = _window(b, tmp_path)
+    _wait(page)
+    assert _names(page) == ["da_b.exe"]
+
+    page._on_loaded(a, ql.load_quarantine(a))  # arrivato in ritardo
+    assert _names(page) != ["da_a.exe"]
+    assert page.quarantine.dir == b
+    _wait(page)
+    assert _names(page) == ["da_b.exe"] and page.quarantine.dir == b
+    assert scan.quarantine.dir == b
+
+
+def test_cambio_di_cartella_durante_il_caricamento(app, tmp_path, monkeypatch):
+    a, b = tmp_path / "a", tmp_path / "b"
+    _quarantined(a, tmp_path / "home", "da_a.exe")
+    _quarantined(b, tmp_path / "home", "da_b.exe")
+    gate = _Gate(monkeypatch)
+    win, scan, page = _window(a, tmp_path)
+    assert gate.started.wait(10)
+    scan.set_quarantine_dir(b)
+    page.load(b)  # Impostazioni: nuova cartella mentre a è in caricamento
+    gate.open.set()
+    _wait(page)
+    assert gate.calls == [a, b]
+    assert _names(page) == ["da_b.exe"] and page.quarantine.dir == b
+    assert scan.quarantine is not None and scan.quarantine.dir == b
+
+
+def test_aggiorna_durante_il_caricamento_ripetuto_alla_fine(app, tmp_path, monkeypatch):
+    qdir = tmp_path / "q"
+    _quarantined(qdir, tmp_path / "home", "primo.exe")
+    gate = _Gate(monkeypatch)
+    win, scan, page = _window(qdir, tmp_path)
+    assert gate.started.wait(10)
+    # Una voce nuova mentre il caricamento è in corso, poi «Aggiorna».
+    _quarantined(qdir, tmp_path / "home", "secondo.exe")
+    page.refresh()
+    assert gate.calls == [qdir], "un secondo caricamento in parallelo al primo"
+    gate.open.set()
+    _wait(page)
+    assert gate.calls == [qdir, qdir]
+    assert _names(page) == ["primo.exe", "secondo.exe"]
+
+
+def test_errore_di_lettura_dell_elenco(app, tmp_path, monkeypatch):
+    """list_entries che solleva OSError: QuarantineSnapshot.error, la pagina
+    lo mostra come «fallita», l'oggetto arriva comunque alla pagina
+    Scansione."""
+    from klamav_py.quarantine import Quarantine
+
+    def broken(self):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(Quarantine, "list_entries", broken)
+    qdir = tmp_path / "q"
+    snapshot = ql.load_quarantine(qdir)
+    assert snapshot.error and "Input/output error" in snapshot.error
+    assert snapshot.entries == []
+
+    win, scan, page = _window(qdir, tmp_path)
+    _wait(page)
+    assert "Impossibile leggere la quarantena" in page.health_label.text()
+    assert "Input/output error" in page.health_label.text()
+    assert page.table.rowCount() == 0 and _buttons(page) == (False, False)
+    assert page.quarantine is not None and scan.quarantine is page.quarantine
+
+
+def test_quarantena_di_una_cartella_precedente_ignorata(app, tmp_path):
+    from klamav_py.quarantine import Quarantine
+
+    scan = mw.ScanPage(mw.ClamdEndpoint(), tmp_path / "a", mw.HistoryManager(tmp_path / "h.json"))
+    old = Quarantine(tmp_path / "a")
+    scan.set_quarantine_dir(tmp_path / "b")
+    scan.set_quarantine(old)  # pronta per a, arrivata dopo il cambio
+    assert scan.quarantine is None
+    new = Quarantine(tmp_path / "b")
+    scan.set_quarantine(new)
+    assert scan.quarantine is new

@@ -240,6 +240,26 @@ def test_quarantena_non_valida_avviso_sulle_impostazioni(env, inline, monkeypatc
     assert env.dropin.read_text() == old and inline.reload == 0
 
 
+@pytest.mark.parametrize("altri", [False, True], ids=["solo-nostro", "con-altri-drop-in"])
+def test_impostazioni_tornate_predefinite_drop_in_rimosso(env, inline, capsys, altri):
+    """Tutto predefinito (render_dropin → None) e un drop-in nostro ancora
+    presente: refresh_outdated lo toglie, con la directory se resta vuota,
+    daemon-reload e avviso."""
+    _write(env.dropin, _dropin_0_1_13(env.quarantine))
+    other = env.dropin.parent / "10-altro.conf"
+    if altri:
+        other.write_text("[Service]\nNice=5\n")
+    env.settings.setValue("quarantine_dir", str(mw.DEFAULT_QUARANTINE_DIR))
+    page = _startup(env)
+    assert not env.dropin.exists()
+    assert env.dropin.parent.exists() is altri
+    if altri:
+        assert other.read_text() == "[Service]\nNice=5\n"
+    assert inline.reload == 1
+    assert page.dropin_notice_label.text() and str(env.dropin) in page.dropin_notice_label.text()
+    assert str(env.dropin) in capsys.readouterr().err
+
+
 def test_salvataggio_nel_frattempo_vince(env):
     """Il worker ha letto lo stato prima di un salvataggio: il drop-in
     scritto dal salvataggio non va sovrascritto con lo stato vecchio."""
@@ -282,15 +302,22 @@ def _instrument(monkeypatch):
 
 def _settle():
     """I risultati arrivano con un segnale queued: si elaborano gli eventi
-    finché i thread daemon dei controlli non sono finiti."""
+    finché per due giri di fila non ci sono thread dei controlli vivi.
+    Un giro solo non basta: l'ultimo processEvents può consegnare un
+    risultato che avvia un altro controllo (0.1.16: prima quel thread non
+    veniva atteso)."""
     app = QApplication.instance()
     deadline = time.monotonic() + 10
+    quiet = 0
     while time.monotonic() < deadline:
         app.processEvents()
-        if not any(t.name == "klamav-fs-check" for t in threading.enumerate()):
-            app.processEvents()
+        if any(t.name == "klamav-fs-check" for t in threading.enumerate()):
+            quiet = 0
+            time.sleep(0.01)
+            continue
+        quiet += 1
+        if quiet == 2:
             return
-        time.sleep(0.01)
     pytest.fail("controlli fuori thread non terminati")
 
 
