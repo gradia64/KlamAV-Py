@@ -281,9 +281,64 @@ def _jobs(text: str) -> dict:
     return dict(zip(parts[1::2], parts[2::2]))
 
 
+_BLOCK_SCALAR = re.compile(r"""(?:^|[:\-\s])[|>][0-9+-]*\s*(?:#.*)?$""")
+
+
+def _strip_comment(line: str) -> str:
+    """La riga senza il commento YAML: «#» a inizio riga, o preceduto da
+    uno spazio fuori da apici e da ${{ … }}. Dentro una stringa
+    («echo "nota #1 ${{ secrets.X }}"») non è un commento."""
+    quote = None
+    expr = 0
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if expr:
+            if line.startswith("}}", i):
+                expr -= 1
+                i += 2
+                continue
+        elif quote == "'":
+            if c == "'":
+                quote = None
+        elif quote == '"':
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+        elif c == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i].rstrip()
+        elif c in "'\"" and (i == 0 or line[i - 1] in " \t:-[{,"):
+            quote = c
+        if line.startswith("${{", i):
+            expr += 1
+            i += 3
+            continue
+        i += 1
+    return line
+
+
 def _without_comments(text: str) -> str:
-    return "\n".join(line.split(" #", 1)[0] for line in text.splitlines()
-                     if not line.lstrip().startswith("#"))
+    """Il testo di un workflow senza i commenti YAML. Le righe di un blocco
+    letterale («run: |») restano intere: lì «#» è testo per la shell, e
+    GitHub sostituisce comunque le espressioni ${{ … }} che contiene."""
+    out = []
+    block = None  # indentazione della chiave che ha aperto il blocco
+    for line in text.splitlines():
+        indent = len(line) - len(line.lstrip())
+        if block is not None:
+            if not line.strip() or indent > block:
+                out.append(line)
+                continue
+            block = None
+        if line.lstrip().startswith("#"):
+            continue
+        stripped = _strip_comment(line)
+        if _BLOCK_SCALAR.search(stripped):
+            block = indent
+        out.append(stripped)
+    return "\n".join(out)
 
 
 _SECRETS = re.compile(r"\bsecrets\b")
@@ -313,6 +368,35 @@ def secret_readers(workflows: dict[str, str]) -> list[str]:
     return found
 
 
+_PINNED = re.compile(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}")
+
+
+def unpinned_actions(workflows: dict[str, str]) -> list[str]:
+    """«file: action» di ogni action esterna non fissata per SHA, in tutti
+    i workflow (0.1.16: prima solo release.yml). Unica eccezione le action
+    e i workflow locali (./)."""
+    found = []
+    for name, text in sorted(workflows.items()):
+        for ref in re.findall(r"^\s*(?:-\s+)?uses:\s*(\S+)", _without_comments(text), re.M):
+            ref = ref.strip("'\"")
+            if not ref.startswith("./") and not _PINNED.fullmatch(ref):
+                found.append(f"{name}: {ref}")
+    return found
+
+
+# Nessun job firma tag o usa la chiave primaria (solo gli allegati); nessun
+# workflow imposta gli override KLAMAV_* di tools/release-keys.sh, che
+# farebbero accettare a verify-tag.sh un tag firmato da un'altra
+# sottochiave, quella della CI compresa.
+_FORBIDDEN = ("git tag", "export-secret-keys", "KLAMAV_")
+
+
+def forbidden_mentions(workflows: dict[str, str]) -> list[str]:
+    """«file: testo» di ogni uso vietato, commenti esclusi."""
+    return [f"{name}: {word}" for name, text in sorted(workflows.items())
+            for word in _FORBIDDEN if word in _without_comments(text)]
+
+
 def _workflows() -> dict[str, str]:
     return {p.name: p.read_text(encoding="utf-8")
             for p in sorted((ROOT / ".github/workflows").glob("*.y*ml"))}
@@ -323,23 +407,15 @@ def test_workflow_verifica_il_tag_e_isola_i_secret():
     text = workflows["release.yml"]
     jobs = _jobs(text)
     assert "tools/verify-tag.sh" in jobs["verify"] and "tools/check-version.sh" in jobs["verify"]
-    # Nessun job firma tag o usa la chiave primaria: solo gli allegati.
-    assert "git tag" not in text and "export-secret-keys" not in text
+    assert forbidden_mentions(workflows) == []
     # I secret solo nel job publish, nell'environment protetto, in tutti i
     # workflow (0.1.15: prima solo i job di release.yml).
     assert "secrets." in jobs["publish"]
     assert secret_readers(workflows) == []
-    # I ruoli delle chiavi di tools/release-keys.sh hanno un override da
-    # ambiente (KLAMAV_*, per i test): un workflow che lo impostasse
-    # farebbe accettare a verify-tag.sh un tag firmato da un'altra
-    # sottochiave, quella della CI compresa.
-    for name, body in workflows.items():
-        assert "KLAMAV_" not in body, name
-    # Ogni action esterna è fissata per SHA.
-    for ref in re.findall(r"uses:\s*([^\s#]+)", text):
-        if ref.startswith("./"):
-            continue
-        assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", ref), ref
+    # Ogni action esterna è fissata per SHA, in ogni workflow: tests.yml
+    # gira anche dentro release.yml e decide i test da cui dipende il
+    # rilascio.
+    assert unpinned_actions(workflows) == []
 
 
 @pytest.mark.parametrize("workflows", [
@@ -353,7 +429,18 @@ def test_workflow_verifica_il_tag_e_isola_i_secret():
     # env: a livello di workflow, visibile a tutti i job.
     {"tests.yml": "on: push\nenv:\n  K: ${{ secrets.AUR_SSH_PRIVATE_KEY }}\njobs:\n"
                   "  test:\n    steps: []\n"},
-], ids=["altro-job", "senza-environment", "altro-workflow", "env-globale"])
+    # « #» dentro una stringa non apre un commento (0.1.16: prima sì).
+    {"tests.yml": 'on: push\njobs:\n  test:\n    steps:\n'
+                  '      - run: echo "nota #1 ${{ secrets.X }}"\n'},
+    {"tests.yml": "on: push\njobs:\n  test:\n    steps:\n"
+                  "      - run: echo 'nota #1 ${{ secrets.X }}'\n"},
+    # In un blocco letterale « #» è testo per la shell, e GitHub sostituisce
+    # comunque l'espressione.
+    {"tests.yml": "on: push\njobs:\n  test:\n    steps:\n      - run: |\n"
+                  "          echo ok  # ${{ secrets.X }}\n"
+                  "          # ${{ secrets.Y }}\n"},
+], ids=["altro-job", "senza-environment", "altro-workflow", "env-globale",
+        "stringa-doppia", "stringa-singola", "blocco-letterale"])
 def test_controllo_dei_secret_vede_le_letture_fuori_da_publish(workflows):
     assert secret_readers(workflows), workflows
 
@@ -364,9 +451,51 @@ def test_controllo_dei_secret_accetta_publish_e_commenti():
                        "jobs:\n  verify:\n    steps: []\n  publish:\n"
                        "    environment: release\n    steps:\n      - env:\n"
                        "          K: ${{ secrets.GPG_PRIVATE_KEY }}  # firma\n",
-        "tests.yml": "on: push\njobs:\n  test:\n    steps: []\n",
+        # Un commento vero dopo una direttiva non viene letto da GitHub.
+        "tests.yml": "on: push\njobs:\n  test:\n    steps:\n"
+                     "      - run: echo ok  # ${{ secrets.X }}\n"
+                     '      - run: "echo #1"  # ${{ secrets.Y }}\n',
     }
     assert secret_readers(workflows) == []
+
+
+def test_action_per_tag_mobile_rifiutata_in_ogni_workflow():
+    workflows = {
+        "release.yml": "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@"
+                       + "a" * 40 + "  # v7.0.1\n",
+        "altro.yml": "jobs:\n  b:\n    steps:\n      - uses: actions/checkout@v5\n"
+                     "      - uses: 'actions/setup-python@v6'\n"
+                     "      - name: x\n        uses: owner/repo/sub@main\n",
+    }
+    assert unpinned_actions(workflows) == [
+        "altro.yml: actions/checkout@v5", "altro.yml: actions/setup-python@v6",
+        "altro.yml: owner/repo/sub@main"]
+
+
+def test_action_locali_e_commenti_non_contano():
+    workflows = {"tests.yml": "jobs:\n  a:\n    uses: ./.github/workflows/x.yml\n"
+                              "  b:\n    steps:\n      # - uses: actions/checkout@v5\n"
+                              "      - uses: actions/checkout@" + "b" * 40 + "  # v5\n"}
+    assert unpinned_actions(workflows) == []
+
+
+def test_usi_vietati_visti_fuori_dai_commenti():
+    assert forbidden_mentions({"release.yml": "jobs:\n  a:\n    steps:\n"
+                                              "      - run: git tag -s v1\n"}) == [
+        "release.yml: git tag"]
+    assert forbidden_mentions({"tests.yml": "env:\n  KLAMAV_CI_SIGNING_SUBKEY: X\n"}) == [
+        "tests.yml: KLAMAV_"]
+    assert forbidden_mentions({"tests.yml": "jobs:\n  a:\n    steps:\n      - run: |\n"
+                                            "          # git tag -s v1\n"}) == [
+        "tests.yml: git tag"]
+
+
+def test_usi_vietati_nei_commenti_ammessi():
+    workflows = {"release.yml": "# il tag lo firma il maintainer con git tag -s,\n"
+                                "# gli override KLAMAV_* restano ai test\n"
+                                "jobs:\n  a:\n    steps:\n"
+                                "      - run: echo ok  # niente git tag qui\n"}
+    assert forbidden_mentions(workflows) == []
 
 
 def test_ruoli_delle_chiavi_coerenti_con_la_chiave_pubblica(tmp_path):

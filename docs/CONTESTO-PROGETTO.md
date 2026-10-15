@@ -630,6 +630,16 @@ Ordine, per ogni versione:
   push del tag e non prima.
 - **Chiave host di AUR fissata** in `tools/publish-aur.sh`, verificata
   contro l'impronta pubblicata da aur.archlinux.org.
+- **Action fissate per SHA in ogni workflow** (dalla 0.1.16; prima solo
+  in `release.yml`), con la versione nel commento. `tests.yml` non vede i
+  secret, ma gira anche dentro il workflow di rilascio e ne decide i test:
+  un tag riscritto a monte eseguirebbe lì codice non verificato. Unica
+  eccezione le action e i workflow locali (`./`). I controlli di
+  `tests/test_release_tools.py` leggono i workflow senza i commenti YAML,
+  e un commento è tale solo a inizio riga o dopo uno spazio fuori da
+  apici e da `${{ … }}`; le righe di un blocco `run: |` restano intere,
+  perché GitHub sostituisce le espressioni anche in un commento della
+  shell. Niente PyYAML: il parser è nel test, con i suoi casi fittizi.
 
 Un assistente automatico (sessione LLM in un ambiente cloud) può preparare i
 punti 1, 2 e le note della release, ma non il 3: non ha la chiave di
