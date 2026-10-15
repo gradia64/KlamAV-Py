@@ -688,6 +688,16 @@ rilascio.
   `quarantine.py` sono le stesse: cambia solo il thread. Un errore del
   costruttore, che prima impediva l'avvio della GUI, è un messaggio nella
   pagina. `tests/test_quarantine_loader.py` strumenta `os` e `open`.
+- **Stato esplicito della pagina Quarantena** (0.1.16): `QuarantineStatus`
+  (caricamento, pronta, fallita con il motivo), cambiato solo da
+  `QuarantinePage._set_status`. Ripristina ed Elimina sono attivi solo a
+  quarantena pronta; «Metti in quarantena» senza un oggetto pronto nella
+  pagina Scansione legge lo stato della pagina Quarantena
+  (`quarantine_unavailable_message`): in caricamento «attendi», fallita il
+  motivo e «Aggiorna», perché un caricamento fallito non riparte da solo.
+  Un errore di lettura dell'elenco (`QuarantineSnapshot.error`) vale come
+  «fallita» per la pagina, anche se l'oggetto `Quarantine` è valido e la
+  pagina Scansione lo riceve comunque.
 - **Contare non è recuperare.** Chi deve solo guardare l'indice (le
   Impostazioni che contano le voci della quarantena che si lascia) usa
   `peek_entries()`: niente lock, niente recupero, niente creazione della

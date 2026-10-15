@@ -29,6 +29,14 @@ sono in `docs/CHANGELOG-archive.md`.
   Ora l'avviso nomina l'impostazione e rimanda alle Impostazioni, e il
   drop-in non viene toccato. Per controllare: nessuna azione richiesta;
   correggere il valore nelle Impostazioni e salvare fa sparire l'avviso.
+- **Pagina Quarantena: pulsanti attivi solo quando servono.** Dopo un
+  errore nel preparare la quarantena (per esempio una cartella che è un
+  file) Ripristina ed Elimina restavano attivi senza fare nulla, e «Metti
+  in quarantena» nella pagina Scansione rispondeva «riprova tra poco»
+  anche se il caricamento non sarebbe ripartito da solo. Ora i due
+  pulsanti sono attivi solo a quarantena caricata, e la pagina Scansione
+  dice il motivo e di premere «Aggiorna» nella pagina Quarantena (durante
+  il caricamento: di attendere).
 
 ---
 ## 0.1.15 — 2026-10-08

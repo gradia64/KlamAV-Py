@@ -1376,9 +1376,9 @@ class ScanPage(QWidget):
             QMessageBox.information(self, "Nessuna selezione", "Seleziona uno o più file infetti dalla lista.")
             return
         if self.quarantine is None:
+            page = getattr(self.window(), "quarantine_page", None)
             QMessageBox.information(
-                self, "Quarantena in caricamento",
-                "La quarantena non è ancora pronta (vedi la pagina Quarantena): riprova tra poco.",
+                self, *quarantine_unavailable_message(getattr(page, "status", None))
             )
             return
 
@@ -1552,6 +1552,46 @@ class ScanPage(QWidget):
             _retire_qthread(worker)
 
 
+@dataclass(frozen=True)
+class QuarantineStatus:
+    """
+    Stato della pagina Quarantena, unico punto di verità per i pulsanti
+    della pagina e per i messaggi di «Metti in quarantena» nella pagina
+    Scansione (0.1.16): prima Ripristina ed Elimina tornavano attivi dopo
+    un errore senza fare nulla al clic, e la pagina Scansione diceva
+    «riprova tra poco» anche quando il caricamento era fallito e non
+    sarebbe ripartito da solo.
+    """
+
+    LOADING = "caricamento"
+    READY = "pronta"
+    FAILED = "fallita"
+
+    kind: str
+    reason: str | None = None  # solo per FAILED
+
+    @property
+    def ready(self) -> bool:
+        return self.kind == self.READY
+
+
+def quarantine_unavailable_message(status: QuarantineStatus | None) -> tuple[str, str]:
+    """(titolo, testo) per «Metti in quarantena» senza una quarantena
+    pronta nella pagina Scansione. None (nessuna pagina Quarantena) vale
+    come caricamento in corso."""
+    if status is not None and status.kind == QuarantineStatus.FAILED:
+        return (
+            "Quarantena non disponibile",
+            f"{status.reason}\n\nCorreggi la cartella nelle Impostazioni, se serve, poi "
+            "premi «Aggiorna» nella pagina Quarantena: il caricamento non riparte da solo.",
+        )
+    return (
+        "Quarantena in caricamento",
+        "La quarantena è ancora in caricamento (vedi la pagina Quarantena): attendi "
+        "qualche istante e riprova.",
+    )
+
+
 class QuarantinePage(QWidget):
     """
     Elenco della quarantena. Creazione dell'oggetto Quarantine (con il
@@ -1571,6 +1611,7 @@ class QuarantinePage(QWidget):
         self.quarantine: Quarantine | None = None
         self.worker: QuarantineLoadWorker | None = None
         self._reload_pending = False
+        self.status = QuarantineStatus(QuarantineStatus.LOADING)
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["File originale", "Firma", "In quarantena dal"])
@@ -1647,10 +1688,7 @@ class QuarantinePage(QWidget):
             self._reload_pending = True
             return
         self._reload_pending = False
-        self.loading_label.setText(f"Caricamento della quarantena in «{self.quarantine_dir}»…")
-        self.loading_label.setVisible(True)
-        self.restore_button.setEnabled(False)
-        self.delete_button.setEnabled(False)
+        self._set_status(QuarantineStatus(QuarantineStatus.LOADING))
         self.worker = QuarantineLoadWorker(self.quarantine_dir, self.quarantine)
         self.worker.loaded.connect(self._on_loaded)
         self.worker.start()
@@ -1663,13 +1701,8 @@ class QuarantinePage(QWidget):
         if self._reload_pending or directory != self.quarantine_dir:
             self.refresh()  # superato da una richiesta o da un cambio di cartella
             return
-        self.loading_label.setVisible(False)
-        self.restore_button.setEnabled(True)
-        self.delete_button.setEnabled(True)
         if isinstance(result, Exception):
-            self.table.setRowCount(0)
-            self.health_label.setText(f"Impossibile preparare la quarantena «{directory}»: {result}")
-            self.health_label.setVisible(True)
+            self._fail(f"Impossibile preparare la quarantena «{directory}»: {result}")
             return
         fresh = self.quarantine is not result.quarantine
         self.quarantine = result.quarantine
@@ -1677,15 +1710,34 @@ class QuarantinePage(QWidget):
         if fresh:
             self.quarantine_ready.emit(result.quarantine)
 
+    def _set_status(self, status: QuarantineStatus) -> None:
+        """Unico punto in cui cambiano stato, etichetta di caricamento e
+        pulsanti: Ripristina ed Elimina sono attivi solo a quarantena
+        pronta."""
+        self.status = status
+        loading = status.kind == QuarantineStatus.LOADING
+        self.loading_label.setText(
+            f"Caricamento della quarantena in «{self.quarantine_dir}»…" if loading else ""
+        )
+        self.loading_label.setVisible(loading)
+        self.restore_button.setEnabled(status.ready)
+        self.delete_button.setEnabled(status.ready)
+
+    def _fail(self, reason: str) -> None:
+        self.table.setRowCount(0)
+        self.health_label.setText(reason)
+        self.health_label.setVisible(True)
+        self._set_status(QuarantineStatus(QuarantineStatus.FAILED, reason))
+
     def _show(self, snapshot: QuarantineSnapshot) -> None:
         # list_entries() recupera da solo un indice corrotto: un errore di
         # I/O vero (disco, permessi) arriva come snapshot.error, mostrato
-        # invece di sollevato.
+        # invece di sollevato. L'oggetto Quarantine resta valido (la pagina
+        # Scansione lo riceve comunque), ma l'elenco no: stato «fallita».
         if snapshot.error is not None:
-            self.table.setRowCount(0)
-            self.health_label.setText(f"Impossibile leggere la quarantena: {snapshot.error}")
-            self.health_label.setVisible(True)
+            self._fail(f"Impossibile leggere la quarantena: {snapshot.error}")
             return
+        self._set_status(QuarantineStatus(QuarantineStatus.READY))
         self._update_health_label(snapshot.backups, snapshot.orphans)
         self.table.setRowCount(len(snapshot.entries))
         for row, entry in enumerate(snapshot.entries):
@@ -1715,8 +1767,8 @@ class QuarantinePage(QWidget):
         self.health_label.setVisible(bool(parti))
 
     def _selected_quarantined_path(self) -> str | None:
-        if self.quarantine is None or self.worker is not None:
-            return None  # in caricamento: l'elenco può essere superato
+        if not self.status.ready:
+            return None  # pulsanti disattivati: in caricamento o fallita
         row = self.table.currentRow()
         if row < 0:
             return None
