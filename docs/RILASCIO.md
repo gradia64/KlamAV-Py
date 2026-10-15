@@ -239,3 +239,8 @@ tools/release-notes.sh 0.1.15
 docker run --rm -v "$PWD":/src -w /src archlinux:base-devel tools/build-arch.sh
 tools/sign-release.sh dist     # con il portachiavi locale (sottochiave della CI)
 ```
+
+`tools/sign-release.sh` firma ogni file che trova nella cartella e li
+mette tutti in `SHA256SUMS`: parti da un `dist/` vuoto, con i soli
+artefatti di questo rilascio, altrimenti firma e checksum comprendono
+anche quelli di un rilascio precedente rimasti lì.

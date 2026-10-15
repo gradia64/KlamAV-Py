@@ -37,6 +37,12 @@ sono in `docs/CHANGELOG-archive.md`.
   pulsanti sono attivi solo a quarantena caricata, e la pagina Scansione
   dice il motivo e di premere «Aggiorna» nella pagina Quarantena (durante
   il caricamento: di attendere).
+- Il README descriveva ancora una «unit systemd di sistema» nel
+  repository, tolta nella 0.1.9: ora i meccanismi di pianificazione sono
+  due (timer della GUI e unit utente), con il motivo per cui una unit di
+  sistema non è più distribuita. Tolto anche `systemd/klamav-scan.timer`,
+  rimasto dalla vecchia unit: nessun pacchetto lo installava, quindi chi
+  aggiorna non deve fare nulla.
 
 ---
 ## 0.1.15 — 2026-10-08

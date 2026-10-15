@@ -474,6 +474,9 @@ nulla fa perdere tempo.
 
 - **Unit utente**, non di sistema: una unit di sistema non poteva leggere home
   private senza allargarne i permessi. Sandbox completa nella unit spedita.
+  La unit di sistema è stata tolta nella 0.1.9; il suo timer, rimasto nel
+  repository senza che nessun pacchetto lo installasse, nella 0.1.16
+  (`tests/test_repo_layout.py` impedisce che torni un riferimento).
 - **Un solo drop-in, generato dallo stato completo** (quarantena, endpoint,
   esclusioni), con `ExecStart=` azzerato. Chi salva una parte deve passare
   anche le altre.
