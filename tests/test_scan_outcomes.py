@@ -635,3 +635,165 @@ def test_programmata_infetti_e_guasti_contatori_e_notifica(app, tmp_path, eio_tr
     (_, status, icon, _) = shown[-1]
     assert icon == "emblem-virus"
     assert "1 infetti" in status and "1 " + FAULT_TEXT in status
+
+
+# -- icona coerente con l'esito (0.1.16) ---------------------------------------
+#
+# La regola dell'icona era in tre copie (notifica manuale, referto, notifica
+# della programmata interna) e con soli errori le notifiche mostravano la
+# spunta verde mentre l'esito diceva «Completata con errori». Ora c'è una sola
+# regola (scan_totals.scan_outcome): stessa icona per lo stesso esito.
+
+def _client_for(results: dict[str, tuple]):
+    """Client che risponde per nome di file: (stato, firma)."""
+    base = _ok_client()
+
+    class Client(base):
+        def _instream_one(self, target, max_stream_size):
+            status, sig = results.get(Path(target).name, ("OK", None))
+            return ScanResult(str(target), status, sig)
+
+    return Client
+
+
+CASES = {
+    # caso: (risposte di clamd, sottocartella con EIO, esito, icona)
+    "pulita": ({}, False, "Completata senza problemi", "emblem-checked"),
+    "solo-errori": ({"a.txt": ("ERROR", "Can't allocate memory")}, False,
+                    "Completata con errori", "dialog-warning"),
+    "solo-guasti": ({}, True, "Completata con errori", "dialog-warning"),
+    "infetti-con-errori": ({"a.txt": ("FOUND", "Eicar-Test-Signature"),
+                            "b.txt": ("ERROR", "Can't allocate memory")}, True,
+                           "Infezioni rilevate", "emblem-virus"),
+}
+
+
+@pytest.fixture
+def tree(tmp_path, monkeypatch):
+    """Radice con a.txt e b.txt; `broken(True)` rende illeggibile (EIO) la
+    sottocartella guasta."""
+    import errno
+
+    root = tmp_path / "radice"
+    (root / "guasta").mkdir(parents=True)
+    (root / "a.txt").write_text("a")
+    (root / "b.txt").write_text("b")
+    real = os.scandir
+    state = SimpleNamespace(root=root, eio=False)
+
+    def scandir(path="."):
+        if state.eio and Path(os.fsdecode(path)) == root / "guasta":
+            raise OSError(errno.EIO, os.strerror(errno.EIO), os.fsdecode(path))
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    return state
+
+
+@pytest.mark.parametrize("case", list(CASES))
+def test_manuale_icona_e_referto_dall_esito(page, tree, icons, monkeypatch, tmp_path, case):
+    results, eio, esito, icon = CASES[case]
+    tree.eio = eio
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    client = _client_for(results)
+    monkeypatch.setattr(mw.ClamdEndpoint, "new_client", lambda self, **k: client())
+    shown, boxes = [], []
+    page.tray_icon = SimpleNamespace(showMessage=lambda *a: shown.append(a))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: boxes.append((self.icon(), self.text())))
+    _scan(page, tree.root)
+    ((_, _, notified, _),) = shown
+    ((box_icon, report),) = boxes
+    assert "Esito: " + esito in report
+    assert notified == icon, f"{case}: notifica {notified}, esito {esito}"
+    warn = icon != "emblem-checked"
+    assert box_icon == (QMessageBox.Warning if warn else QMessageBox.Information)
+
+
+def test_manuale_non_completata_icona_di_avviso(page, icons, monkeypatch, tmp_path):
+    fifo = tmp_path / "coda"
+    os.mkfifo(fifo)
+    shown, boxes = [], []
+    page.tray_icon = SimpleNamespace(showMessage=lambda *a: shown.append(a))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: boxes.append((self.icon(), self.text())))
+    _scan(page, fifo)
+    ((_, _, notified, _),) = shown
+    ((box_icon, report),) = boxes
+    assert "Esito: Non completata" in report
+    assert notified == "dialog-warning" and box_icon == QMessageBox.Warning
+
+
+def _scheduled(tmp_path, monkeypatch, target, client):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", tmp_path / "logs")
+
+    class SyncWorker(ScanWorker):
+        def __init__(self, **kw):
+            super().__init__(client_factory=client, **kw)
+
+        def start(self):
+            self.run()
+
+    monkeypatch.setattr(mw, "ScanWorker", SyncWorker)
+    fake, _, _ = _window(tmp_path, target)
+    shown = []
+    fake.tray_icon.showMessage = lambda *a: shown.append(a)
+    mw.MainWindow._run_scheduled_scan(fake)
+    return shown
+
+
+@pytest.mark.parametrize("case", list(CASES))
+def test_programmata_icona_dall_esito(app, tmp_path, tree, icons, monkeypatch, case):
+    results, eio, _, icon = CASES[case]
+    tree.eio = eio
+    shown = _scheduled(tmp_path, monkeypatch, tree.root, _client_for(results))
+    (_, _, notified, _) = shown[-1]
+    assert notified == icon, f"{case}: notifica {notified}"
+
+
+def test_programmata_non_completata_icona_di_avviso(app, tmp_path, icons, monkeypatch):
+    shown = _scheduled(tmp_path, monkeypatch, tmp_path / "inesistente", _ok_client())
+    (_, text, notified, _) = shown[-1]
+    assert "non completata" in text and notified == "dialog-warning"
+
+
+def test_programmata_problemi_della_scansione_icona_di_avviso(app, tmp_path, tree, icons,
+                                                               monkeypatch):
+    """Un messaggio di error (per esempio il registro delle prese visione),
+    contato in _bg_errors e già elencato nella notifica: avviso, non spunta."""
+    Client = _ok_client()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(mw, "DEFAULT_LOGS_DIR", tmp_path / "logs")
+
+    class SyncWorker(ScanWorker):
+        def __init__(self, **kw):
+            super().__init__(client_factory=Client, **kw)
+
+        def start(self):
+            self.error.emit("registro delle prese visione non leggibile")
+            self.run()
+
+    monkeypatch.setattr(mw, "ScanWorker", SyncWorker)
+    fake, _, _ = _window(tmp_path, tree.root)
+    shown = []
+    fake.tray_icon.showMessage = lambda *a: shown.append(a)
+    mw.MainWindow._run_scheduled_scan(fake)
+    (_, text, notified, _) = shown[-1]
+    assert "1 problemi durante la scansione" in text
+    assert notified == "dialog-warning"
+
+
+def test_regola_unica_dell_esito():
+    import klamav_py.scan_totals as st
+
+    outcome = getattr(st, "scan_outcome", None)
+    assert outcome is not None, "nessuna regola unica dell'esito"
+    T = st.ScanTotals
+    assert outcome(T(scanned=3)).icon == "emblem-checked"
+    assert outcome(T(scanned=3, errors=1)).icon == "dialog-warning"
+    assert outcome(T(scanned=3, errors=1, io_faults=1)).icon == "dialog-warning"
+    assert outcome(T(scanned=3, infections=1, errors=1)).icon == "emblem-virus"
+    assert outcome(T(scanned=3, infections=1), aborted="clamd giù").icon == "dialog-warning"
+    assert outcome(T(scanned=3), problems=1).icon == "dialog-warning"
+    assert outcome(T(scanned=3), aborted="x").label == "Non completata: x"
+    assert outcome(T(scanned=3, errors=1)).label == "Completata con errori"
+    assert outcome(T(scanned=3)).warn is False and outcome(T(errors=1)).warn is True

@@ -59,3 +59,47 @@ def io_fault_note(count: int) -> str:
         f"{count} guasti di I/O (elencati fra gli errori): parte dell'albero "
         "non è stata controllata, la scansione non vale come pulita."
     )
+
+
+# Nomi del tema delle icone per l'esito (la GUI li passa a QIcon.fromTheme).
+ICON_INFECTED = "emblem-virus"
+ICON_WARNING = "dialog-warning"
+ICON_CLEAN = "emblem-checked"
+
+
+@dataclass(frozen=True)
+class ScanOutcome:
+    # Esito testuale del referto della scansione manuale.
+    label: str
+    # Icona delle notifiche (ICON_*).
+    icon: str
+
+    @property
+    def warn(self) -> bool:
+        """Referto con l'icona di avviso invece di quella informativa."""
+        return self.icon != ICON_CLEAN
+
+
+def scan_outcome(totals: ScanTotals, aborted: str | None = None,
+                 problems: int = 0) -> ScanOutcome:
+    """
+    Regola unica dell'esito di una scansione della GUI: testo del referto
+    e icona di notifica manuale, referto e notifica della pianificazione
+    interna. Prima erano tre copie che non coincidevano, e con soli errori
+    (senza infetti né guasti di I/O) la notifica mostrava la spunta verde
+    mentre l'esito diceva «Completata con errori» (0.1.16).
+
+    Non completata → avviso, anche con infetti già trovati: l'albero non è
+    stato controllato tutto. Poi infetti → virus; errori, guasti di I/O
+    (sottoinsieme degli errori) o altri problemi della scansione
+    (`problems`, per esempio il registro delle prese visione) → avviso;
+    altrimenti spunta. Real-Time non la usa: le sue notifiche riguardano un
+    file solo.
+    """
+    if aborted is not None:
+        return ScanOutcome(f"Non completata: {aborted}", ICON_WARNING)
+    if totals.infections > 0:
+        return ScanOutcome("Infezioni rilevate", ICON_INFECTED)
+    if totals.errors > 0 or totals.io_faults > 0 or problems > 0:
+        return ScanOutcome("Completata con errori", ICON_WARNING)
+    return ScanOutcome("Completata senza problemi", ICON_CLEAN)

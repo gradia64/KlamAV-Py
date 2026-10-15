@@ -37,6 +37,13 @@ sono in `docs/CHANGELOG-archive.md`.
   pulsanti sono attivi solo a quarantena caricata, e la pagina Scansione
   dice il motivo e di premere «Aggiorna» nella pagina Quarantena (durante
   il caricamento: di attendere).
+- **Errori senza infetti: niente più spunta verde.** Con errori ma senza
+  infetti né guasti di I/O, le notifiche della scansione manuale e della
+  programmata interna mostravano la spunta verde, e il referto l'icona
+  informativa, mentre l'esito diceva «Completata con errori». Ora ogni
+  esito diverso da «Completata senza problemi» ha l'icona di avviso (le
+  infezioni quella del virus), anche quando la programmata interna segnala
+  problemi come il registro delle prese visione.
 - Il README descriveva ancora una «unit systemd di sistema» nel
   repository, tolta nella 0.1.9: ora i meccanismi di pianificazione sono
   due (timer della GUI e unit utente), con il motivo per cui una unit di

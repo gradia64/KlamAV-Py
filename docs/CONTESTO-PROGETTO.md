@@ -407,6 +407,14 @@ nulla fa perdere tempo.
   chi non la ha e un solo punto di lettura: `ScanTotals.from_entry` per i
   contatori (assente = 0), `HistoryManager.entry_reason` per il motivo
   (assente o non stringa = nessuno). Nessuna migrazione del file.
+- **Esito e icona da una sola regola** (0.1.16): `scan_totals.scan_outcome`,
+  senza Qt, dà testo dell'esito e icona per notifica e referto della
+  scansione manuale e per la notifica della programmata interna. Prima tre
+  copie non coincidevano, e con soli errori le notifiche mostravano la
+  spunta. Non completata → avviso anche con infetti già trovati; poi
+  infetti → virus; errori, guasti di I/O o i problemi contati in
+  `_bg_errors` della programmata → avviso. Real-Time escluso (notifiche
+  per file, con icone proprie).
 
 ### Segnalazioni non spostate e presa visione
 

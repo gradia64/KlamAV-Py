@@ -77,7 +77,7 @@ from ..quarantine import Quarantine, peek_entries
 from ..quarantine_policy import REASON_MAIL_STORE
 from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
 from ..scan_exclusions import decide as decide_exclusion
-from ..scan_totals import ScanTotals, io_fault_note
+from ..scan_totals import ScanTotals, io_fault_note, scan_outcome
 from ..systemd_dropin import (
     DropinConflict, daemon_reload, disable_timer, dropin_path, foreign_overrides,
     generation as dropin_generation, refresh_outdated, render_dropin, sync_dropin,
@@ -1483,14 +1483,8 @@ class ScanPage(QWidget):
             self.results_list.addItem(item)
             self.results_list.scrollToBottom()
 
-        if aborted is not None:
-            esito = f"Non completata: {aborted}"
-        elif infections > 0:
-            esito = "Infezioni rilevate"
-        elif errors > 0:
-            esito = "Completata con errori"
-        else:
-            esito = "Completata senza problemi"
+        outcome = scan_outcome(totals, aborted)
+        esito = outcome.label
 
         # BUG-001: report esplicito di fine scansione, non solo un
         # aggiornamento silenzioso della status_label.
@@ -1521,14 +1515,8 @@ class ScanPage(QWidget):
 
         title = "Scansione completata" if aborted is None else "Scansione non completata"
         if hasattr(main_window, 'tray_icon'):
-            if infections > 0 and aborted is None:
-                icon_type = "emblem-virus"
-            elif aborted is not None or totals.io_faults:
-                icon_type = "dialog-warning"
-            else:
-                icon_type = "emblem-checked"
             main_window.tray_icon.showMessage(
-                f"{APP_NAME} — {title}", status_text, _icon(icon_type), 6000
+                f"{APP_NAME} — {title}", status_text, _icon(outcome.icon), 6000
             )
 
         # Il popup esplicito compare solo se la finestra è visibile in
@@ -1538,8 +1526,7 @@ class ScanPage(QWidget):
         # avanza la notifica tray sopra.
         if self.isVisible() and self.window().isVisible():
             report_box = QMessageBox(self)
-            warn = infections > 0 or aborted is not None or totals.io_faults > 0
-            report_box.setIcon(QMessageBox.Warning if warn else QMessageBox.Information)
+            report_box.setIcon(QMessageBox.Warning if outcome.warn else QMessageBox.Information)
             report_box.setWindowTitle(title)
             report_box.setText(report_text)
             report_box.exec()
@@ -4531,8 +4518,9 @@ X-GNOME-Autostart-enabled=true
                 note = f"ATTENZIONE: {io_fault_note(totals.io_faults)}"
                 status += f" {note}"
                 self._bg_log_write(note)
-            icon = ("emblem-virus" if infections > 0
-                    else "dialog-warning" if totals.io_faults else "emblem-checked")
+            # I problemi contati in _bg_errors (registro delle prese visione,
+            # già elencati qui sopra) valgono come errori per l'icona.
+            icon = scan_outcome(totals, problems=getattr(self, "_bg_errors", 0)).icon
             self.tray_icon.showMessage(APP_NAME, status, _icon(icon), 5000)
         elif first_abort:
             self._schedule_aborted_noted = True
