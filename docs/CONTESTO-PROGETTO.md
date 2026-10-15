@@ -492,8 +492,12 @@ nulla fa perdere tempo.
   estranei restano un avviso di `foreign_overrides`). Esito una volta,
   nella pagina Pianificazione e su stderr; un fallimento non si ritenta
   fino al prossimo avvio, perché ogni salvataggio riscrive comunque il
-  drop-in. Il testo nasce da una sola regola (`DropinState`) per avvio e
-  salvataggi. Le scritture sono serializzate da un lock con un contatore
+  drop-in. Con impostazioni salvate non valide (`DropinSettingsError`,
+  da `DropinState`: endpoint o valori che non entrano nel drop-in)
+  l'avviso nomina solo le impostazioni e il drop-in non si legge (0.1.16):
+  può essere già aggiornato o non esistere, e il salvataggio corretto lo
+  riscrive comunque. Il testo nasce da una sola regola (`DropinState`)
+  per avvio e salvataggi. Le scritture sono serializzate da un lock con un contatore
   (`systemd_dropin.generation`): se un salvataggio arriva mentre il worker
   dell'avvio lavora su uno stato letto prima, il worker non lo
   sovrascrive. Limite: una finestra aperta prima dell'aggiornamento del

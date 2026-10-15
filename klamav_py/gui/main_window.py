@@ -637,6 +637,14 @@ def schedule_roots(target: str, home: Path | None = None) -> dict[str, Path]:
     return roots
 
 
+class DropinSettingsError(ValueError):
+    """Le impostazioni salvate non formano un drop-in valido (file
+    modificato a mano: porta TCP non numerica, carattere di controllo in
+    un percorso): il drop-in non è stato né letto né scritto, e il rimedio
+    è nelle Impostazioni. Separata da OSError e dagli altri errori, che
+    riguardano il drop-in stesso (dropin_refresh_notice)."""
+
+
 @dataclass(frozen=True)
 class DropinState:
     """
@@ -666,9 +674,13 @@ class DropinState:
         endpoint: ClamdEndpoint | None = None,
         excludes: list[str] | None = None,
     ) -> "DropinState":
-        """ValueError se l'endpoint salvato non è valido (load_endpoint)."""
-        if endpoint is None:
-            endpoint = load_endpoint(settings)
+        """DropinSettingsError se l'endpoint salvato non è valido
+        (load_endpoint)."""
+        try:
+            if endpoint is None:
+                endpoint = load_endpoint(settings)
+        except ValueError as exc:
+            raise DropinSettingsError(str(exc)) from exc
         if quarantine is None:
             quarantine = Path(settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR)))
         if excludes is None:
@@ -676,10 +688,15 @@ class DropinState:
         return cls(quarantine.expanduser(), endpoint, tuple(excludes))
 
     def render(self) -> str | None:
-        return render_dropin(
-            self.quarantine.resolve(), home=Path.home(), endpoint=self.endpoint,
-            excludes=self.excludes,
-        )
+        """DropinSettingsError se i valori non entrano in un drop-in
+        (render_dropin: caratteri di controllo, specificatori)."""
+        try:
+            return render_dropin(
+                self.quarantine.resolve(), home=Path.home(), endpoint=self.endpoint,
+                excludes=self.excludes,
+            )
+        except ValueError as exc:
+            raise DropinSettingsError(str(exc)) from exc
 
 
 def refresh_dropin_at_startup(state: DropinState, since: int) -> tuple[bool, str | None]:
@@ -688,7 +705,8 @@ def refresh_dropin_at_startup(state: DropinState, since: int) -> tuple[bool, str
     lo stato) e daemon-reload se il drop-in è cambiato. Tocca il filesystem
     e chiama systemctl --user: la GUI la esegue con run_off_gui_thread.
     Ritorna (riscritto, motivo del reload fallito o None); OSError e
-    ValueError arrivano al chiamante.
+    DropinSettingsError arrivano al chiamante. render() precede ogni
+    lettura del drop-in: con impostazioni non valide non lo tocca.
     """
     if not refresh_outdated(state.render(), since):
         return False, None
@@ -698,7 +716,17 @@ def refresh_dropin_at_startup(state: DropinState, since: int) -> tuple[bool, str
 def dropin_refresh_notice(result) -> str | None:
     """Avviso della rigenerazione all'avvio, dal risultato di
     refresh_dropin_at_startup (o dall'eccezione); None se non è cambiato
-    nulla. Stesso testo nella pagina Pianificazione e su stderr."""
+    nulla. Stesso testo nella pagina Pianificazione e su stderr.
+
+    Con impostazioni non valide (DropinSettingsError) il drop-in non è
+    stato letto: l'avviso nomina solo le impostazioni, perché il drop-in
+    può essere già aggiornato o non esistere."""
+    if isinstance(result, DropinSettingsError):
+        return (
+            f"Le impostazioni salvate non sono valide: {result}. Correggile nelle "
+            "Impostazioni e salva: il salvataggio aggiorna anche la scansione "
+            "programmata di sistema."
+        )
     path = dropin_path()
     if isinstance(result, Exception):
         return (
@@ -3844,7 +3872,7 @@ class MainWindow(QMainWindow):
         since = dropin_generation()
         try:
             state = DropinState.from_settings(self.settings)
-        except ValueError as exc:
+        except DropinSettingsError as exc:
             self._dropin_refreshed(exc)
             return
         run_off_gui_thread(

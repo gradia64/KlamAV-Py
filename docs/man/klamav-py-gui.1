@@ -161,6 +161,10 @@ application rewrites it, runs
 .B systemctl \-\-user daemon\-reload
 and says so once in the Scheduling page and on stderr; if rewriting fails
 it says so with the reason, and does not retry until the next start.
+If the saved settings are not valid (for example a non-numeric TCP port in
+a hand-edited settings file) the drop-in is neither read nor written, and
+the notice names the setting and points to Settings: saving them
+regenerates the drop-in.
 At startup a missing drop-in is not created, and a file without the header
 is not touched.
 Other drop-ins of the unit that set

@@ -20,6 +20,16 @@ sono in `docs/CHANGELOG-archive.md`.
   `python -c "import PySide6; print(PySide6.__version__)"` deve dire 6.11
   o precedente.
 
+### Corretto
+- **Impostazioni non valide all'avvio: l'avviso dice la causa giusta.**
+  Con un valore salvato non valido (per esempio una porta TCP non numerica
+  in un file di impostazioni modificato a mano) la pagina Pianificazione
+  diceva che il drop-in del timer era «scritto da una versione precedente»
+  e non si poteva aggiornare, anche se era già aggiornato o non esisteva.
+  Ora l'avviso nomina l'impostazione e rimanda alle Impostazioni, e il
+  drop-in non viene toccato. Per controllare: nessuna azione richiesta;
+  correggere il valore nelle Impostazioni e salvare fa sparire l'avviso.
+
 ---
 ## 0.1.15 — 2026-10-08
 

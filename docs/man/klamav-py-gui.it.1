@@ -163,6 +163,10 @@ ora, l'applicazione lo riscrive, esegue
 e lo dice una volta nella pagina Pianificazione e su stderr; se la
 riscrittura non riesce lo dice con il motivo, e non riprova fino al
 prossimo avvio.
+Se le impostazioni salvate non sono valide (per esempio una porta TCP non
+numerica in un file di impostazioni modificato a mano) il drop-in non viene
+né letto né scritto, e l'avviso nomina l'impostazione e rimanda alle
+Impostazioni: salvarle rigenera il drop-in.
 All'avvio un drop-in assente non viene creato, e un file senza
 l'intestazione non viene toccato.
 Gli altri drop-in della unit che impostano

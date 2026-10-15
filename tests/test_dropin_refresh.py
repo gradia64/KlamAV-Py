@@ -200,13 +200,44 @@ def test_reload_fallito_nell_avviso(env, inline):
     assert env.dropin.read_text() == _current_text(env)
 
 
-def test_endpoint_non_valido_avviso_senza_scrittura(env, inline):
+def _assert_settings_notice(env, notice: str, reason: str) -> None:
+    """Avviso per impostazioni non valide: il motivo e il rimando alle
+    Impostazioni, niente sul drop-in, che non è stato nemmeno letto."""
+    assert reason in notice, notice
+    assert "Impostazioni" in notice, notice
+    assert "drop-in" not in notice and str(env.dropin) not in notice, notice
+    assert "versione precedente" not in notice, notice
+
+
+@pytest.mark.parametrize("stato", ["assente", "aggiornato", "vecchio"])
+def test_endpoint_non_valido_avviso_sulle_impostazioni(env, inline, monkeypatch,
+                                                       capsys, stato):
+    """0.1.16: prima l'avviso diceva che il drop-in era «scritto da una
+    versione precedente e non è stato possibile aggiornarlo», anche se
+    era già aggiornato o non esisteva."""
+    old = {"assente": None, "aggiornato": _current_text(env),
+           "vecchio": _dropin_0_1_13(env.quarantine)}[stato]
+    if old is not None:
+        _write(env.dropin, old)
+    env.settings.setValue("tcp_port", "abc")
+    monkeypatch.setattr(sd, "write_private_text", lambda *a: pytest.fail("scritto"))
+    page = _startup(env)
+    _assert_settings_notice(env, page.dropin_notice_label.text(), "porta TCP non valida")
+    assert "porta TCP non valida" in capsys.readouterr().err
+    assert (env.dropin.read_text() if env.dropin.exists() else None) == old
+    assert inline.reload == 0
+
+
+def test_quarantena_non_valida_avviso_sulle_impostazioni(env, inline, monkeypatch):
+    """Un valore che non entra nel drop-in (render_dropin, nel worker):
+    stesso avviso, nessuna scrittura."""
     old = _dropin_0_1_13(env.quarantine)
     _write(env.dropin, old)
-    env.settings.setValue("tcp_port", "abc")
+    env.settings.setValue("quarantine_dir", str(env.home / "Quar\nantena"))
+    monkeypatch.setattr(sd, "write_private_text", lambda *a: pytest.fail("scritto"))
     page = _startup(env)
-    assert "porta TCP non valida" in page.dropin_notice_label.text()
-    assert env.dropin.read_text() == old
+    _assert_settings_notice(env, page.dropin_notice_label.text(), "caratteri di controllo")
+    assert env.dropin.read_text() == old and inline.reload == 0
 
 
 def test_salvataggio_nel_frattempo_vince(env):
