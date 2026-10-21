@@ -1,3 +1,11 @@
+<p align="center">
+  <a href="README.md"><img src="https://img.shields.io/badge/Lang-Italiano-green?style=for-the-badge" alt="Italiano"></a>
+  <a href="README.en.md"><img src="https://img.shields.io/badge/Lang-English-blue?style=for-the-badge" alt="English"></a>
+  <a href="README.fr.md"><img src="https://img.shields.io/badge/Lang-Français-blue?style=for-the-badge" alt="Français"></a>
+  <a href="README.de.md"><img src="https://img.shields.io/badge/Lang-Deutsch-blue?style=for-the-badge" alt="Deutsch"></a>
+  <a href="README.es.md"><img src="https://img.shields.io/badge/Lang-Español-orange?style=for-the-badge" alt="Español"></a>
+</p>
+
 # KlamAV-Py
 
 **License:** GNU General Public License v3.0
@@ -5,6 +13,15 @@
 Frontend minimale per ClamAV via clamd — CLI e GUI per Linux.
 
 Riscrittura minimale, in Python, dell'idea alla base di KlamAV 0.22 (frontend a ClamAV), senza le parti diventate tecnologia morta (Dazuko, DCOP, Qt3) e senza i problemi di sicurezza dell'originale (shell injection via KShellProcess): nessun eseguibile esterno viene invocato per la scansione, i path non transitano mai da una shell.
+
+<p align="center">
+  <img src="docs/screenshots/scan.png" alt="KlamAV-Py — scansione" width="45%" />
+  <img src="docs/screenshots/quarantine.png" alt="Quarantena" width="45%" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/history.png" alt="Cronologia" width="45%" />
+  <img src="docs/screenshots/settings.png" alt="Impostazioni" width="45%" />
+</p>
 
 ## Caratteristiche
 
