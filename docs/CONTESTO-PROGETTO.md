@@ -684,6 +684,16 @@ rilascio.
   originale lasciato dov'è (la prossima scansione lo rileva). Non si
   ripete mai lo spostamento dell'originale nel recupero: vorrebbe dire
   ripeterne le verifiche.
+- **L'intento si pubblica completo** (0.1.17). `_write_intent` lo crea
+  come `.<nome>.intent-pending` (il recupero cerca solo `.*.intent`),
+  prende il flock, scrive e fa fsync, poi lo pubblica con `link()` sul
+  nome definitivo (mai una sovrascrittura) e toglie il temporaneo; il lock
+  sul descrittore vale per entrambi i nomi. Il recupero toglie un
+  temporaneo solo se ne ottiene il lock: mai pubblicato vuol dire file non
+  toccato. Un temporaneo vuoto con il lock libero può essere un'operazione
+  fra la creazione e il flock: `_write_intent` vede `st_nlink` a zero
+  dopo il flock e riparte (tre tentativi, poi `QuarantineError` senza aver
+  toccato il file). Richiede hardlink nella cartella di quarantena.
 - **L'intento ha la fiducia dell'indice** (0.1.13). Si valida con le
   stesse regole (`_entry_problem`), `original_path` assoluto, `dev`/`ino`
   interi non negativi, e `staging` deve stare nella directory
@@ -759,10 +769,6 @@ Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.16:
   dalla pagina Quarantena, «Metti in quarantena» dei file selezionati
   nella pagina Scansione, e `_quarantine_count` (`peek_entries`) al
   salvataggio delle Impostazioni quando cambia la cartella.
-- **Finestra fra `open_private_fd(O_EXCL)` e `flock` in `_write_intent`:**
-  un recupero concorrente può eliminare l'intento di un'operazione viva
-  (esito: orfano visibile, come prima della 0.1.12). Correzione possibile:
-  intento su nome temporaneo, poi rename.
 - **`_clear_intent` nel `finally` di `quarantine_file`:** se la scrittura
   dell'indice fallisce dopo lo spostamento, l'intento sparisce e il
   recupero automatico non avviene.

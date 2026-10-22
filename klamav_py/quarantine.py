@@ -14,6 +14,9 @@ File di servizio nella directory (tutti 0600, directory 0700):
                               cancellato: serve a recuperare a mano)
   .<nome>.intent              intento di una quarantena in corso (vedi
                               _write_intent e recover_interrupted)
+  .<nome>.intent-pending      intento in preparazione, non ancora
+                              pubblicato: il recupero lo ignora (o lo
+                              toglie se nessuno ne tiene il lock)
   .<nome>.copy                la stessa quarantena procede per copia
   .<nome>.intent.corrupt-<...> intento non valido messo da parte (mai
                               cancellato, come index.json.corrupt-*)
@@ -49,6 +52,12 @@ from .private_files import ensure_private_dir, open_private_fd, write_private_te
 MAX_INDEX_BYTES = 16 * 1024 * 1024
 COPY_CHUNK = 1024 * 1024
 INTENT_SUFFIX = ".intent"
+# Nome dell'intento finché non è completo e bloccato: non deve terminare
+# con INTENT_SUFFIX, perché il recupero non lo prenda per un intento.
+INTENT_PENDING_SUFFIX = ".intent-pending"
+# Tentativi di _write_intent quando un recupero concorrente toglie il
+# temporaneo prima che il lock sia preso (vedi lì).
+_INTENT_ATTEMPTS = 3
 # Accanto all'intento, creato prima di iniziare una copia fra filesystem:
 # dice al recupero quale delle due strade era stata presa. Il dispositivo
 # non basta: un rename fra due mount dello stesso filesystem (bind mount)
@@ -295,6 +304,9 @@ class Quarantine:
     def _intent_path(self, dest: Path) -> Path:
         return self.dir / f".{dest.name}{INTENT_SUFFIX}"
 
+    def _pending_intent_path(self, dest: Path) -> Path:
+        return self.dir / f".{dest.name}{INTENT_PENDING_SUFFIX}"
+
     def _copy_mark_path(self, dest: Path) -> Path:
         return self.dir / f".{dest.name}{COPY_MARK_SUFFIX}"
 
@@ -311,21 +323,47 @@ class Quarantine:
         l'operazione. Il lock distingue un'operazione in corso (in un altro
         processo: GUI, CLI, timer) da una interrotta: il kernel lo rilascia
         alla morte del processo.
+
+        L'intento nasce con un nome che il recupero non considera
+        (INTENT_PENDING_SUFFIX) e si pubblica solo con lock, contenuto e
+        fsync: creato direttamente col nome definitivo, un recupero
+        concorrente poteva aprirlo fra la creazione e il flock, trovarlo
+        vuoto, prenderlo per un intento scritto a metà e cancellarlo
+        mentre l'operazione proseguiva senza. La pubblicazione è un link():
+        non sovrascrive mai un intento esistente, e il lock, preso sul
+        descrittore, vale per entrambi i nomi dello stesso inode.
         """
         path = self._intent_path(dest)
-        fd = open_private_fd(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            data = json.dumps(record).encode("utf-8")
-            view = memoryview(data)
-            while view:
-                view = view[os.write(fd, view):]
-            os.fsync(fd)
-        except BaseException:
-            os.close(fd)
-            path.unlink(missing_ok=True)
-            raise
-        return fd
+        pending = self._pending_intent_path(dest)
+        data = json.dumps(record).encode("utf-8")
+        for _ in range(_INTENT_ATTEMPTS):
+            fd = open_private_fd(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                if os.fstat(fd).st_nlink == 0:
+                    # Un recupero ha preso il lock prima di noi e ha tolto
+                    # il temporaneo, come un residuo di crash: si riparte
+                    # con un temporaneo nuovo. Il file non è stato toccato.
+                    os.close(fd)
+                    continue
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+                os.link(pending, path)
+            except BaseException:
+                os.close(fd)
+                pending.unlink(missing_ok=True)
+                raise
+            try:
+                pending.unlink()
+            except OSError:
+                pass  # lo toglie il recupero, quando il lock sarà libero
+            return fd
+        raise QuarantineError(
+            f"impossibile registrare l'intento della quarantena in {self.dir}: "
+            "temporaneo rimosso da un recupero concorrente a ogni tentativo"
+        )
 
     def _clear_intent(self, dest: Path, fd: int) -> None:
         # Prima l'unlink, poi la chiusura (che rilascia il lock): nessun
@@ -371,8 +409,32 @@ class Quarantine:
                     done.append(outcome)
             finally:
                 os.close(fd)
+        self._remove_stale_pending_intents()
         self.recovered.extend(done)
         return done
+
+    def _remove_stale_pending_intents(self) -> None:
+        """Toglie i temporanei d'intento rimasti da un crash. Un intento
+        mai pubblicato vuol dire che il file non è stato toccato, quindi
+        non c'è niente da recuperare. Solo se il lock è libero: altrimenti
+        un'operazione viva lo sta ancora preparando. Un temporaneo vuoto
+        con il lock libero può anche essere un'operazione fra la creazione
+        e il flock: _write_intent se ne accorge (st_nlink a zero) e
+        riparte."""
+        for pending in sorted(self.dir.glob(f".*{INTENT_PENDING_SUFFIX}")):
+            try:
+                fd = os.open(pending, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            except OSError:
+                continue
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    continue
+                if stat.S_ISREG(os.fstat(fd).st_mode):
+                    pending.unlink(missing_ok=True)
+            finally:
+                os.close(fd)
 
     def _set_aside_intent(self, intent: Path, dest_name: str, exc: Exception) -> Tuple[Path, str]:
         backup = self.dir / (
@@ -785,7 +847,8 @@ class Quarantine:
                 continue
             if name.startswith(f".{self.index_path.name}.") and name.endswith(".tmp"):
                 continue
-            if name.startswith(".") and name.endswith((INTENT_SUFFIX, COPY_MARK_SUFFIX)):
+            if name.startswith(".") and name.endswith(
+                    (INTENT_SUFFIX, INTENT_PENDING_SUFFIX, COPY_MARK_SUFFIX)):
                 continue
             if name.startswith(".") and INTENT_CORRUPT_INFIX in name:
                 continue

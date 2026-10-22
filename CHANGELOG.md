@@ -5,6 +5,20 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## Non rilasciato
+
+### Corretto
+- **Quarantena: un'operazione non perde più il suo intento per un
+  recupero concorrente.** Se un'altra istanza (GUI, CLI, timer) eseguiva
+  il recupero delle operazioni interrotte nell'istante in cui una
+  quarantena registrava il proprio intento, poteva scambiarlo per un
+  residuo e cancellarlo: un'interruzione successiva lasciava il file in
+  quarantena senza voce, non ripristinabile dalla GUI. Ora l'intento
+  diventa visibile al recupero solo quando è completo. Chi aggiorna non
+  deve fare nulla: un eventuale `.<nome>.intent-pending` rimasto nella
+  cartella di quarantena da un crash viene tolto al primo avvio.
+
+---
 ## 0.1.16 — 2026-10-15
 
 ### Modificato
