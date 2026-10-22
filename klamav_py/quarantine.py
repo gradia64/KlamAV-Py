@@ -593,8 +593,9 @@ class Quarantine:
             non dal path;
           - l'originale viene prima rinominato con un nome univoco nella
             SUA directory (stesso filesystem, atomico), poi si confronta
-            l'inode con lstat, e solo allora lo si elimina. Così non si
-            cancella mai per percorso un oggetto diverso da quello letto.
+            l'inode con lstat, e solo allora lo si elimina (in
+            quarantine_file, dopo il ritorno). Così non si cancella mai per
+            percorso un oggetto diverso da quello letto.
         """
         os.close(open_private_fd(self._copy_mark_path(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL))
         out = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -627,7 +628,6 @@ class Quarantine:
         if (staged_st.st_dev, staged_st.st_ino) != (st.st_dev, st.st_ino):
             dest.unlink(missing_ok=True)
             self._handle_substitution(staging, path, staged_st)
-        os.unlink(staging)
 
     def quarantine_file(self, path: Path, signature: Optional[str] = None) -> QuarantineEntry:
         path = Path(path)
@@ -687,20 +687,52 @@ class Quarantine:
             raise
 
         try:
-            self._move_into_quarantine(fd, st, path, dest, staging)
+            copied = self._move_into_quarantine(fd, st, path, dest, staging)
+        except BaseException:
+            # Il file non è stato toccato (o è stato rimesso a posto, vedi
+            # _handle_substitution): l'intento non serve più.
+            os.close(fd)
+            self._clear_intent(dest, intent_fd)
+            raise
+
+        # Da qui il file è in quarantena: l'intento si toglie solo con la
+        # voce nell'indice. Prima era nel finally, e un errore nello
+        # scrivere l'indice (disco pieno, EIO) lasciava il file senza voce,
+        # non ripristinabile dalla GUI: il caso per cui l'intento esiste.
+        try:
+            if copied:
+                os.unlink(staging)
+            else:
+                # Read-only, dal descrittore: Path.chmod() seguirebbe un
+                # eventuale symlink fuori dalla quarantena.
+                os.fchmod(fd, 0o400)
             with self._index_lock():
                 entries = self._load_index()
                 entries.append(entry)
                 self._write_index(entries)
-        finally:
+        except BaseException as exc:
+            # Si rilascia solo il lock: il prossimo recupero completa la
+            # voce (vedi _recover_one).
             os.close(fd)
-            self._clear_intent(dest, intent_fd)
+            os.close(intent_fd)
+            if isinstance(exc, Exception):
+                raise QuarantineError(
+                    f"{path} è stato spostato in quarantena, ma l'operazione non si è "
+                    f"conclusa ({exc}): la voce verrà completata dal prossimo recupero "
+                    "della quarantena"
+                ) from exc
+            raise
+        os.close(fd)
+        self._clear_intent(dest, intent_fd)
         return entry
 
-    def _move_into_quarantine(self, fd: int, st, path: Path, dest: Path, staging: Path) -> None:
+    def _move_into_quarantine(self, fd: int, st, path: Path, dest: Path, staging: Path) -> bool:
         """Spostamento (o copia fra filesystem) con verifica dell'inode.
         Un'eccezione lascia tutto com'era, salvo quanto documentato in
-        _handle_substitution."""
+        _handle_substitution. Al ritorno il file verificato è in dest; resta
+        da fare, a carico del chiamante, il passaggio a sola lettura (rename)
+        o la rimozione dell'originale rinominato in staging (copia, ritorna
+        True): passi che il recupero sa completare."""
         try:
             # rename() opera sulla voce di directory: se fra l'open e
             # qui 'path' è stato sostituito, sposta la voce nuova. Da
@@ -712,7 +744,7 @@ class Quarantine:
                     f"impossibile spostare {path} in quarantena: {exc}"
                 ) from exc
             self._copy_across_filesystems(fd, st, path, dest, staging)
-            return
+            return True
         # lstat(), NON stat(): stat() segue i symlink e rendeva il
         # controllo aggirabile con un symlink verso un hardlink del
         # file infetto (stesso inode). Vedi
@@ -720,9 +752,7 @@ class Quarantine:
         moved_st = os.lstat(dest)
         if (moved_st.st_dev, moved_st.st_ino) != (st.st_dev, st.st_ino):
             self._handle_substitution(dest, path, moved_st)
-        # Read-only, dal descrittore: Path.chmod() seguirebbe un
-        # eventuale symlink fuori dalla quarantena.
-        os.fchmod(fd, 0o400)
+        return False
 
     def restore(self, quarantined_path: str, destination: Optional[Path] = None) -> Path:
         with self._index_lock():

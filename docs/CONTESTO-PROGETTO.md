@@ -694,6 +694,20 @@ rilascio.
   fra la creazione e il flock: `_write_intent` vede `st_nlink` a zero
   dopo il flock e riparte (tre tentativi, poi `QuarantineError` senza aver
   toccato il file). Richiede hardlink nella cartella di quarantena.
+- **L'intento resta finché la voce non c'è** (0.1.17). `quarantine_file`
+  toglie l'intento solo con la voce nell'indice, o quando
+  `_move_into_quarantine` solleva (file non toccato o rimesso a posto da
+  `_handle_substitution`). I passi dopo lo spostamento che il recupero sa
+  completare (0400 sul file spostato, rimozione dell'originale rinominato
+  in `staging` nella copia) sono passati da `_move_into_quarantine` al
+  chiamante, dopo il punto di non ritorno: un errore lì o nell'indice
+  rilascia solo il lock e diventa `QuarantineError` con «verrà completata
+  dal prossimo recupero». Nella GUI `load_quarantine` con un oggetto già
+  pronto («Aggiorna», ricarica dopo ripristino o eliminazione) ripete
+  `recover_interrupted()` nel worker. Limite: con il disco ancora pieno,
+  il recupero fallisce sull'indice e mette l'intento da parte come
+  `.corrupt-*` (regola della 0.1.13 per gli errori imprevisti); il file
+  resta visibile fra gli orfani.
 - **L'intento ha la fiducia dell'indice** (0.1.13). Si valida con le
   stesse regole (`_entry_problem`), `original_path` assoluto, `dev`/`ino`
   interi non negativi, e `staging` deve stare nella directory
@@ -769,9 +783,6 @@ Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.16:
   dalla pagina Quarantena, «Metti in quarantena» dei file selezionati
   nella pagina Scansione, e `_quarantine_count` (`peek_entries`) al
   salvataggio delle Impostazioni quando cambia la cartella.
-- **`_clear_intent` nel `finally` di `quarantine_file`:** se la scrittura
-  dell'indice fallisce dopo lo spostamento, l'intento sparisce e il
-  recupero automatico non avviene.
 - **`ScanWorker.run()`:** costruzione del client e di `Quarantine` fuori
   dal `try`; un `OSError` lascia la pagina «in corso» fino al riavvio.
 - **Pagina Pianificazione:** con un controllo bloccato su un mount di

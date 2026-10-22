@@ -371,9 +371,10 @@ Ogni quarantena in corso è registrata in un file nascosto
 (e
 .I .<nome>.copy
 se il file viene copiato da un altro file system): se l'operazione viene
-interrotta, per esempio da un crash, il successivo avvio della CLI o
-della GUI la completa o la annulla, lasciando in quel caso il file
-originale al suo posto.
+interrotta, per esempio da un crash o da un errore nello scrivere
+l'indice dopo lo spostamento del file, il successivo avvio della CLI o
+della GUI (o Aggiorna nella pagina Quarantena della GUI) la completa o la
+annulla, lasciando in quel caso il file originale al suo posto.
 .TP
 .I \%~/.local/share/klamav-py/acknowledged.json
 Registro delle prese visione (0600), scritto in modo atomico, con il lock

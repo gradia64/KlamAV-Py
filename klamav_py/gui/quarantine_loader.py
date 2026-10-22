@@ -45,13 +45,18 @@ def load_quarantine(directory: Path, quarantine: Quarantine | None = None) -> Qu
     """
     Istantanea della quarantena in `directory`. Senza un oggetto per quella
     directory lo crea, con il recupero; con un oggetto già pronto (pulsante
-    Aggiorna, dopo un ripristino) rilegge soltanto. Un errore del
+    Aggiorna, dopo un ripristino) ripete il recupero e rilegge: un'operazione
+    rimasta a metà in questa sessione (indice non scritto dopo lo
+    spostamento) si completa senza riavviare la GUI. Un errore del
     costruttore arriva al chiamante: senza oggetto non c'è quarantena da
     mostrare. Tocca il filesystem: va eseguita nel worker.
     """
-    if quarantine is None or quarantine.dir != directory:
+    reuse = quarantine is not None and quarantine.dir == directory
+    if not reuse:
         quarantine = Quarantine(directory)
     try:
+        if reuse:
+            quarantine.recover_interrupted()
         entries = quarantine.list_entries()
     except OSError as exc:
         return QuarantineSnapshot(quarantine, error=str(exc))

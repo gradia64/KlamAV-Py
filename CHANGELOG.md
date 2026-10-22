@@ -17,6 +17,14 @@ sono in `docs/CHANGELOG-archive.md`.
   diventa visibile al recupero solo quando è completo. Chi aggiorna non
   deve fare nulla: un eventuale `.<nome>.intent-pending` rimasto nella
   cartella di quarantena da un crash viene tolto al primo avvio.
+- **Quarantena: un file spostato resta ripristinabile anche se l'indice
+  non si scrive.** Se dopo lo spostamento in quarantena la scrittura
+  dell'indice falliva (disco pieno, errore di I/O), il file restava nella
+  cartella di quarantena senza voce e la GUI non poteva ripristinarlo.
+  Ora l'errore dice che il file è in quarantena e che la voce verrà
+  completata, e la completa il prossimo recupero: all'avvio della CLI o
+  della GUI, o premendo «Aggiorna» nella pagina Quarantena (che ora
+  ripete il recupero, senza riavviare).
 
 ---
 ## 0.1.16 — 2026-10-15

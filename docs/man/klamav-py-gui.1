@@ -97,6 +97,9 @@ After an error, loading does not restart by itself: fix the directory in
 Settings if needed, then press \(lqAggiorna\(rq (refresh) in the Quarantine
 page; until then quarantining the selected files from the Scan page shows
 the reason.
+\(lqAggiorna\(rq also repeats the recovery, so an operation left half done
+during the session (for example a file moved into quarantine whose index
+entry could not be written) is completed without restarting.
 .
 .SH OPTIONS
 .BR \-\-socket ,
