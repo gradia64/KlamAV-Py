@@ -738,6 +738,15 @@ rilascio.
   <motivo>», error, progress, finished_scan), lo stesso metodo usato per
   le radici e le esclusioni bloccanti. Per la quarantena il motivo è
   quello della CLI, «Quarantena non utilizzabile: …».
+- **Problemi della scansione manuale nell'esito** (0.1.17). `ScanPage`
+  conta i messaggi di `error` diversi dal motivo di aborted (`_problems`,
+  come `_bg_errors`) e li passa a `scan_outcome(problems=…)`; referto e
+  stato aggiungono «N problemi durante la scansione, vedi l'elenco».
+- **Drop-in riscritto o rimosso** (0.1.17). `refresh_dropin_at_startup`
+  ritorna `DROPIN_REWRITTEN`, `DROPIN_REMOVED` o None (prima un booleano),
+  deciso dal testo di `render()` (None = impostazioni predefinite, che
+  `refresh_outdated` traduce in rimozione); il testo dell'avviso lo decide
+  solo `dropin_refresh_notice`.
 - **L'intento ha la fiducia dell'indice** (0.1.13). Si valida con le
   stesse regole (`_entry_problem`), `original_path` assoluto, `dev`/`ino`
   interi non negativi, e `staging` deve stare nella directory
@@ -859,16 +868,6 @@ Annotati nella 0.1.14:
   Limite noto, non toccato: i tag del progetto non hanno revisione.
 - Residuo nei test: `tests/test_settings_exclusions.py` imposta
   `_schedule_missing_noted`, attributo non più usato in produzione.
-
-Annotati nella 0.1.16:
-
-- **Messaggi di `error` nella scansione manuale:** la programmata interna
-  li conta (`_bg_errors`) e passano a `scan_outcome` come problemi
-  (icona di avviso); nella manuale compaiono in lista come «ERRORE
-  SISTEMA» ma non cambiano esito né icona. Stessa regola, ingressi
-  diversi: da allineare se si decide che contano anche lì.
-- **Drop-in rimosso all'avvio** (impostazioni tornate predefinite):
-  l'avviso dice «aggiornato alla versione …», non «rimosso».
 
 ---
 

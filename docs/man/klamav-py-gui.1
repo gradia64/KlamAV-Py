@@ -83,6 +83,10 @@ The notifications of the manual and of the internal scheduled scan, and
 the manual scan report, show a warning icon for every outcome other than
 a clean scan: errors, I/O faults or a scan not completed (infections keep
 their own icon).
+Problems reported during a scan without a file error (for example an
+invalid register of acknowledged detections) count as errors for the
+outcome of both: \(lqCompletata con errori\(rq, with the number of
+problems in the manual scan report.
 A path to scan that does not exist, is a broken symbolic link, is neither
 a folder nor a regular file, or cannot be read stops the scan.
 So does a quarantine directory that cannot be used, or a clamd client
@@ -184,6 +188,8 @@ application rewrites it, runs
 .B systemctl \-\-user daemon\-reload
 and says so once in the Scheduling page and on stderr; if rewriting fails
 it says so with the reason, and does not retry until the next start.
+If the saved settings are all defaults, the drop-in is removed instead,
+and the notice says so.
 If the saved settings are not valid (for example a non-numeric TCP port in
 a hand-edited settings file) the drop-in is neither read nor written, and
 the notice names the setting and points to Settings: saving them

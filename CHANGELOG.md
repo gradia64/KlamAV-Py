@@ -32,6 +32,18 @@ sono in `docs/CHANGELOG-archive.md`.
   programmata interna non lasciava traccia. Ora entrambe la registrano
   come non completata, con il motivo nello stato, nel referto e nella
   Cronologia, come la CLI («Quarantena non utilizzabile»).
+- **Scansione manuale: i problemi segnalati contano per l'esito.** Un
+  problema durante la scansione che non riguarda un file (per esempio il
+  registro delle prese visione non valido, o una quarantena automatica
+  fallita) compariva in lista come «ERRORE SISTEMA», ma l'esito restava
+  «Completata senza problemi» con la spunta verde. Ora, come nella
+  programmata interna, l'esito è «Completata con errori» con l'icona di
+  avviso, e il referto dice quanti problemi ci sono stati.
+- **Avviso del drop-in all'avvio: «rimosso» quando è stato rimosso.**
+  Con le impostazioni tornate tutte predefinite il drop-in della
+  scansione programmata di sistema viene tolto all'avvio, ma l'avviso
+  diceva che era stato «aggiornato alla versione …». Ora dice che è stato
+  rimosso.
 
 ### Modificato
 - **Ripristino, eliminazione e «Metti in quarantena» non bloccano più la

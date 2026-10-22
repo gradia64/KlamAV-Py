@@ -84,6 +84,10 @@ Le notifiche della scansione manuale e della programmata interna, e il
 referto della scansione manuale, mostrano l'icona di avviso per ogni esito
 diverso da una scansione pulita: errori, guasti di I/O o scansione non
 completata (le infezioni hanno la loro icona).
+I problemi segnalati durante una scansione senza un errore su un file (per
+esempio un registro delle prese visione non valido) contano come errori
+per l'esito di entrambe: \(lqCompletata con errori\(rq, con il numero dei
+problemi nel referto della scansione manuale.
 Un percorso da scansionare inesistente, collegamento simbolico rotto, né
 cartella né file regolare, o non leggibile ferma la scansione.
 Lo stesso vale per una cartella di quarantena non utilizzabile o un client
@@ -185,6 +189,8 @@ ora, l'applicazione lo riscrive, esegue
 e lo dice una volta nella pagina Pianificazione e su stderr; se la
 riscrittura non riesce lo dice con il motivo, e non riprova fino al
 prossimo avvio.
+Se le impostazioni salvate sono tutte quelle predefinite, il drop-in viene
+invece rimosso, e l'avviso lo dice.
 Se le impostazioni salvate non sono valide (per esempio una porta TCP non
 numerica in un file di impostazioni modificato a mano) il drop-in non viene
 né letto né scritto, e l'avviso nomina l'impostazione e rimanda alle

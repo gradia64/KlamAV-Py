@@ -260,6 +260,34 @@ def test_impostazioni_tornate_predefinite_drop_in_rimosso(env, inline, capsys, a
     assert str(env.dropin) in capsys.readouterr().err
 
 
+def test_drop_in_rimosso_l_avviso_dice_rimosso(env, inline, capsys):
+    """Impostazioni tornate predefinite (0.1.17): il drop-in è stato tolto,
+    e l'avviso lo dice invece di «aggiornato alla versione …»."""
+    _write(env.dropin, _dropin_0_1_13(env.quarantine))
+    env.settings.setValue("quarantine_dir", str(mw.DEFAULT_QUARANTINE_DIR))
+    page = _startup(env)
+    assert not env.dropin.exists()
+    notice = page.dropin_notice_label.text()
+    assert "rimosso" in notice and "aggiornato" not in notice, notice
+    assert str(env.dropin) in notice
+    err = capsys.readouterr().err
+    assert "rimosso" in err and "aggiornato" not in err
+
+
+def test_testo_dell_avviso_da_un_solo_punto():
+    """Riscritto e rimosso distinti nel risultato, testo deciso solo da
+    dropin_refresh_notice; riscritto invariato."""
+    rewritten = getattr(mw, "DROPIN_REWRITTEN", None)
+    removed = getattr(mw, "DROPIN_REMOVED", None)
+    assert rewritten is not None and removed is not None and rewritten != removed
+    assert mw.dropin_refresh_notice((None, None)) is None
+    riscritto = mw.dropin_refresh_notice((rewritten, None))
+    assert f"aggiornato alla versione {mw.__version__}" in riscritto
+    rimosso = mw.dropin_refresh_notice((removed, "bus assente"))
+    assert "rimosso" in rimosso and "aggiornato" not in rimosso
+    assert "bus assente" in rimosso
+
+
 def test_salvataggio_nel_frattempo_vince(env):
     """Il worker ha letto lo stato prima di un salvataggio: il drop-in
     scritto dal salvataggio non va sovrascritto con lo stato vecchio."""

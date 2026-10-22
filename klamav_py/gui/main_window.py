@@ -700,18 +700,26 @@ class DropinState:
             raise DropinSettingsError(str(exc)) from exc
 
 
-def refresh_dropin_at_startup(state: DropinState, since: int) -> tuple[bool, str | None]:
+# Cambiamento del drop-in fatto da refresh_dropin_at_startup.
+DROPIN_REWRITTEN = "riscritto"
+DROPIN_REMOVED = "rimosso"
+
+
+def refresh_dropin_at_startup(state: DropinState, since: int) -> tuple[str | None, str | None]:
     """
     Rigenerazione all'avvio della GUI (refresh_outdated, `since` letto con
     lo stato) e daemon-reload se il drop-in è cambiato. Tocca il filesystem
     e chiama systemctl --user: la GUI la esegue con run_off_gui_thread.
-    Ritorna (riscritto, motivo del reload fallito o None); OSError e
-    DropinSettingsError arrivano al chiamante. render() precede ogni
-    lettura del drop-in: con impostazioni non valide non lo tocca.
+    Ritorna (DROPIN_REWRITTEN, DROPIN_REMOVED o None se non è cambiato
+    nulla; motivo del reload fallito o None); OSError e DropinSettingsError
+    arrivano al chiamante. render() precede ogni lettura del drop-in: con
+    impostazioni non valide non lo tocca. Con le impostazioni tutte
+    predefinite render() dà None e refresh_outdated toglie il drop-in.
     """
-    if not refresh_outdated(state.render(), since):
-        return False, None
-    return True, daemon_reload()
+    text = state.render()
+    if not refresh_outdated(text, since):
+        return None, None
+    return (DROPIN_REMOVED if text is None else DROPIN_REWRITTEN), daemon_reload()
 
 
 def dropin_refresh_notice(result) -> str | None:
@@ -736,13 +744,20 @@ def dropin_refresh_notice(result) -> str | None:
             f"{result}. Il timer di sistema usa ancora il comando vecchio; salva le "
             "Impostazioni per riprovare."
         )
-    rewritten, problem = result
-    if not rewritten:
+    change, problem = result
+    if change is None:
         return None
-    text = (
-        f"Il drop-in della scansione programmata di sistema («{path}») è stato "
-        f"aggiornato alla versione {__version__}, con le impostazioni salvate."
-    )
+    if change == DROPIN_REMOVED:
+        text = (
+            f"Il drop-in della scansione programmata di sistema («{path}») è stato "
+            "rimosso: le impostazioni salvate sono quelle predefinite, che il timer "
+            "usa già senza drop-in."
+        )
+    else:
+        text = (
+            f"Il drop-in della scansione programmata di sistema («{path}») è stato "
+            f"aggiornato alla versione {__version__}, con le impostazioni salvate."
+        )
     if problem:
         text += (
             " Il timer lo userà dal prossimo avvio della sessione "
@@ -1126,6 +1141,7 @@ class ScanPage(QWidget):
         self._omitted_errors = self._omitted_too_large = 0
         self._non_infected_rows = 0
         self._new_reports = 0
+        self._problems = 0
         self._aborted = None
         self.progress.setVisible(True)
         self._set_status_text("Scansione in corso…")
@@ -1325,6 +1341,12 @@ class ScanPage(QWidget):
         item = QListWidgetItem(f"ERRORE SISTEMA — {message}")
         item.setIcon(QIcon.fromTheme("data-error"))
         self.results_list.addItem(item)
+        # Problemi della scansione (registro delle prese visione, quarantena
+        # fallita): contano per l'esito come nella programmata interna
+        # (_bg_errors, 0.1.17). Il motivo di una scansione non completata
+        # arriva prima su aborted e ha già il suo esito.
+        if message != getattr(self, "_aborted", None):
+            self._problems = getattr(self, "_problems", 0) + 1
 
     def _on_acknowledged(self, path: str, signature: str) -> None:
         item = QListWidgetItem(_acknowledged_line(path, signature))
@@ -1489,6 +1511,8 @@ class ScanPage(QWidget):
         # irraggiungibile all'avvio) o interrotta da un errore bloccante.
         # Stesso testo della pianificazione interna per lo stesso caso.
         aborted, self._aborted = getattr(self, "_aborted", None), None
+        problems, self._problems = getattr(self, "_problems", 0), 0
+        problems_line = f"{problems} problemi durante la scansione, vedi l'elenco"
         if aborted is not None:
             status_text = f"Scansione non completata: {aborted}"
         else:
@@ -1499,6 +1523,8 @@ class ScanPage(QWidget):
                 status_text += f" {totals.unreadable_dirs} cartelle non leggibili."
             if totals.acknowledged:
                 status_text += f" {totals.acknowledged} già valutati."
+            if problems:
+                status_text += f" {problems_line}."
             if totals.io_faults:
                 # Ultima, come nella CLI: l'esito resta «con errori» (o
                 # «infezioni»), ma non deve sembrare un errore qualunque.
@@ -1522,7 +1548,7 @@ class ScanPage(QWidget):
             self.results_list.addItem(item)
             self.results_list.scrollToBottom()
 
-        outcome = scan_outcome(totals, aborted)
+        outcome = scan_outcome(totals, aborted, problems=problems)
         esito = outcome.label
 
         # BUG-001: report esplicito di fine scansione, non solo un
@@ -1537,6 +1563,7 @@ class ScanPage(QWidget):
             + (f"Cartelle non leggibili: {totals.unreadable_dirs} "
                f"({UNREADABLE_DIRS_HINT})\n" if totals.unreadable_dirs else "")
             + (f"Segnalazioni già valutate: {totals.acknowledged}\n" if totals.acknowledged else "")
+            + (f"{problems_line}\n" if problems and aborted is None else "")
             + f"Esito: {esito}"
             + (f"\n\nATTENZIONE: {io_fault_note(totals.io_faults)}"
                if totals.io_faults and aborted is None else "")
