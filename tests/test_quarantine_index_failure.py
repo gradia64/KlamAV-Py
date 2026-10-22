@@ -157,7 +157,7 @@ def test_aggiorna_della_gui_completa_la_voce(tmp_path):
     # Interruzione dopo lo spostamento, nello stesso processo della GUI:
     # l'intento resta, l'oggetto Quarantine della pagina è lo stesso.
     with patch.object(Quarantine, "_clear_intent", lambda self, dest, fd: os.close(fd)), \
-            patch.object(Quarantine, "_write_index", side_effect=Crash()):
+            patch.object(Quarantine, "_write_index", side_effect=Crash):
         with pytest.raises(Crash):
             q.quarantine_file(vittima, "Eicar-Test-Signature")
     assert q.list_entries() == []

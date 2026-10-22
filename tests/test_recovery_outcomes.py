@@ -42,6 +42,14 @@ class Crash(BaseException):
     pass
 
 
+# Gli effetti dei mock sollevano la CLASSE Crash, mai un'istanza condivisa:
+# un'istanza tenuta dal mock conserva il proprio traceback, quindi i frame
+# e, con f_back, il frame del test con le sue pagine. Il ciclo lo libera
+# il garbage collector, anche nel thread di un worker del test successivo,
+# e distruggere widget fuori dal thread della GUI fa crashare Qt
+# (segfault visto nella CI con Python 3.12).
+
+
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
@@ -74,7 +82,7 @@ def completata(base: Path) -> tuple[Path, Path, str]:
     q = Quarantine(base / "q")
     vittima = _vittima(base)
     _interrotta(q, vittima, **{"klamav_py.quarantine.Quarantine._write_index":
-                               {"side_effect": Crash()}})
+                               {"side_effect": Crash}})
     return q.dir, vittima, "completata"
 
 
@@ -180,7 +188,7 @@ def test_esito_dell_aggiorna_mostrato(app, tmp_path):
     # Operazione interrotta durante la sessione, poi «Aggiorna».
     vittima = _vittima(tmp_path)
     _interrotta(q, vittima, **{"klamav_py.quarantine.Quarantine._write_index":
-                               {"side_effect": Crash()}})
+                               {"side_effect": Crash}})
     page.refresh()
     page = _page_wait(page)
     testo = _page_text(page)
