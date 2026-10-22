@@ -256,12 +256,30 @@ class ScanWorker(QThread):
                 return f"Cartella esclusa: {decision.error}"
         return None
 
+    def _not_started(self, reason: str) -> None:
+        """Scansione non eseguita: aborted con il motivo, poi
+        finished_scan, così le pagine usano il percorso «non completata»
+        (stato, referto, Cronologia con il motivo, notifica)."""
+        message = f"Scansione non eseguita. {reason}"
+        self.aborted.emit(message)
+        self.error.emit(message)
+        self.progress.emit(ScanTotals())
+        self.finished_scan.emit(ScanTotals())
+
     def run(self) -> None:
+        # Ogni eccezione prima della traversata diventa una scansione non
+        # eseguita (0.1.17): prima client, Quarantine e resolve() erano
+        # fuori da ogni try, e un errore terminava il thread senza aborted
+        # né finished_scan, con la pagina «in corso» fino al riavvio.
+        #
         # Il client si costruisce solo da ClamdEndpoint.new_client(): socket
         # Unix o TCP, qui non fa differenza.
         factory = self._client_factory or self.endpoint.new_client
-        client = factory()
-        quarantine = Quarantine(self.quarantine_dir) if self.quarantine_dir else None
+        try:
+            client = factory()
+        except Exception as exc:  # noqa: BLE001 - motivo mostrato all'utente
+            self._not_started(f"Client di clamd non utilizzabile ({self.endpoint.describe()}): {exc}")
+            return
 
         # I file dentro la directory di quarantena sono i dati stessi
         # dell'applicazione (infetti già gestiti + index.json): se il
@@ -271,7 +289,12 @@ class ScanWorker(QThread):
         # i risultati provenienti dalla quarantena PRIMA di ogni conteggio;
         # l'esclusione a monte (per non leggerli proprio) appartiene alla
         # traversata in clamd_client.scan_stream.
-        quarantine_root = self.quarantine_dir.resolve() if self.quarantine_dir else None
+        try:
+            quarantine = Quarantine(self.quarantine_dir) if self.quarantine_dir else None
+            quarantine_root = self.quarantine_dir.resolve() if self.quarantine_dir else None
+        except Exception as exc:  # noqa: BLE001 - stesso testo della CLI
+            self._not_started(f"Quarantena non utilizzabile: {exc}")
+            return
 
         def inside_quarantine(p: Path) -> bool:
             if quarantine_root is None:
@@ -302,11 +325,7 @@ class ScanWorker(QThread):
         except OSError as exc:
             blocked = f"impossibile verificare le cartelle escluse: {exc}"
         if blocked:
-            message = f"Scansione non eseguita. {blocked}"
-            self.aborted.emit(message)
-            self.error.emit(message)
-            self.progress.emit(totals())
-            self.finished_scan.emit(totals())
+            self._not_started(blocked)
             return
 
         # Gate temporale condiviso tra l'aggiornamento "sto scansionando

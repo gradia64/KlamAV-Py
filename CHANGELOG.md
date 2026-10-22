@@ -25,6 +25,13 @@ sono in `docs/CHANGELOG-archive.md`.
   completata, e la completa il prossimo recupero: all'avvio della CLI o
   della GUI, o premendo «Aggiorna» nella pagina Quarantena (che ora
   ripete il recupero, senza riavviare).
+- **Una scansione non resta più «in corso» per sempre.** Se la
+  scansione della GUI non poteva partire per la cartella di quarantena
+  (per esempio un file al posto della cartella) o per il client di clamd,
+  la pagina Scansione restava «in corso» fino al riavvio e la scansione
+  programmata interna non lasciava traccia. Ora entrambe la registrano
+  come non completata, con il motivo nello stato, nel referto e nella
+  Cronologia, come la CLI («Quarantena non utilizzabile»).
 
 ### Modificato
 - **Ripristino, eliminazione e «Metti in quarantena» non bloccano più la

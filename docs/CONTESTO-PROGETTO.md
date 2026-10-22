@@ -731,6 +731,13 @@ rilascio.
   di errore. Le righe della pagina Scansione si aggiornano per percorso
   (la lista può essere stata svuotata da una nuova scansione); il worker
   di più file si ferma fra un file e l'altro alla chiusura.
+- **Preparazione della scansione nel percorso «non completata»**
+  (0.1.17). In `ScanWorker.run` costruzione del client, di `Quarantine` e
+  `quarantine_dir.resolve()` sono in un try: ogni eccezione prima della
+  traversata passa da `_not_started` (aborted con «Scansione non eseguita.
+  <motivo>», error, progress, finished_scan), lo stesso metodo usato per
+  le radici e le esclusioni bloccanti. Per la quarantena il motivo è
+  quello della CLI, «Quarantena non utilizzabile: …».
 - **L'intento ha la fiducia dell'indice** (0.1.13). Si valida con le
   stesse regole (`_entry_problem`), `original_path` assoluto, `dev`/`ino`
   interi non negativi, e `staging` deve stare nella directory
@@ -805,8 +812,6 @@ Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.16:
   (`_quarantine_count` con `peek_entries`, ma anche `decide_quarantine_dir`,
   `ensure_private_dir` e `sync_dropin`). Va reso asincrono per intero, non
   solo il conteggio.
-- **`ScanWorker.run()`:** costruzione del client e di `Quarantine` fuori
-  dal `try`; un `OSError` lascia la pagina «in corso» fino al riavvio.
 - **Pagina Pianificazione:** con un controllo bloccato su un mount di
   rete, le aggiunte di esclusioni vengono scartate in silenzio e il
   pulsante di salvataggio resta disattivato senza spiegazione.
