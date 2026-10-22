@@ -33,7 +33,7 @@ def test_conteggio_non_recupera_le_operazioni_interrotte(tmp_path):
         (home / nome).write_bytes(b"x")
     q.quarantine_file(home / "a", "Sig")
     with patch.object(Quarantine, "_clear_intent", lambda self, dest, fd: os.close(fd)), \
-            patch.object(Quarantine, "_write_index", side_effect=Crash()):
+            patch.object(Quarantine, "_write_index", side_effect=Crash):
         with pytest.raises(Crash):
             q.quarantine_file(home / "b", "Sig")
     intenti = sorted(q.dir.glob(".*.intent"))

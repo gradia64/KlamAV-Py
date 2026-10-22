@@ -25,6 +25,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from klamav_py.gui.off_thread import without_traceback
 from klamav_py.quarantine import Quarantine, QuarantineEntry, RecoveryOutcome
 
 
@@ -87,5 +88,7 @@ class QuarantineLoadWorker(QThread):
         try:
             result = load_quarantine(self._directory, self._quarantine)
         except Exception as exc:  # noqa: BLE001 - consegnata alla pagina
-            result = exc
+            # Senza traceback: tenuto in `result` legherebbe questo frame,
+            # e quindi il worker, in un ciclo (vedi without_traceback).
+            result = without_traceback(exc)
         self.loaded.emit(self._directory, result)

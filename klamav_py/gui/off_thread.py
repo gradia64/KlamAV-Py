@@ -42,6 +42,27 @@ class _Relay(QObject):
 _relay: _Relay | None = None
 
 
+def without_traceback(exc: BaseException) -> BaseException:
+    """
+    L'eccezione da consegnare a un altro thread, senza traceback (anche
+    nelle eccezioni concatenate). Tipo, argomenti e messaggio restano.
+
+    Tenuta in un locale del frame che l'ha intercettata (result = exc), il
+    suo traceback tiene vivo quel frame e, con f_back, quelli sopra: un
+    ciclo che libera solo il garbage collector, nel thread che capita.
+    Se il ciclo contiene un QThread o un widget (il worker in `self`, una
+    pagina catturata dalla callback), Qt se li vede distruggere fuori dal
+    thread della GUI: un segfault visto nella CI con Python 3.12 (0.1.17).
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        current.__traceback__ = None
+        current = current.__cause__ or current.__context__
+    return exc
+
+
 def run_off_gui_thread(fn: Callable[[], Any], callback: Callable[[Any], None]) -> None:
     """
     Esegue fn() in un thread daemon e chiama callback(risultato) nel
@@ -59,7 +80,7 @@ def run_off_gui_thread(fn: Callable[[], Any], callback: Callable[[Any], None]) -
         try:
             result = fn()
         except Exception as exc:  # noqa: BLE001 - consegnata al chiamante
-            result = exc
+            result = without_traceback(exc)
         relay.delivered.emit(callback, result)
 
     threading.Thread(target=target, name="klamav-fs-check", daemon=True).start()

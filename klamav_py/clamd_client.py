@@ -286,14 +286,18 @@ def root_problem(path: Path, scandir_error: Optional[OSError] = None) -> Optiona
         return None
     if not stat.S_ISDIR(st.st_mode):
         return f"«{path}» non è una directory né un file regolare"
-    if scandir_error is None:
+    # Il motivo come testo, non l'eccezione: tenuta in un locale, il suo
+    # traceback terrebbe vivo questo frame e, risalendo, quello del
+    # chiamante (ScanWorker) fino al garbage collector.
+    reason = None if scandir_error is None else (scandir_error.strerror or str(scandir_error))
+    if reason is None:
         try:
             with os.scandir(path):
                 pass
         except OSError as exc:
-            scandir_error = exc
-    if scandir_error is not None:
-        return f"«{path}» non è leggibile: {scandir_error.strerror or scandir_error}"
+            reason = exc.strerror or str(exc)
+    if reason is not None:
+        return f"«{path}» non è leggibile: {reason}"
     return None
 
 

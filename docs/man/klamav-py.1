@@ -370,6 +370,10 @@ interrupted, for example by a crash or by an error writing the index after
 the file has been moved, the next start of the CLI or the GUI (or
 \(lqAggiorna\(rq in the Quarantine page of the GUI) completes it or rolls
 it back, leaving the original file in place in that case.
+The intent is first written as
+.I .<name>.intent-pending
+and renamed only when complete: one left by a crash means the file was
+not touched, and it is removed by the next recovery.
 The CLI writes one line per recovered operation on standard error before
 the scan, with the original path and the outcome; the exit status does
 not change.

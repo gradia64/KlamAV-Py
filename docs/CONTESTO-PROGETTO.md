@@ -747,6 +747,20 @@ rilascio.
   <motivo>», error, progress, finished_scan), lo stesso metodo usato per
   le radici e le esclusioni bloccanti. Per la quarantena il motivo è
   quello della CLI, «Quarantena non utilizzabile: …».
+- **Nessun QObject tenuto in vita solo da un ciclo** (dopo la 0.1.17). Il
+  garbage collector libera un ciclo nel thread che fa partire la
+  raccolta, anche quello di un worker, e Qt non tollera widget o QThread
+  distrutti fuori dal loro thread (segfault nella CI con Python 3.12, in
+  `processEvents` di un test successivo). Cause trovate: un'eccezione
+  tenuta in un locale del frame che l'ha intercettata (`result = exc` in
+  `QuarantineLoadWorker.run` e `run_off_gui_thread`, `scandir_error = exc`
+  in `root_problem`), e nei test un mock con `side_effect=Crash()`, che
+  conserva l'istanza con il traceback. Un'eccezione da consegnare a un
+  altro thread passa da `off_thread.without_traceback` (tipo e messaggio
+  restano, i traceback no, anche nella catena); nei test `side_effect`
+  riceve la classe. `conftest.py` lo controlla dopo ogni test di un
+  modulo che usa Qt (`qobjects_in_cycles`, QSettings esclusa perché
+  rientrante e senza eventi); costa circa 20 secondi sull'intera suite.
 - **Problemi della scansione manuale nell'esito** (0.1.17). `ScanPage`
   conta i messaggi di `error` diversi dal motivo di aborted (`_problems`,
   come `_bg_errors`) e li passa a `scan_outcome(problems=…)`; referto e

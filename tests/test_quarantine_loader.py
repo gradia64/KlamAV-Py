@@ -62,7 +62,7 @@ def _prepare(base: Path) -> Path:
     second = home / "secondo.exe"
     second.write_bytes(b"due")
     with patch.object(Quarantine, "_clear_intent", lambda self, dest, fd: os.close(fd)), \
-            patch.object(Quarantine, "_write_index", side_effect=Crash()):
+            patch.object(Quarantine, "_write_index", side_effect=Crash):
         with pytest.raises(Crash):
             q.quarantine_file(second, "Sig.Due")
     (qdir / "index.json").write_text("{rotto")

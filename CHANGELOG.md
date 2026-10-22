@@ -5,6 +5,24 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## Non rilasciato
+
+### Corretto
+- **GUI: un possibile crash dopo un errore in un'operazione in
+  background.** Quando il caricamento della quarantena falliva, o una
+  scansione non partiva per una cartella non leggibile, il worker restava
+  in memoria finché il garbage collector di Python non lo liberava, anche
+  da un altro thread: per Qt è un errore che può far chiudere la GUI di
+  colpo, in un momento qualunque. Ora quegli oggetti si liberano subito.
+  Chi aggiorna non deve fare nulla.
+
+### Aggiunto
+- Test: dopo ogni test della GUI la suite controlla che nessun oggetto
+  Qt resti tenuto in vita solo da un ciclo di riferimenti, la causa del
+  segfault visto nella CI con Python 3.12 durante il rilascio della
+  0.1.17. La pagina man della CLI nomina anche `.<nome>.intent-pending`.
+
+---
 ## 0.1.17 — 2026-10-22
 
 ### Modificato

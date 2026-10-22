@@ -375,6 +375,11 @@ interrotta, per esempio da un crash o da un errore nello scrivere
 l'indice dopo lo spostamento del file, il successivo avvio della CLI o
 della GUI (o Aggiorna nella pagina Quarantena della GUI) la completa o la
 annulla, lasciando in quel caso il file originale al suo posto.
+L'intento si scrive prima come
+.I .<nome>.intent-pending
+e prende il nome definitivo solo quando è completo: uno rimasto da un
+crash vuol dire che il file non è stato toccato, e il recupero successivo
+lo toglie.
 La CLI scrive su standard error, prima della scansione, una riga per ogni
 operazione ripresa, con il percorso originale e l'esito; il codice di
 uscita non cambia.

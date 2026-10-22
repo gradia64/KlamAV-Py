@@ -84,7 +84,7 @@ def _exdev_verso(qdir: Path, crash_on=None):
 def test_crash_prima_dell_indice_completato_al_riavvio(tmp_path):
     q = Quarantine(tmp_path / "q")
     vittima = _infetto(tmp_path)
-    _crash_during(q, vittima, **{"klamav_py.quarantine.Quarantine._write_index": {"side_effect": Crash()}})
+    _crash_during(q, vittima, **{"klamav_py.quarantine.Quarantine._write_index": {"side_effect": Crash}})
 
     assert not vittima.exists() and q.list_entries() == []
     (dest,) = _quarantined_files(q)
@@ -103,7 +103,7 @@ def test_crash_prima_dell_indice_completato_al_riavvio(tmp_path):
 def test_crash_prima_della_sola_lettura(tmp_path):
     q = Quarantine(tmp_path / "q")
     vittima = _infetto(tmp_path)
-    _crash_during(q, vittima, **{"klamav_py.quarantine.os.fchmod": {"side_effect": Crash()}})
+    _crash_during(q, vittima, **{"klamav_py.quarantine.os.fchmod": {"side_effect": Crash}})
     (dest,) = _quarantined_files(q)
     assert _mode(dest) == 0o755
 
@@ -114,7 +114,7 @@ def test_crash_prima_della_sola_lettura(tmp_path):
 def test_crash_prima_dello_spostamento_non_lascia_tracce(tmp_path):
     q = Quarantine(tmp_path / "q")
     vittima = _infetto(tmp_path)
-    _crash_during(q, vittima, **{"klamav_py.quarantine.os.rename": {"side_effect": Crash()}})
+    _crash_during(q, vittima, **{"klamav_py.quarantine.os.rename": {"side_effect": Crash}})
     assert _intenti(q) != []
 
     q2 = Quarantine(q.dir)
@@ -193,7 +193,7 @@ def test_copia_crash_con_originale_nascosto_completata(tmp_path):
 def test_operazione_in_corso_in_un_altro_processo_non_toccata(tmp_path):
     q = Quarantine(tmp_path / "q")
     vittima = _infetto(tmp_path)
-    _crash_during(q, vittima, **{"klamav_py.quarantine.Quarantine._write_index": {"side_effect": Crash()}})
+    _crash_during(q, vittima, **{"klamav_py.quarantine.Quarantine._write_index": {"side_effect": Crash}})
     (intent,) = [p for p in q.dir.iterdir() if p.name.endswith(".intent")]
 
     # Il lock tenuto da un'altra descrizione di file equivale a un altro
