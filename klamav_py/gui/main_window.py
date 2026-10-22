@@ -73,7 +73,7 @@ from ..acknowledged import (
 from ..clamd_client import (
     DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult, unreadable_dir_line,
 )
-from ..quarantine import Quarantine, peek_entries
+from ..quarantine import Quarantine, describe_recovery, peek_entries
 from ..quarantine_policy import REASON_MAIL_STORE
 from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
 from ..scan_exclusions import decide as decide_exclusion
@@ -1655,7 +1655,18 @@ class QuarantinePage(QWidget):
         self.health_label.setStyleSheet("font-size: 12px; color: #d32f2f;")
         self.health_label.setVisible(False)
 
+        # Esiti del recupero di operazioni interrotte (describe_recovery),
+        # dall'ultimo caricamento che ne ha avuti: restano finché un altro
+        # caricamento non ne porta di nuovi o la cartella non cambia.
+        self.recovery_label = QLabel("")
+        self.recovery_label.setTextFormat(Qt.PlainText)
+        self.recovery_label.setWordWrap(True)
+        self.recovery_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.recovery_label.setStyleSheet("font-size: 12px;")
+        self.recovery_label.setVisible(False)
+
         layout.addWidget(self.table, 1)
+        layout.addWidget(self.recovery_label)
         layout.addWidget(self.health_label)
         layout.addLayout(buttons_row)
 
@@ -1666,6 +1677,8 @@ class QuarantinePage(QWidget):
         con il recupero, e intanto la pagina non ne ha uno."""
         self.quarantine_dir = Path(quarantine_dir)
         self.quarantine = None
+        self.recovery_label.clear()
+        self.recovery_label.setVisible(False)
         self.refresh()
 
     def refresh(self) -> None:
@@ -1693,6 +1706,7 @@ class QuarantinePage(QWidget):
             return
         fresh = self.quarantine is not result.quarantine
         self.quarantine = result.quarantine
+        self._show_recovered(result.recovered)
         self._show(result)
         if fresh:
             self.quarantine_ready.emit(result.quarantine)
@@ -1733,6 +1747,24 @@ class QuarantinePage(QWidget):
             self.table.setItem(row, 1, QTableWidgetItem(entry.signature or ""))
             self.table.setItem(row, 2, QTableWidgetItem(when))
             self.table.item(row, 0).setData(Qt.UserRole, entry.quarantined_path)
+
+    def _show_recovered(self, recovered: list) -> None:
+        """Esiti del recupero di questo caricamento: nella pagina, e con
+        una notifica della tray se la pagina non è visibile (finestra in
+        tray, altra pagina, avvio), una per caricamento."""
+        if not recovered:
+            return
+        lines = [describe_recovery(item) for item in recovered]
+        self.recovery_label.setText("\n".join(lines))
+        self.recovery_label.setVisible(True)
+        main_window = self.window()
+        page_visible = self.isVisible() and main_window.isVisible()
+        if not page_visible and hasattr(main_window, "tray_icon") \
+                and main_window.tray_icon.isVisible():
+            main_window.tray_icon.showMessage(
+                f"{APP_NAME} - Quarantena", "\n".join(lines),
+                _icon("dialog-information"), 8000
+            )
 
     def _update_health_label(self, backups: list[Path], orphans: list[Path]) -> None:
         parti = []

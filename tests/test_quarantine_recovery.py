@@ -94,7 +94,7 @@ def test_crash_prima_dell_indice_completato_al_riavvio(tmp_path):
     (entry,) = q2.list_entries()
     assert entry.original_path == str(vittima) and entry.quarantined_path == str(dest)
     assert entry.signature == "Eicar-Test-Signature" and entry.original_mode == 0o755
-    assert q2.recovered == [(dest, "completata")]
+    assert q2.recovered == [(dest, "completata", str(vittima))]
     assert q2.orphans() == [] and _intenti(q2) == []
     # Ripristinabile come qualunque altra voce.
     assert q2.restore(entry.quarantined_path).read_bytes() == b"X5O!P%@AP"
@@ -205,7 +205,8 @@ def test_operazione_in_corso_in_un_altro_processo_non_toccata(tmp_path):
         assert q2.recovered == [] and q2.list_entries() == [] and intent.exists()
     finally:
         os.close(fd)
-    assert q2.recover_interrupted() == [(Path(_quarantined_files(q2)[0]), "completata")]
+    assert q2.recover_interrupted() == [
+        (Path(_quarantined_files(q2)[0]), "completata", str(vittima))]
 
 
 def test_intento_scritto_a_meta_ignorato(tmp_path):

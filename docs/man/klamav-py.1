@@ -370,6 +370,9 @@ interrupted, for example by a crash or by an error writing the index after
 the file has been moved, the next start of the CLI or the GUI (or
 \(lqAggiorna\(rq in the Quarantine page of the GUI) completes it or rolls
 it back, leaving the original file in place in that case.
+The CLI writes one line per recovered operation on standard error before
+the scan, with the original path and the outcome; the exit status does
+not change.
 .TP
 .I \%~/.local/share/klamav-py/acknowledged.json
 Register of acknowledged detections (0600), written atomically, with the

@@ -73,7 +73,7 @@ def _assert_messaggio(exc: Exception, vittima: Path) -> None:
 def _assert_completata_dal_recupero(qdir: Path, vittima: Path) -> None:
     q2 = Quarantine(qdir)
     (dest,) = _in_quarantena(q2)
-    assert q2.recovered == [(dest, "completata")]
+    assert q2.recovered == [(dest, "completata", str(vittima))]
     assert [e.original_path for e in q2.list_entries()] == [str(vittima)]
     assert _servizio(q2) == [] and q2.orphans() == []
     assert stat.S_IMODE(os.lstat(dest).st_mode) == 0o400

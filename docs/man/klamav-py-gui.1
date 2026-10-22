@@ -100,6 +100,9 @@ the reason.
 \(lqAggiorna\(rq also repeats the recovery, so an operation left half done
 during the session (for example a file moved into quarantine whose index
 entry could not be written) is completed without restarting.
+The operations completed or rolled back by a load are listed in the
+Quarantine page, with the original path and the outcome, and announced
+by a tray notification if the page is not visible.
 .
 .SH OPTIONS
 .BR \-\-socket ,

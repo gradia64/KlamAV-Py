@@ -42,7 +42,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 from .private_files import ensure_private_dir, open_private_fd, write_private_text
 
@@ -118,6 +118,23 @@ def _entry_problem(item) -> Optional[str]:
 
 class QuarantineError(RuntimeError):
     pass
+
+
+class RecoveryOutcome(NamedTuple):
+    """Un'operazione ripresa da recover_interrupted()."""
+
+    quarantined: Path  # il file (previsto) nella directory di quarantena
+    outcome: str  # «completata», «annullata: …», «non recuperata: …»
+    # Percorso originale dall'intento; None se l'intento non era valido.
+    original: Optional[str] = None
+
+
+def describe_recovery(item: RecoveryOutcome) -> str:
+    """Testo per l'utente di un esito del recupero: lo stesso nella
+    pagina Quarantena, nella notifica della tray e su stderr della CLI."""
+    if item.original is not None:
+        return f"Quarantena interrotta di {item.original}: {item.outcome}"
+    return f"Quarantena interrotta ({item.quarantined}): {item.outcome}"
 
 
 class _CorruptIndex(Exception):
@@ -213,9 +230,9 @@ class Quarantine:
         # questo attributo (il recupero può averlo fatto un'altra istanza,
         # es. il worker Real-Time): usa corrupt_backups().
         self.last_recovery: Optional[Tuple[Path, str]] = None
-        # Operazioni riprese da recover_interrupted() in questa istanza:
-        # (file in quarantena, esito) per la diagnostica.
-        self.recovered: List[Tuple[Path, str]] = []
+        # Operazioni riprese da recover_interrupted() in questa istanza,
+        # mostrate da CLI e GUI con describe_recovery().
+        self.recovered: List[RecoveryOutcome] = []
         with self._index_lock():
             if not self.index_path.exists():
                 self._write_index([])
@@ -372,13 +389,13 @@ class Quarantine:
         self._intent_path(dest).unlink(missing_ok=True)
         os.close(fd)
 
-    def recover_interrupted(self) -> List[Tuple[Path, str]]:
+    def recover_interrupted(self) -> List[RecoveryOutcome]:
         """Completa o annulla le quarantene interrotte (vedi _write_intent).
         Eseguita anche alla creazione dell'istanza."""
         with self._index_lock():
             return self._recover_interrupted_locked()
 
-    def _recover_interrupted_locked(self) -> List[Tuple[Path, str]]:
+    def _recover_interrupted_locked(self) -> List[RecoveryOutcome]:
         done = []
         for intent in sorted(self.dir.glob(f".*{INTENT_SUFFIX}")):
             try:
@@ -436,7 +453,7 @@ class Quarantine:
             finally:
                 os.close(fd)
 
-    def _set_aside_intent(self, intent: Path, dest_name: str, exc: Exception) -> Tuple[Path, str]:
+    def _set_aside_intent(self, intent: Path, dest_name: str, exc: Exception) -> RecoveryOutcome:
         backup = self.dir / (
             f"{intent.name}.corrupt-"
             f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
@@ -446,9 +463,9 @@ class Quarantine:
             where = f"intento messo da parte in {backup.name}"
         except OSError as rename_exc:
             where = f"intento lasciato al suo posto ({rename_exc})"
-        return (self.dir / dest_name, f"non recuperata: {exc}; {where}")
+        return RecoveryOutcome(self.dir / dest_name, f"non recuperata: {exc}; {where}")
 
-    def _recover_one(self, raw: bytes, copying: bool) -> Optional[Tuple[Path, str]]:
+    def _recover_one(self, raw: bytes, copying: bool) -> Optional[RecoveryOutcome]:
         """Esito del recupero di un intento, o None se non c'era niente da
         fare (l'operazione non aveva ancora toccato il file).
 
@@ -507,7 +524,9 @@ class Quarantine:
             # la sostituzione gestita da _handle_substitution, interrotta:
             # nessuna voce, resta visibile in orphans().
             if (dest_st.st_dev, dest_st.st_ino) != identity:
-                return (dest, "lasciato per il recupero manuale: non è il file verificato")
+                return RecoveryOutcome(
+                    dest, "lasciato per il recupero manuale: non è il file verificato",
+                    str(original))
             # Manca al più il passaggio a sola lettura.
             fd = os.open(dest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
             try:
@@ -522,7 +541,8 @@ class Quarantine:
                 # scansione lo rileva di nuovo). Rifare qui lo spostamento
                 # dell'originale vorrebbe dire ripeterne le verifiche.
                 dest.unlink(missing_ok=True)
-                return (dest, "annullata: il file originale è rimasto al suo posto")
+                return RecoveryOutcome(
+                    dest, "annullata: il file originale è rimasto al suo posto", str(original))
             if same(staging):
                 # Originale già rinominato col nome temporaneo ma non
                 # cancellato: la copia completa è in quarantena.
@@ -539,7 +559,7 @@ class Quarantine:
         if not any(e.quarantined_path == str(dest) for e in entries):
             entries.append(entry)
             self._write_index(entries)
-        return (dest, outcome)
+        return RecoveryOutcome(dest, outcome, str(original))
 
     # -- quarantena ------------------------------------------------------
 

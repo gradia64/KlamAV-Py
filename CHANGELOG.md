@@ -26,6 +26,15 @@ sono in `docs/CHANGELOG-archive.md`.
   della GUI, o premendo «Aggiorna» nella pagina Quarantena (che ora
   ripete il recupero, senza riavviare).
 
+### Modificato
+- **Quarantena: le operazioni interrotte e riprese si vedono.** Quando
+  una quarantena interrotta (per esempio da un crash) viene completata o
+  annullata, o il suo intento non è valido e viene messo da parte, la
+  pagina Quarantena lo dice, con il percorso originale e l'esito, e se la
+  pagina non è visibile arriva una notifica della tray. La CLI scrive la
+  stessa riga su stderr prima della scansione; il codice di uscita non
+  cambia. Prima l'esito era registrato ma nessuno lo mostrava.
+
 ---
 ## 0.1.16 — 2026-10-15
 

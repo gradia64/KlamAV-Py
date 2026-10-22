@@ -97,8 +97,8 @@ def _assert_set_aside(q: Quarantine, dest: Path, user_file: Path):
     assert q2.corrupt_backups() == []
     # dest resta dov'è, visibile come orfano; l'intento messo da parte no.
     assert dest.exists() and q2.orphans() == [dest]
-    ((where, outcome),) = q2.recovered
-    assert where == dest and outcome.startswith("non recuperata")
+    ((where, outcome, original),) = q2.recovered
+    assert where == dest and outcome.startswith("non recuperata") and original is None
     # Una seconda istanza non ci riprova.
     assert Quarantine(q.dir).recovered == []
     return q2
@@ -169,8 +169,8 @@ def test_errore_imprevisto_nel_recupero(env):
     dest = _plant(q, _record(home, user_file))
     with patch.object(Quarantine, "_load_index", side_effect=RuntimeError("imprevisto")):
         q2 = Quarantine(q.dir)  # non deve sollevare
-    ((where, outcome),) = q2.recovered
-    assert where == dest and "imprevisto" in outcome
+    ((where, outcome, original),) = q2.recovered
+    assert where == dest and "imprevisto" in outcome and original is None
     assert not (q.dir / f".{DEST}.intent").exists()
     assert list(q.dir.glob(f".{DEST}.intent.corrupt-*"))
     assert dest.exists() and user_file.read_bytes() == b"lavoro di mesi"
@@ -182,7 +182,7 @@ def test_intento_valido_ancora_recuperato(env):
     q, home, user_file = env
     dest = _plant(q, _record(home, user_file))
     q2 = Quarantine(q.dir)
-    assert q2.recovered == [(dest, "completata")]
+    assert q2.recovered == [(dest, "completata", str(home / "virus.exe"))]
     assert len(q2.list_entries()) == 2 and user_file.exists()
 
 
@@ -224,7 +224,7 @@ def test_staging_sostituito_lasciato_per_il_recupero_manuale(tmp_path):
     assert staging.read_bytes() == b"versione appena salvata"
     (entry,) = q2.list_entries()
     assert Path(entry.quarantined_path).read_bytes() == b"X5O!P%@AP"
-    ((_, outcome),) = q2.recovered
+    ((_, outcome, _),) = q2.recovered
     assert outcome.startswith("completata;") and str(staging) in outcome
     assert "recupero manuale" in outcome
 

@@ -25,7 +25,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from klamav_py.quarantine import Quarantine, QuarantineEntry
+from klamav_py.quarantine import Quarantine, QuarantineEntry, RecoveryOutcome
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,9 @@ class QuarantineSnapshot:
     # Errore di lettura dell'indice (disco, permessi): la pagina lo mostra
     # al posto dell'elenco, come prima faceva refresh().
     error: str | None = None
+    # Operazioni interrotte riprese da QUESTO caricamento (costruttore o
+    # recover_interrupted), da mostrare una volta.
+    recovered: list[RecoveryOutcome] = field(default_factory=list)
 
 
 def load_quarantine(directory: Path, quarantine: Quarantine | None = None) -> QuarantineSnapshot:
@@ -52,19 +55,21 @@ def load_quarantine(directory: Path, quarantine: Quarantine | None = None) -> Qu
     mostrare. Tocca il filesystem: va eseguita nel worker.
     """
     reuse = quarantine is not None and quarantine.dir == directory
+    recovered: list[RecoveryOutcome] = []
     if not reuse:
         quarantine = Quarantine(directory)
+        recovered = list(quarantine.recovered)
     try:
         if reuse:
-            quarantine.recover_interrupted()
+            recovered = quarantine.recover_interrupted()
         entries = quarantine.list_entries()
     except OSError as exc:
-        return QuarantineSnapshot(quarantine, error=str(exc))
+        return QuarantineSnapshot(quarantine, error=str(exc), recovered=recovered)
     try:
         backups, orphans = quarantine.corrupt_backups(), quarantine.orphans()
     except OSError:
         backups, orphans = [], []
-    return QuarantineSnapshot(quarantine, entries, backups, orphans)
+    return QuarantineSnapshot(quarantine, entries, backups, orphans, recovered=recovered)
 
 
 class QuarantineLoadWorker(QThread):

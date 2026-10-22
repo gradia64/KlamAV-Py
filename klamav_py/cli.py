@@ -75,7 +75,7 @@ from .clamd_client import (
     unreadable_dir_line,
 )
 from .private_files import open_private_for_write
-from .quarantine import Quarantine, QuarantineError
+from .quarantine import Quarantine, QuarantineError, describe_recovery
 from .quarantine_location import decide as decide_quarantine_dir
 from .quarantine_policy import QuarantinePolicy, default_report_only_dirs
 from .scan_exclusions import decide as decide_exclusion
@@ -461,6 +461,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     except (OSError, QuarantineError) as exc:
         print(f"Quarantena non utilizzabile: {exc}", file=sys.stderr)
         return 2
+    # Operazioni interrotte riprese dal costruttore: informazione, non un
+    # errore della scansione, quindi il codice di uscita non cambia.
+    for item in quarantine.recovered if quarantine else ():
+        print(describe_recovery(item), file=sys.stderr)
     policy = build_policy(args)
 
     scanned = 0

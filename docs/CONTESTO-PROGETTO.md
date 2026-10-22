@@ -708,6 +708,16 @@ rilascio.
   il recupero fallisce sull'indice e mette l'intento da parte come
   `.corrupt-*` (regola della 0.1.13 per gli errori imprevisti); il file
   resta visibile fra gli orfani.
+- **Esiti del recupero mostrati** (0.1.17). `recover_interrupted()` e
+  `Quarantine.recovered` danno `RecoveryOutcome` (file in quarantena,
+  esito, percorso originale o None per un intento non valido), e
+  `describe_recovery()` (senza Qt) ne fa il testo unico: su stderr della
+  CLI subito dopo la costruzione di `Quarantine`, prima della scansione,
+  senza toccare il codice di uscita; nella GUI in
+  `QuarantineSnapshot.recovered`, solo gli esiti di quel caricamento, che
+  la pagina Quarantena mostra in `recovery_label` (fino a un caricamento
+  con esiti nuovi o a un cambio di cartella) e, se la pagina non è
+  visibile, in una notifica della tray per caricamento.
 - **L'intento ha la fiducia dell'indice** (0.1.13). Si valida con le
   stesse regole (`_entry_problem`), `original_path` assoluto, `dev`/`ino`
   interi non negativi, e `staging` deve stare nella directory
@@ -790,8 +800,11 @@ Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.16:
   pulsante di salvataggio resta disattivato senza spiegazione.
 - Il messaggio «verrà ritentata finché il problema non è risolto» non ha
   seguito dopo il primo tentativo.
-- `Quarantine.recovered` non è letto da nessun consumatore: valutare di
-  mostrare gli esiti del recupero (tray una volta, stderr nella CLI).
+- **Recupero eseguito da `ScanWorker`** (annotato nella 0.1.17): ogni
+  scansione della GUI costruisce la propria `Quarantine`, con il recupero.
+  Se è quella a completare o annullare un'operazione interrotta (per
+  esempio di un'altra istanza), l'esito non arriva alla pagina Quarantena,
+  che al caricamento successivo non trova più nulla da recuperare.
 - **Hash riletto dopo il rilevamento:** fra il verdetto di clamd e la
   rilettura il contenuto può cambiare, e la GUI registrerebbe la presa
   visione del contenuto nuovo. Richiede che lo stesso utente modifichi il
