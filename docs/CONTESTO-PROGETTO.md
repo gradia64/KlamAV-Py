@@ -12,7 +12,7 @@ Non sostituisce la lettura del codice: i docstring dei moduli spiegano il
 dal codice non si vede, cioè da dove viene una regola e cosa è già stato
 valutato e scartato. La sezione 9 indica dove trovare il resto.
 
-Aggiornato alla versione 0.1.16.
+Aggiornato alla versione 0.1.17.
 
 ---
 
@@ -180,6 +180,15 @@ Ripristina ed Elimina attivi senza quarantena, la spunta verde con soli
 errori) e percorsi difensivi mai esercitati. Ognuno ha ora una regola
 sola (`DropinSettingsError`, `QuarantineStatus`, `scan_outcome`) e un
 test; tolto anche il timer di sistema rimasto dalla 0.1.9.
+
+**0.1.17 (22 ottobre) — la quarantena non perde operazioni, non blocca la
+finestra e dice cosa ha recuperato.** L'intento si pubblica solo completo
+e bloccato, e resta finché la voce non è nell'indice; ripristino,
+eliminazione e «Metti in quarantena» girano nel worker; gli esiti del
+recupero arrivano a pagina, tray e stderr. Chiuse anche la scansione che
+restava «in corso» quando la preparazione falliva e le due incoerenze
+annotate nella 0.1.16 (problemi della manuale, avviso del drop-in
+rimosso).
 
 ---
 
@@ -814,7 +823,7 @@ rilascio.
 Già tracciati: segnalarli di nuovo è utile solo se si aggiunge uno scenario,
 una riproduzione o una correzione migliore.
 
-Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.16:
+Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.17:
 
 - **Quarantena nel thread della GUI, residuo** (dopo la 0.1.17): il
   salvataggio delle Impostazioni quando cambia la cartella
@@ -826,11 +835,6 @@ Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.16:
   pulsante di salvataggio resta disattivato senza spiegazione.
 - Il messaggio «verrà ritentata finché il problema non è risolto» non ha
   seguito dopo il primo tentativo.
-- **Recupero eseguito da `ScanWorker`** (annotato nella 0.1.17): ogni
-  scansione della GUI costruisce la propria `Quarantine`, con il recupero.
-  Se è quella a completare o annullare un'operazione interrotta (per
-  esempio di un'altra istanza), l'esito non arriva alla pagina Quarantena,
-  che al caricamento successivo non trova più nulla da recuperare.
 - **Hash riletto dopo il rilevamento:** fra il verdetto di clamd e la
   rilettura il contenuto può cambiare, e la GUI registrerebbe la presa
   visione del contenuto nuovo. Richiede che lo stesso utente modifichi il
@@ -868,6 +872,22 @@ Annotati nella 0.1.14:
   Limite noto, non toccato: i tag del progetto non hanno revisione.
 - Residuo nei test: `tests/test_settings_exclusions.py` imposta
   `_schedule_missing_noted`, attributo non più usato in produzione.
+
+Annotati nella 0.1.17:
+
+- **Recupero eseguito da `ScanWorker`:** ogni scansione della GUI
+  costruisce la propria `Quarantine`, con il recupero. Se è quella a
+  completare o annullare un'operazione interrotta (per esempio di
+  un'altra istanza), l'esito non arriva alla pagina Quarantena, che al
+  caricamento successivo non trova più nulla da recuperare.
+- **Recupero con il disco ancora pieno:** se l'indice non si scrive
+  nemmeno nel recupero, l'intento finisce fra quelli messi da parte
+  (`.corrupt-*`, regola della 0.1.13 per gli errori imprevisti) invece di
+  restare per un tentativo successivo; il file resta visibile fra gli
+  orfani e l'esito compare come «non recuperata».
+- **Hardlink nella cartella di quarantena:** l'intento si pubblica con
+  `link()`. Su un filesystem senza hardlink ogni quarantena fallisce
+  prima di toccare il file, con l'errore di `link()`.
 
 ---
 

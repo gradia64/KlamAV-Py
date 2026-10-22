@@ -5,7 +5,22 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
-## Non rilasciato
+## 0.1.17 — 2026-10-22
+
+### Modificato
+- **Ripristino, eliminazione e «Metti in quarantena» non bloccano più la
+  finestra.** Con la quarantena, o i file da spostare, su un disco lento
+  o di rete, queste azioni bloccavano la finestra fino alla fine. Ora
+  girano in background, una alla volta: durante l'operazione Ripristina
+  ed Elimina sono disattivati e «Metti in quarantena» chiede di
+  attendere. Conferme e messaggi sono quelli di prima.
+- **Quarantena: le operazioni interrotte e riprese si vedono.** Quando
+  una quarantena interrotta (per esempio da un crash) viene completata o
+  annullata, o il suo intento non è valido e viene messo da parte, la
+  pagina Quarantena lo dice, con il percorso originale e l'esito, e se la
+  pagina non è visibile arriva una notifica della tray. La CLI scrive la
+  stessa riga su stderr prima della scansione; il codice di uscita non
+  cambia. Prima l'esito era registrato ma nessuno lo mostrava.
 
 ### Corretto
 - **Quarantena: un'operazione non perde più il suo intento per un
@@ -45,20 +60,17 @@ sono in `docs/CHANGELOG-archive.md`.
   diceva che era stato «aggiornato alla versione …». Ora dice che è stato
   rimosso.
 
-### Modificato
-- **Ripristino, eliminazione e «Metti in quarantena» non bloccano più la
-  finestra.** Con la quarantena, o i file da spostare, su un disco lento
-  o di rete, queste azioni bloccavano la finestra fino alla fine. Ora
-  girano in background, una alla volta: durante l'operazione Ripristina
-  ed Elimina sono disattivati e «Metti in quarantena» chiede di
-  attendere. Conferme e messaggi sono quelli di prima.
-- **Quarantena: le operazioni interrotte e riprese si vedono.** Quando
-  una quarantena interrotta (per esempio da un crash) viene completata o
-  annullata, o il suo intento non è valido e viene messo da parte, la
-  pagina Quarantena lo dice, con il percorso originale e l'esito, e se la
-  pagina non è visibile arriva una notifica della tray. La CLI scrive la
-  stessa riga su stderr prima della scansione; il codice di uscita non
-  cambia. Prima l'esito era registrato ma nessuno lo mostrava.
+### Aggiunto
+- Test: gara deterministica fra un recupero concorrente e la
+  registrazione dell'intento; indice, sola lettura o rimozione
+  dell'originale che falliscono dopo lo spostamento, con il recupero che
+  completa la voce; esiti del recupero con lo stesso testo nella pagina
+  Quarantena e su stderr della CLI, e notifica della tray una volta;
+  nessuna chiamata al filesystem dal thread della GUI durante ripristino,
+  eliminazione e «Metti in quarantena», e chiusura che aspetta
+  l'operazione in corso; scansione manuale e programmata interna non
+  eseguite per la quarantena o il client; problemi della scansione
+  manuale nell'esito; avviso del drop-in rimosso. Totale: 1057 test.
 
 ---
 ## 0.1.16 — 2026-10-15
