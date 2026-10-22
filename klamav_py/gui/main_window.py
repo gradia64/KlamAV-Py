@@ -98,6 +98,7 @@ from .db_info_worker import DbInfoWorker, probe_db_info
 from .ping_worker import PingWorker
 from .single_instance import IPC_MAX_PAYLOAD_BYTES, IPC_SEPARATOR
 from .update_check_worker import UpdateCheckWorker, UpdateInfo
+from .quarantine_action import ActionResult, QuarantineActionWorker, QuarantineRequest
 from .quarantine_loader import QuarantineLoadWorker, QuarantineSnapshot
 
 # Fonte unica in quarantine_location: lo stesso percorso è nell'ExecStart
@@ -933,6 +934,8 @@ class ScanPage(QWidget):
         # (set_quarantine): fino ad allora è None.
         self.quarantine_dir = Path(quarantine_dir)
         self.quarantine: Quarantine | None = None
+        # «Metti in quarantena» dei selezionati in corso: uno alla volta.
+        self.quarantine_worker: QuarantineActionWorker | None = None
         self.history = history
         self.worker: ScanWorker | None = None
         self._scanned = self._infections = self._errors = self._too_large = 0
@@ -1375,40 +1378,76 @@ class ScanPage(QWidget):
         if not selected:
             QMessageBox.information(self, "Nessuna selezione", "Seleziona uno o più file infetti dalla lista.")
             return
+        page = getattr(self.window(), "quarantine_page", None)
         if self.quarantine is None:
-            page = getattr(self.window(), "quarantine_page", None)
             QMessageBox.information(
                 self, *quarantine_unavailable_message(getattr(page, "status", None))
             )
             return
+        page_status = getattr(page, "status", None)
+        if self.quarantine_worker is not None or (
+                page_status is not None and page_status.kind == QuarantineStatus.BUSY):
+            QMessageBox.information(
+                self, *quarantine_unavailable_message(QuarantineStatus(QuarantineStatus.BUSY))
+            )
+            return
 
-        moved = 0
+        requests = []
         skipped = 0
         for item in selected:
             data = item.data(Qt.UserRole)
             if not data:
                 skipped += 1
                 continue
-            try:
-                entry = self.quarantine.quarantine_file(Path(data["path"]), data.get("signature"))
-            except Exception as exc:
-                QMessageBox.warning(self, "Quarantena fallita", f"{data['path']}: {exc}")
+            requests.append(QuarantineRequest(data["path"], data.get("signature")))
+        if not requests:
+            self._report_nothing_to_quarantine()
+            return
+
+        # Uno spostamento su un mount lento non deve bloccare la finestra:
+        # le stesse chiamate a quarantine_file, nel worker (0.1.17).
+        worker = QuarantineActionWorker(
+            self.quarantine, QuarantineActionWorker.QUARANTINE, requests=requests
+        )
+        worker.done.connect(lambda result: self._on_quarantine_selected_done(result, skipped))
+        self.quarantine_worker = worker
+        worker.start()
+
+    def _on_quarantine_selected_done(self, result: ActionResult, skipped: int) -> None:
+        # Rilascio differito, vedi _retire_qthread: l'emit è dentro run().
+        worker, self.quarantine_worker = self.quarantine_worker, None
+        if worker is not None:
+            _retire_qthread(worker)
+
+        # Le righe si cercano per percorso: durante l'operazione la lista
+        # può essere stata svuotata da una nuova scansione.
+        moved = {request.path: (request, entry) for request, entry in result.moved}
+        for row in range(self.results_list.count()):
+            item = self.results_list.item(row)
+            data = item.data(Qt.UserRole)
+            if not data or data.get("path") not in moved:
                 continue
-            moved += 1
-            item.setText(f"IN QUARANTENA — {entry.original_path} ({data.get('signature') or ''})")
+            request, entry = moved[data["path"]]
+            item.setText(f"IN QUARANTENA — {entry.original_path} ({request.signature or ''})")
             item.setForeground(QColor("gray"))
             item.setData(Qt.UserRole, None)
 
-        if moved:
+        if result.moved:
             # BUG-002: la quarantena manuale dalla pagina Scansione non
-            # passa dal worker (viene fatta qui, direttamente sul thread
-            # GUI), quindi va notificata a parte rispetto a _on_quarantined.
+            # passa da ScanWorker, quindi va notificata a parte rispetto a
+            # _on_quarantined.
             main_window = self.window()
             if hasattr(main_window, "quarantine_page"):
                 main_window.quarantine_page.refresh()
 
-        if skipped and not moved:
-            QMessageBox.information(self, "Nessun file infetto selezionato", "La selezione non contiene file infetti da mettere in quarantena.")
+        for request, message in result.failed:
+            QMessageBox.warning(self, "Quarantena fallita", f"{request.path}: {message}")
+
+        if skipped and not result.moved:
+            self._report_nothing_to_quarantine()
+
+    def _report_nothing_to_quarantine(self) -> None:
+        QMessageBox.information(self, "Nessun file infetto selezionato", "La selezione non contiene file infetti da mettere in quarantena.")
 
     @staticmethod
     def _format_duration(seconds: float) -> str:
@@ -1553,6 +1592,8 @@ class QuarantineStatus:
     LOADING = "caricamento"
     READY = "pronta"
     FAILED = "fallita"
+    # Ripristino o eliminazione in corso nel worker (0.1.17).
+    BUSY = "operazione in corso"
 
     kind: str
     reason: str | None = None  # solo per FAILED
@@ -1572,6 +1613,12 @@ def quarantine_unavailable_message(status: QuarantineStatus | None) -> tuple[str
             f"{status.reason}\n\nCorreggi la cartella nelle Impostazioni, se serve, poi "
             "premi «Aggiorna» nella pagina Quarantena: il caricamento non riparte da solo.",
         )
+    if status is not None and status.kind == QuarantineStatus.BUSY:
+        return (
+            "Quarantena occupata",
+            "È in corso un'operazione sulla quarantena (ripristino, eliminazione o "
+            "spostamento dei file selezionati): attendi che finisca e riprova.",
+        )
     return (
         "Quarantena in caricamento",
         "La quarantena è ancora in caricamento (vedi la pagina Quarantena): attendi "
@@ -1585,7 +1632,8 @@ class QuarantinePage(QWidget):
     recupero delle operazioni interrotte), lettura dell'indice e
     diagnostica girano in QuarantineLoadWorker, mai nel thread della GUI:
     la pagina mostra «caricamento» e poi l'esito. Ripristino ed
-    eliminazione restano azioni sincrone su richiesta dell'utente.
+    eliminazione girano in QuarantineActionWorker (0.1.17), una alla
+    volta: conferme e messaggi restano nel thread della GUI.
     """
 
     # La Quarantine pronta (recupero fatto) per la directory attuale: la
@@ -1597,6 +1645,7 @@ class QuarantinePage(QWidget):
         self.quarantine_dir = Path(quarantine_dir)
         self.quarantine: Quarantine | None = None
         self.worker: QuarantineLoadWorker | None = None
+        self.action_worker: QuarantineActionWorker | None = None
         self._reload_pending = False
         self.status = QuarantineStatus(QuarantineStatus.LOADING)
 
@@ -1683,8 +1732,9 @@ class QuarantinePage(QWidget):
 
     def refresh(self) -> None:
         """Rilegge la quarantena nel worker. Una richiesta durante un
-        caricamento si ripete alla sua fine, con lo stato di allora."""
-        if self.worker is not None:
+        caricamento o un'operazione si ripete alla sua fine, con lo stato
+        di allora."""
+        if self.worker is not None or self.action_worker is not None:
             self._reload_pending = True
             return
         self._reload_pending = False
@@ -1716,11 +1766,14 @@ class QuarantinePage(QWidget):
         pulsanti: Ripristina ed Elimina sono attivi solo a quarantena
         pronta."""
         self.status = status
-        loading = status.kind == QuarantineStatus.LOADING
-        self.loading_label.setText(
-            f"Caricamento della quarantena in «{self.quarantine_dir}»…" if loading else ""
-        )
-        self.loading_label.setVisible(loading)
+        if status.kind == QuarantineStatus.LOADING:
+            text = f"Caricamento della quarantena in «{self.quarantine_dir}»…"
+        elif status.kind == QuarantineStatus.BUSY:
+            text = "Operazione sulla quarantena in corso…"
+        else:
+            text = ""
+        self.loading_label.setText(text)
+        self.loading_label.setVisible(bool(text))
         self.restore_button.setEnabled(status.ready)
         self.delete_button.setEnabled(status.ready)
 
@@ -1787,7 +1840,7 @@ class QuarantinePage(QWidget):
 
     def _selected_quarantined_path(self) -> str | None:
         if not self.status.ready:
-            return None  # pulsanti disattivati: in caricamento o fallita
+            return None  # pulsanti disattivati: in caricamento, occupata o fallita
         row = self.table.currentRow()
         if row < 0:
             return None
@@ -1797,13 +1850,8 @@ class QuarantinePage(QWidget):
         qpath, quarantine = self._selected_quarantined_path(), self.quarantine
         if qpath is None:
             return
-        try:
-            target = quarantine.restore(qpath)
-        except Exception as exc:
-            QMessageBox.warning(self, "Ripristino fallito", str(exc))
-            return
-        QMessageBox.information(self, "Ripristinato", f"File ripristinato in {target}")
-        self.refresh()
+        self._start_action(QuarantineActionWorker(
+            quarantine, QuarantineActionWorker.RESTORE, quarantined_path=qpath))
 
     def _delete_selected(self) -> None:
         # L'oggetto della voce selezionata: durante la conferma la pagina
@@ -1816,12 +1864,32 @@ class QuarantinePage(QWidget):
         )
         if confirm != QMessageBox.Yes:
             return
-        try:
-            quarantine.delete(qpath)
-        except Exception as exc:
-            QMessageBox.warning(self, "Eliminazione fallita", str(exc))
-            return
+        self._start_action(QuarantineActionWorker(
+            quarantine, QuarantineActionWorker.DELETE, quarantined_path=qpath))
+
+    def _start_action(self, worker: QuarantineActionWorker) -> None:
+        """Avvia un ripristino o un'eliminazione: stato «operazione in
+        corso» (pulsanti spenti) fino all'esito."""
+        self.action_worker = worker
+        worker.done.connect(self._on_action_done)
+        self._set_status(QuarantineStatus(QuarantineStatus.BUSY))
+        worker.start()
+
+    def _on_action_done(self, result: ActionResult) -> None:
+        # Rilascio differito, vedi _retire_qthread: l'emit è dentro run().
+        worker, self.action_worker = self.action_worker, None
+        if worker is not None:
+            _retire_qthread(worker)
+        # Si rilegge anche dopo un errore: un ripristino a metà può aver
+        # cambiato la cartella. Il messaggio arriva sopra l'elenco già in
+        # aggiornamento.
         self.refresh()
+        if result.error is not None:
+            title = ("Ripristino fallito" if result.action == QuarantineActionWorker.RESTORE
+                     else "Eliminazione fallita")
+            QMessageBox.warning(self, title, result.error)
+        elif result.action == QuarantineActionWorker.RESTORE:
+            QMessageBox.information(self, "Ripristinato", f"File ripristinato in {result.target}")
 
 
 class ReportsPage(QWidget):
@@ -4049,6 +4117,11 @@ class MainWindow(QMainWindow):
             getattr(self, "_ping_worker", None),
             getattr(self, "_db_info_worker", None),
             self.quarantine_page.worker,
+            # Operazioni su richiesta: scrivono, si aspettano come il
+            # caricamento (il worker di più file si ferma fra un file e
+            # l'altro).
+            self.quarantine_page.action_worker,
+            self.scan_page.quarantine_worker,
             *list(_in_ritiro),
         ):
             if w is not None:

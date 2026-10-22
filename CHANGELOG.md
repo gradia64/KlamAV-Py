@@ -27,6 +27,12 @@ sono in `docs/CHANGELOG-archive.md`.
   ripete il recupero, senza riavviare).
 
 ### Modificato
+- **Ripristino, eliminazione e «Metti in quarantena» non bloccano più la
+  finestra.** Con la quarantena, o i file da spostare, su un disco lento
+  o di rete, queste azioni bloccavano la finestra fino alla fine. Ora
+  girano in background, una alla volta: durante l'operazione Ripristina
+  ed Elimina sono disattivati e «Metti in quarantena» chiede di
+  attendere. Conferme e messaggi sono quelli di prima.
 - **Quarantena: le operazioni interrotte e riprese si vedono.** Quando
   una quarantena interrotta (per esempio da un crash) viene completata o
   annullata, o il suo intento non è valido e viene messo da parte, la

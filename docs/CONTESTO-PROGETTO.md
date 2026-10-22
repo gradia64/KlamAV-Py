@@ -718,6 +718,19 @@ rilascio.
   la pagina Quarantena mostra in `recovery_label` (fino a un caricamento
   con esiti nuovi o a un cambio di cartella) e, se la pagina non è
   visibile, in una notifica della tray per caricamento.
+- **Azioni su richiesta nel worker** (0.1.17). Ripristino ed eliminazione
+  (pagina Quarantena) e «Metti in quarantena» dei selezionati (pagina
+  Scansione) girano in `QuarantineActionWorker` (`gui/quarantine_action.py`),
+  QThread aspettato da `_shutdown_workers`, con le stesse chiamate su
+  `Quarantine`. Le conferme restano prima dell'avvio, gli esiti arrivano
+  con `done` nel thread della GUI. Uno per pagina: `QuarantinePage.action_worker`
+  porta lo stato `QuarantineStatus.BUSY` (pulsanti spenti, «Aggiorna»
+  rinviato alla fine), `ScanPage.quarantine_worker` risponde «Quarantena
+  occupata» a un secondo clic, come quando la pagina Quarantena è BUSY.
+  Dopo un ripristino o un'eliminazione la pagina si ricarica anche in caso
+  di errore. Le righe della pagina Scansione si aggiornano per percorso
+  (la lista può essere stata svuotata da una nuova scansione); il worker
+  di più file si ferma fra un file e l'altro alla chiusura.
 - **L'intento ha la fiducia dell'indice** (0.1.13). Si valida con le
   stesse regole (`_entry_problem`), `original_path` assoluto, `dev`/`ino`
   interi non negativi, e `staging` deve stare nella directory
@@ -787,12 +800,11 @@ una riproduzione o una correzione migliore.
 
 Emersi dalle revisioni della 0.1.12 e ancora aperti dopo la 0.1.16:
 
-- **Quarantena nel thread della GUI, residui** (dopo la 0.1.15). Il
-  recupero e le letture della pagina Quarantena sono nel worker; restano
-  nel thread della GUI le azioni su richiesta: ripristino ed eliminazione
-  dalla pagina Quarantena, «Metti in quarantena» dei file selezionati
-  nella pagina Scansione, e `_quarantine_count` (`peek_entries`) al
-  salvataggio delle Impostazioni quando cambia la cartella.
+- **Quarantena nel thread della GUI, residuo** (dopo la 0.1.17): il
+  salvataggio delle Impostazioni quando cambia la cartella
+  (`_quarantine_count` con `peek_entries`, ma anche `decide_quarantine_dir`,
+  `ensure_private_dir` e `sync_dropin`). Va reso asincrono per intero, non
+  solo il conteggio.
 - **`ScanWorker.run()`:** costruzione del client e di `Quarantine` fuori
   dal `try`; un `OSError` lascia la pagina «in corso» fino al riavvio.
 - **Pagina Pianificazione:** con un controllo bloccato su un mount di
