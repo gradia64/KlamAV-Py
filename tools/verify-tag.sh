@@ -4,11 +4,11 @@
 # una sottochiave qualunque della chiave di rilascio: la sottochiave della
 # CI, che firma gli allegati, deve non poter firmare un tag che passi da qui.
 #
-# I tag li firma solo il maintainer (vedi docs/CONTESTO-PROGETTO.md,
-# «Rilascio»): la CI non pubblica nulla per un tag non firmato, o firmato
-# con un'altra chiave, perché makepkg lo rifiuterebbe comunque per tutti gli
-# utenti AUR (validpgpkeys) e il .deb allegato non corrisponderebbe a un
-# sorgente verificabile.
+# I tag li firma solo il maintainer (vedi docs/RILASCIO.md): la CI non
+# pubblica nulla per un tag non firmato, o firmato con un'altra chiave,
+# perché makepkg lo rifiuterebbe comunque per tutti gli utenti AUR
+# (validpgpkeys) e il .deb allegato non corrisponderebbe a un sorgente
+# verificabile.
 #
 # La verifica usa un portachiavi temporaneo con la SOLA chiave pubblica del
 # repository: una chiave presente nel portachiavi della macchina non conta.

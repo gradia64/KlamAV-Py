@@ -6,8 +6,7 @@ Il fixture di conftest.py che isola il registro delle prese visione (e,
 in generale, ogni monkeypatch) non attraversa i sottoprocessi: una CLI o
 uno script del progetto lanciato così leggerebbe e scriverebbe i dati
 reali di chi esegue la suite (~/.local/share/klamav-py, ~/.config).
-La regola (CONTESTO, sezione 7): env={**os.environ, "HOME": str(tmp_path)}
-o equivalente. Controllo statico, come gli altri del progetto.
+La regola: env={**os.environ, "HOME": str(tmp_path)} o equivalente. Controllo statico, come gli altri del progetto.
 
 Lanci riconosciuti (0.1.15; prima solo sys.executable): argv con
 sys.executable, il console script klamav-py o klamav-py-gui (letterale o

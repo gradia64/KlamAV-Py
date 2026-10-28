@@ -55,8 +55,8 @@ jobs:
   deb:
     needs: tests
     runs-on: ubuntu-26.04
-    # Il .deb ufficiale si costruisce su Debian sid (CONTESTO, «Packaging»):
-    # una build su Ubuntu non è equivalente.
+    # Il .deb ufficiale si costruisce su Debian sid: una build su Ubuntu non
+    # è equivalente.
     container: debian:sid
     steps:
       - name: Strumenti

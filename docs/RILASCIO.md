@@ -1,8 +1,7 @@
 # Rilascio di KlamAV-Py
 
-Guida per chi pubblica le release. La procedura e le sue ragioni sono in
-`docs/CONTESTO-PROGETTO.md`, sezione 4, «Rilascio»; qui ci sono il modello
-di fiducia, la configurazione una tantum e i comandi.
+Guida per chi pubblica le release: il modello di fiducia, la
+configurazione una tantum e i comandi.
 
 ## Modello di fiducia
 
@@ -160,9 +159,8 @@ saltato con un avviso.
 
 ## Rilascio
 
-1. Commit di rilascio e merge su `main` con la CI verde (CONTESTO, punti 1
-   e 2). **Rileggi la voce del CHANGELOG** così come diventerà la
-   descrizione della release:
+1. Commit di rilascio e merge su `main` con la CI verde. **Rileggi la
+   voce del CHANGELOG** così come diventerà la descrizione della release:
    ```bash
    tools/release-notes.sh 0.1.15
    tools/check-version.sh v0.1.15

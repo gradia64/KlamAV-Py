@@ -86,7 +86,7 @@ def test_lettura_completa_di_un_payload_grande(tmp_path):
         "sys.exit(0 if notify_running_instance(sys.argv[1], encode_targets(paths)[0]) else 1)\n"
     )
     # HOME temporanea: il monkeypatch di conftest.py non arriva nel
-    # sottoprocesso (vedi CONTESTO, sezione 7).
+    # sottoprocesso (vedi tests/test_subprocess_home.py).
     env = dict(os.environ, PYTHONPATH=str(RADICE), QT_QPA_PLATFORM="offscreen", HOME=str(tmp_path))
     proc = subprocess.Popen([sys.executable, "-c", codice, sock_path], env=env)
 
