@@ -5,7 +5,7 @@
 .\" Coerenza con il parser di klamav_py/gui/app.py e con la pagina
 .\" inglese verificata da tests/test_manpage.py.
 .\"
-.TH KLAMAV-PY-GUI 1 "2026-10-29" "KlamAV-Py 0.1.18" "Comandi utente"
+.TH KLAMAV-PY-GUI 1 "2026-11-05" "KlamAV-Py 0.1.19" "Comandi utente"
 .\" Sillabazione disattivata: i pattern italiani non sono garantiti ovunque
 .nh
 .
@@ -72,6 +72,21 @@ dove restano le prese visione precedenti, non cancellate.
 Dopo aver eliminato un messaggio di un archivio di posta gestito da
 Akonadi (KMail) può servire
 .BR "akonadictl fsck" .
+.PP
+All'avvio l'applicazione controlla l'ultima scansione della
+programmazione di sistema: se risulta iniziata e mai finita (per esempio
+il computer spento durante la scansione), lo dice con una notifica, una
+sola volta per interruzione, e nella pagina Pianificazione, con l'ora di
+avvio e il rimando alle pagine Segnalazioni e Quarantena per quanto
+trovato fino a lì; il dettaglio resta nel journal
+.RB ( journalctl\ \-\-user\ \-u\ klamav\-scan.service ).
+Le uscite con un codice non avvisano: quelle le notifica la unit con
+.BR OnFailure ;
+nemmeno una scansione in corso in quel momento avvisa, perché copre da
+sola la parte mancante.
+Nella stessa pagina si sceglie l'orario della scansione di sistema
+(«Ogni giorno alle»): il valore predefinito è mezzanotte, quello della
+unit spedita.
 Le cartelle con permessi negati durante una scansione sono elencate e
 contate a parte rispetto agli errori; ogni altro errore su una cartella
 (un errore di I/O, un mount NFS che non risponde più) è elencato e
@@ -212,6 +227,22 @@ o, con TCP,
 vengono segnalati al salvataggio e nella pagina Pianificazione, perché
 rendono inefficaci queste impostazioni o ne vengono sostituiti.
 .TP
+.I \%~/.config/systemd/user/klamav-scan.timer.d/50-klamav-py.conf
+Drop-in dell'orario della scansione programmata di sistema, scritto e
+rimosso dalla pagina Pianificazione quando l'orario scelto («Ogni giorno
+alle») differisce da mezzanotte, il valore della unit spedita
+.RB ( OnCalendar = daily).
+Stessa disciplina del drop-in del service: intestazione che lo dichiara
+nostro, rigenerazione all'avvio, mai toccato un file con lo stesso nome
+privo di intestazione.
+Il ritardo casuale fino a 30 minuti
+.RB ( RandomizedDelaySec )
+resta quello della unit.
+Un drop-in di altri che imposta
+.B OnCalendar
+viene segnalato al salvataggio e nella pagina Pianificazione, perché
+l'orario scelto nella pagina potrebbe non avere effetto.
+.TP
 .I \%~/.local/share/klamav-py/acknowledged.json
 Registro delle prese visione, condiviso con
 .BR klamav-py (1).
@@ -219,6 +250,12 @@ Registro delle prese visione, condiviso con
 .I \%~/.local/share/klamav-py/pending-reports.json
 Segnalazioni da valutare, scritte da ogni scansione e lette dalla pagina
 Segnalazioni; vedere
+.BR klamav-py (1).
+.TP
+.I \%~/.local/share/klamav-py/timer-scan.json
+Stato dell'ultima scansione della programmazione di sistema (inizio e
+fine), scritto dalla scansione e letto all'avvio per l'avviso di
+scansione interrotta; vedere
 .BR klamav-py (1).
 .TP
 .I \%/usr/share/applications/klamav-py.desktop

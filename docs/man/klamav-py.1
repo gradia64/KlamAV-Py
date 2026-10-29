@@ -6,7 +6,7 @@
 .\" Consistency with build_parser() and with the Italian page is checked
 .\" by tests/test_manpage.py.
 .\"
-.TH KLAMAV-PY 1 "2026-10-29" "KlamAV-Py 0.1.18" "User Commands"
+.TH KLAMAV-PY 1 "2026-11-05" "KlamAV-Py 0.1.19" "User Commands"
 .
 .SH NAME
 klamav-py \- command-line virus scanning through the ClamAV daemon
@@ -319,7 +319,13 @@ Set by systemd for each service.
 If present, a volatile quarantine directory passed with
 .B \-\-quarantine
 becomes an error instead of a warning (see
-.BR SECURITY ).
+.BR SECURITY ),
+and the scan records its start and end in
+.I timer\-scan.json
+(see
+.BR FILES ):
+a missing end is how the GUI, at the next startup, recognizes a scan that
+was interrupted, for example by switching the computer off.
 .
 .SH FILES
 .TP
@@ -398,6 +404,19 @@ when its file is no longer there, or after 90 days without being found
 again.
 Same lock and handling of an invalid file as
 .IR acknowledged.json .
+.TP
+.I \%~/.local/share/klamav\-py/timer\-scan.json
+State of the last scheduled system scan (0600): start and end, written
+only when
+.B INVOCATION_ID
+is present, the start right before the traversal and the end on every
+exit with a code (best effort: a failure here does not change the scan
+outcome).
+If the end is missing, the scan was interrupted by a signal, for example
+by switching the computer off: the GUI shows it at the next startup, once
+per interruption, pointing to the Reports and Quarantine pages.
+The file holds no user data: an implausible one is ignored, and the next
+scan rewrites it.
 .
 .SH SECURITY
 .SS Quarantine directory

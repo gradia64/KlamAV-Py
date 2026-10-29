@@ -5,7 +5,7 @@
 .\" Consistency with the parser in klamav_py/gui/app.py and with the
 .\" Italian page is checked by tests/test_manpage.py.
 .\"
-.TH KLAMAV-PY-GUI 1 "2026-10-29" "KlamAV-Py 0.1.18" "User Commands"
+.TH KLAMAV-PY-GUI 1 "2026-11-05" "KlamAV-Py 0.1.19" "User Commands"
 .
 .SH NAME
 klamav-py-gui \- KlamAV-Py graphical interface for the ClamAV daemon
@@ -70,6 +70,20 @@ file where the previous acknowledgements remain, not deleted.
 After deleting a message from a mail archive managed by Akonadi (KMail),
 .B akonadictl fsck
 may be needed.
+.PP
+At startup the application checks the last scheduled system scan: if it
+turns out to have started and never finished (for example the computer
+was switched off during the scan), it says so with a notification, once
+per interruption, and in the Scheduling page, with the start time and a
+pointer to the Reports and Quarantine pages for whatever was found up to
+there; the details remain in the journal
+.RB ( journalctl\ \-\-user\ \-u\ klamav\-scan.service ).
+Exits with a code do not warn: the unit already notifies those with
+.BR OnFailure ;
+nor does a scan running at that very moment, which covers the missing
+part by itself.
+In the same page the time of the system scan is chosen ("Every day at"):
+the default is midnight, the value of the shipped unit.
 Folders whose permissions deny access during a scan are listed and
 counted separately from errors; any other error on a folder (an I/O error,
 an NFS mount that stopped responding) is listed and counted among the
@@ -211,6 +225,22 @@ or, with TCP,
 are reported on save and in the Scheduling page, because they make these
 settings ineffective or are overridden by them.
 .TP
+.I \%~/.config/systemd/user/klamav-scan.timer.d/50-klamav-py.conf
+Drop-in for the time of the scheduled system scan, written and removed by
+the Scheduling page when the chosen time ("Every day at") differs from
+midnight, the value of the shipped unit
+.RB ( OnCalendar = daily).
+Same discipline as the service drop-in: a header declaring it ours,
+regeneration at startup, never touching a file with the same name but
+without the header.
+The random delay of up to 30 minutes
+.RB ( RandomizedDelaySec )
+stays the one of the unit.
+Another drop-in setting
+.B OnCalendar
+is reported on save and in the Scheduling page, because the time chosen
+in the page might have no effect.
+.TP
 .I \%~/.local/share/klamav-py/acknowledged.json
 Register of acknowledged detections, shared with
 .BR klamav-py (1).
@@ -218,6 +248,11 @@ Register of acknowledged detections, shared with
 .I \%~/.local/share/klamav-py/pending-reports.json
 Detections still to be evaluated, written by every scan and read by the
 Reports page; see
+.BR klamav-py (1).
+.TP
+.I \%~/.local/share/klamav-py/timer-scan.json
+State of the last scheduled system scan (start and end), written by the
+scan and read at startup for the interrupted-scan warning; see
 .BR klamav-py (1).
 .TP
 .I \%/usr/share/applications/klamav-py.desktop

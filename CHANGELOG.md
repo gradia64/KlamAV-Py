@@ -5,6 +5,39 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## 0.1.19 — 2026-11-05
+
+### Aggiunto
+- **La GUI avverte quando la scansione del timer è stata interrotta.** Con
+  il PC spento a metà scansione la unit di notifica non dice nulla (un'uscita
+  per segnale non è un errore da notificare) e `Persistent=true` non ripete
+  l'attivazione, che risulta avvenuta: la home restava controllata in parte
+  senza che nessuno lo sapesse. Ora la scansione del timer segna su disco il
+  proprio inizio e la propria fine
+  (`~/.local/share/klamav-py/timer-scan.json`): al primo avvio successivo la
+  GUI trova l'inizio senza la fine, avvisa con una notifica della tray (una
+  volta per interruzione) e lo dice nella pagina Pianificazione, con l'ora
+  di avvio e il rimando alle pagine Segnalazioni e Quarantena per quanto
+  trovato fino a lì. Le uscite con un codice non avvisano: quelle le notifica
+  già la unit. Il marcatore riguarda solo il timer di sistema: un'interruzione
+  di una scansione avviata dalla shell resta visibile nel terminale.
+- **L'orario della scansione di sistema si sceglie dalla pagina
+  Pianificazione.** Fino a ora la unit partiva ogni giorno a mezzanotte
+  (`OnCalendar=daily`) e cambiarlo voleva dire scrivere a mano un drop-in di
+  klamav-scan.timer. Ora il campo «Ogni giorno alle» della pagina Pianificazione
+  scrive e rimuove quel drop-in al posto tuo (a mezzanotte non serve: è il
+  valore della unit). Il ritardo casuale fino a 30 minuti della unit resta.
+  Un drop-in scritto a mano che imposta `OnCalendar` d'ora in poi viene
+  segnalato come avviso, perché l'orario scelto nella pagina potrebbe non
+  avere effetto: chi aveva il drop-in manuale può toglierlo e salvare
+  l'orario dalla GUI.
+- Test: stato dell'ultima scansione del timer (scritture best-effort della
+  CLI, lettura severa), `service_active` per distinguere una scansione in
+  corso da una interrotta, drop-in dell'orario (golden, `systemd-analyze
+  verify`, conflitti e override estranei), orario ed esclusioni scritti
+  insieme senza cortocircuiti. Totale: 1124 test.
+
+---
 ## 0.1.18 — 2026-10-29
 
 ### Modificato

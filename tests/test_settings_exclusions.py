@@ -19,11 +19,11 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings, Qt  # noqa: E402
+from PySide6.QtCore import QSettings, Qt, QTime  # noqa: E402
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox  # noqa: E402
 
 import klamav_py.gui.main_window as mw  # noqa: E402
-from klamav_py.systemd_dropin import HEADER, dropin_path  # noqa: E402
+from klamav_py.systemd_dropin import HEADER, dropin_path, render_timer_dropin  # noqa: E402
 from klamav_py.scan_totals import ScanTotals  # noqa: E402
 
 
@@ -68,6 +68,7 @@ def env(app, tmp_path, monkeypatch):
 
     monkeypatch.setattr(mw, "daemon_reload", reload)
     monkeypatch.setattr(mw, "foreign_overrides", lambda **kw: [])
+    monkeypatch.setattr(mw, "foreign_timer_overrides", lambda **kw: [])
 
     def disable():
         calls.disable += 1
@@ -387,6 +388,51 @@ def test_salvataggio_senza_cambi_non_ricarica(env):
     page = _page(env)
     page._save_schedule()
     assert not env.dropin.exists() and env.calls.reload == 0
+
+
+def test_salvataggio_scrive_lorario_nel_dropin_del_timer(env):
+    page = _page(env)
+    page.timer_time_edit.setTime(QTime(9, 0))
+    page._save_schedule()
+    testo = mw.timer_dropin_path().read_text()
+    assert testo == render_timer_dropin("09:00")
+    assert _settings().value("timer_time") == "09:00"
+    # Il campo mostra ciò che è stato salvato.
+    assert page.timer_time_edit.time().toString("HH:mm") == "09:00"
+    assert env.calls.reload == 1
+
+    # Tornando a mezzanotte (il default della unit) il drop-in si toglie.
+    page.timer_time_edit.setTime(QTime(0, 0))
+    page._save_schedule()
+    assert not mw.timer_dropin_path().exists()
+    assert _settings().value("timer_time") == "00:00"
+    assert env.calls.reload == 2
+
+
+def test_orario_ed_esclusioni_insieme(env):
+    """Le due scritture non si cortocircuitano: cambiano il drop-in del
+    service E quello del timer nello stesso salvataggio."""
+    page = _page(env, [str(env.home / "vm")])
+    page.timer_time_edit.setTime(QTime(9, 30))
+    page._save_schedule()
+    assert f'--exclude "{env.home / "vm"}"' in env.dropin.read_text()
+    assert "OnCalendar=*-*-* 09:30:00" in mw.timer_dropin_path().read_text()
+    assert env.calls.reload == 1
+
+
+def test_dropin_del_timer_estraneo_nessun_salvataggio(env):
+    """Conflitto sul file del timer: niente viene scritto, nemmeno il
+    drop-in del service (tutto o nulla)."""
+    timer = mw.timer_dropin_path()
+    timer.parent.mkdir(parents=True)
+    timer.write_text("[Timer]\nOnCalendar=07:00\n")  # scritto a mano
+    page = _page(env, [str(env.home / "vm")])
+    page.timer_time_edit.setTime(QTime(9, 0))
+    page._save_schedule()
+    assert _kinds(env) == ["warning"]
+    assert not env.dropin.exists()
+    assert _settings().value("timer_time") is None
+    assert timer.read_text() == "[Timer]\nOnCalendar=07:00\n"
 
 
 def test_dropin_estraneo_nessun_salvataggio(env):

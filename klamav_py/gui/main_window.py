@@ -23,7 +23,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from typing import Callable
 
-from PySide6.QtCore import Qt, QSize, QSettings, Signal, QTimer, QFileSystemWatcher, QThread
+from PySide6.QtCore import Qt, QSize, QSettings, QTime, Signal, QTimer, QFileSystemWatcher, QThread
 from PySide6.QtGui import QIcon, QColor, QAction, QFont, QPalette, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -81,10 +82,12 @@ from ..quarantine_location import decide as decide_quarantine_dir, default_quara
 from ..scan_exclusions import decide as decide_exclusion
 from ..scan_totals import ScanTotals, io_fault_note, scan_outcome
 from ..systemd_dropin import (
-    DropinConflict, daemon_reload, disable_timer, dropin_path, foreign_overrides,
-    generation as dropin_generation, refresh_outdated, render_dropin, sync_dropin,
-    timer_enabled,
+    DropinConflict, daemon_reload, disable_timer, dropin_conflict, dropin_path,
+    foreign_overrides, foreign_timer_overrides, generation as dropin_generation,
+    normalize_timer_time, refresh_outdated, render_dropin, render_timer_dropin,
+    service_active, sync_dropin, timer_dropin_path, timer_enabled,
 )
+from ..timer_scan_state import TimerScanState, interrupted_notice, read_state
 from ..private_files import (
     ensure_private_dir, ensure_private_file, open_private_for_write, write_private_text,
 )
@@ -707,21 +710,37 @@ DROPIN_REWRITTEN = "riscritto"
 DROPIN_REMOVED = "rimosso"
 
 
-def refresh_dropin_at_startup(state: DropinState, since: int) -> tuple[str | None, str | None]:
+def refresh_dropin_at_startup(
+    state: DropinState, since: int, timer_time: str = "00:00"
+) -> tuple[str | None, str | None, str | None]:
     """
     Rigenerazione all'avvio della GUI (refresh_outdated, `since` letto con
-    lo stato) e daemon-reload se il drop-in è cambiato. Tocca il filesystem
+    lo stato) di ENTRAMBI i drop-in: quello del service (quarantena,
+    endpoint, esclusioni) e quello del timer (orario della scansione,
+    0.1.19), con daemon-reload se qualcosa è cambiato. Tocca il filesystem
     e chiama systemctl --user: la GUI la esegue con run_off_gui_thread.
-    Ritorna (DROPIN_REWRITTEN, DROPIN_REMOVED o None se non è cambiato
-    nulla; motivo del reload fallito o None); OSError e DropinSettingsError
-    arrivano al chiamante. render() precede ogni lettura del drop-in: con
-    impostazioni non valide non lo tocca. Con le impostazioni tutte
-    predefinite render() dà None e refresh_outdated toglie il drop-in.
+
+    Ritorna (esito del drop-in del service, esito del drop-in del timer,
+    motivo del reload fallito o None): ciascun esito è DROPIN_REWRITTEN,
+    DROPIN_REMOVED o None se quel file non è cambiato. OSError e
+    DropinSettingsError arrivano al chiamante. render() precede ogni
+    lettura dei file: con impostazioni non valide non si tocca nulla, e il
+    testo None (tutto predefinito) vale rimozione per entrambi.
     """
     text = state.render()
-    if not refresh_outdated(text, since):
-        return None, None
-    return (DROPIN_REMOVED if text is None else DROPIN_REWRITTEN), daemon_reload()
+    timer_text = render_timer_dropin(timer_time)
+    service_changed = refresh_outdated(text, since)
+    timer_changed = refresh_outdated(timer_text, since, path=timer_dropin_path())
+    if not service_changed and not timer_changed:
+        return None, None, None
+    problem = daemon_reload()
+    return (
+        None if not service_changed else (DROPIN_REMOVED if text is None else DROPIN_REWRITTEN),
+        None if not timer_changed else (
+            DROPIN_REMOVED if timer_text is None else DROPIN_REWRITTEN
+        ),
+        problem,
+    )
 
 
 def dropin_refresh_notice(result) -> str | None:
@@ -729,40 +748,58 @@ def dropin_refresh_notice(result) -> str | None:
     refresh_dropin_at_startup (o dall'eccezione); None se non è cambiato
     nulla. Stesso testo nella pagina Pianificazione e su stderr.
 
-    Con impostazioni non valide (DropinSettingsError) il drop-in non è
-    stato letto: l'avviso nomina solo le impostazioni, perché il drop-in
-    può essere già aggiornato o non esistere."""
+    Con impostazioni non valide (DropinSettingsError) i drop-in non sono
+    stati letti: l'avviso nomina solo le impostazioni, perché possono
+    essere già aggiornati o non esistere."""
     if isinstance(result, DropinSettingsError):
         return (
             f"Le impostazioni salvate non sono valide: {result}. Correggile nelle "
             "Impostazioni e salva: il salvataggio aggiorna anche la scansione "
             "programmata di sistema."
         )
-    path = dropin_path()
     if isinstance(result, Exception):
+        path = dropin_path()
         return (
-            f"Il drop-in della scansione programmata di sistema («{path}») è stato "
-            "scritto da una versione precedente e non è stato possibile aggiornarlo: "
-            f"{result}. Il timer di sistema usa ancora il comando vecchio; salva le "
-            "Impostazioni per riprovare."
+            f"I drop-in della scansione programmata di sistema («{path}» e "
+            f"«{timer_dropin_path()}») sono stati scritti da una versione precedente "
+            f"e non è stato possibile aggiornarli: {result}. Il timer di sistema usa "
+            "ancora la configurazione vecchia; salva le Impostazioni per riprovare."
         )
-    change, problem = result
-    if change is None:
+    service_change, timer_change, problem = result
+    notices = []
+    if service_change is not None:
+        path = dropin_path()
+        if service_change == DROPIN_REMOVED:
+            notices.append(
+                f"Il drop-in della scansione programmata di sistema («{path}») è stato "
+                "rimosso: le impostazioni salvate sono quelle predefinite, che il timer "
+                "usa già senza drop-in."
+            )
+        else:
+            notices.append(
+                f"Il drop-in della scansione programmata di sistema («{path}») è stato "
+                f"aggiornato alla versione {__version__}, con le impostazioni salvate."
+            )
+    if timer_change is not None:
+        path = timer_dropin_path()
+        if timer_change == DROPIN_REMOVED:
+            notices.append(
+                f"Il drop-in dell'orario del timer («{path}») è stato rimosso: "
+                "l'orario salvato è di nuovo quello predefinito (mezzanotte), "
+                "che la unit usa già senza drop-in."
+            )
+        else:
+            notices.append(
+                f"Il drop-in dell'orario del timer («{path}») è stato aggiornato "
+                f"alla versione {__version__}, con l'orario salvato nella pagina "
+                "Pianificazione."
+            )
+    if not notices:
         return None
-    if change == DROPIN_REMOVED:
-        text = (
-            f"Il drop-in della scansione programmata di sistema («{path}») è stato "
-            "rimosso: le impostazioni salvate sono quelle predefinite, che il timer "
-            "usa già senza drop-in."
-        )
-    else:
-        text = (
-            f"Il drop-in della scansione programmata di sistema («{path}») è stato "
-            f"aggiornato alla versione {__version__}, con le impostazioni salvate."
-        )
+    text = "\n".join(notices)
     if problem:
         text += (
-            " Il timer lo userà dal prossimo avvio della sessione "
+            " Il timer userà i drop-in aggiornati dal prossimo avvio della sessione "
             f"(systemctl --user daemon-reload non riuscito: {problem})."
         )
     return text
@@ -770,13 +807,14 @@ def dropin_refresh_notice(result) -> str | None:
 
 def dropin_followup(changed: bool, tcp: bool) -> tuple[str | None, list]:
     """
-    Dopo la scrittura del drop-in: daemon-reload se è cambiato e override
-    estranei della unit. Chiama systemctl --user (timeout 10 s): la GUI la
-    esegue con run_off_gui_thread. Ritorna (motivo del reload fallito o
-    None, override estranei).
+    Dopo la scrittura dei drop-in (service e orario del timer):
+    daemon-reload se è cambiato qualcosa e override estranei delle due
+    unit. Chiama systemctl --user (timeout 10 s): la GUI la esegue con
+    run_off_gui_thread. Ritorna (motivo del reload fallito o None,
+    override estranei).
     """
     problem = daemon_reload() if changed else None
-    return problem, foreign_overrides(tcp=tcp)
+    return problem, foreign_overrides(tcp=tcp) + foreign_timer_overrides()
 
 
 def dropin_notes(problem: str | None, overrides: list, *, what: str) -> list[str]:
@@ -792,6 +830,29 @@ def dropin_notes(problem: str | None, overrides: list, *, what: str) -> list[str
         )
     notes.extend(o.describe() for o in overrides)
     return notes
+
+
+def check_interrupted_timer_scan() -> TimerScanState | None:
+    """
+    Lo stato di una scansione del timer interrotta, da cercare all'avvio
+    (MainWindow._check_interrupted_timer_scan) e a ogni apertura della
+    pagina Pianificazione (refresh_system_timer). Legge il marcatore di
+    timer_scan_state e chiama systemctl --user: la GUI la esegue con
+    run_off_gui_thread.
+
+    None se non c'è niente da avvisare: marcatore assente o chiuso (la
+    scansione è arrivata alla fine). Se una scansione sta girando in
+    questo momento (Persistent=true può rimetterla in moto al login) il
+    buco lo copre lei: anche qui None. Con systemctl non disponibile si
+    avvisa lo stesso: senza manager utente il timer non può girare, e il
+    marcatore aperto viene da un'esecuzione vera.
+    """
+    state = read_state()
+    if state is None or state.finished_at is not None:
+        return None
+    if service_active() is True:
+        return None
+    return state
 
 
 def validate_schedule(
@@ -2625,6 +2686,7 @@ class _ScheduleForm:
     interval: int
     unit: str
     target: str
+    timer_time: str  # "HH:MM" del timer di sistema, scritto al clic come gli altri
 
 
 class SchedulerPage(QWidget):
@@ -2690,7 +2752,40 @@ class SchedulerPage(QWidget):
         self.dropin_notice_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
         self.dropin_notice_label.setVisible(False)
         layout.addWidget(self.dropin_notice_label)
+        # Avviso di scansione del timer interrotta (MainWindow, all'avvio, e
+        # refresh_system_timer a ogni apertura della pagina): resta finché
+        # una scansione del timer non arriva alla fine.
+        self.timer_scan_label = QLabel("")
+        self.timer_scan_label.setWordWrap(True)
+        self.timer_scan_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
+        self.timer_scan_label.setVisible(False)
+        layout.addWidget(self.timer_scan_label)
         layout.addSpacing(10)
+
+        # Orario del timer di sistema: è della unit klamav-scan.timer, non
+        # della pianificazione interna qui sotto (le due sono alternative).
+        # La unit spedita ha OnCalendar=daily, cioè mezzanotte: finora
+        # cambiare orario voleva dire scrivere a mano il drop-in del timer.
+        system_group = QGroupBox("Scansione di sistema (klamav-scan.timer)")
+        sys_layout = QVBoxLayout(system_group)
+        time_row = QHBoxLayout()
+        time_row.addWidget(QLabel("Ogni giorno alle:"))
+        self.timer_time_edit = QTimeEdit(QTime(0, 0))
+        self.timer_time_edit.setDisplayFormat("HH:mm")
+        self.timer_time_edit.setTimeRange(QTime(0, 0), QTime(23, 59))
+        self.timer_time_edit.setFixedHeight(36)
+        time_row.addWidget(self.timer_time_edit)
+        time_row.addStretch()
+        sys_layout.addLayout(time_row)
+        timer_desc = QLabel(
+            "Con un ritardo casuale fino a 30 minuti (RandomizedDelaySec). La "
+            "scansione di sistema vale anche con KlamAV-Py chiuso; a mezzanotte è "
+            "quella predefinita della unit, senza drop-in da gestire."
+        )
+        timer_desc.setWordWrap(True)
+        timer_desc.setStyleSheet("font-size: 12px; color: palette(mid);")
+        sys_layout.addWidget(timer_desc)
+        layout.addWidget(system_group)
 
         schedule_group = QGroupBox("Pianificazione Automatica")
         s_layout = QVBoxLayout(schedule_group)
@@ -2847,7 +2942,14 @@ class SchedulerPage(QWidget):
 
         def check():
             state = timer_enabled()
-            return state, (foreign_overrides(tcp=tcp) if state is True else [])
+            if state is True:
+                # Anche gli override estranei del timer: un drop-in scritto
+                # a mano che imposta OnCalendar renderebbe l'orario scelto
+                # qui privo di effetto, e la pagina deve dirlo.
+                overrides = foreign_overrides(tcp=tcp) + foreign_timer_overrides()
+            else:
+                overrides = []
+            return state, overrides, check_interrupted_timer_scan()
 
         run_off_gui_thread(check, self._timer_state_done)
 
@@ -2856,8 +2958,12 @@ class SchedulerPage(QWidget):
         if self._timer_refresh_again:
             self.refresh_system_timer()
             return
-        state, overrides = (None, []) if isinstance(result, Exception) else result
+        state, overrides, interrotta = (None, [], None) if isinstance(result, Exception) else result
         self.timer_state = state
+        # L'avviso della scansione interrotta si aggiorna qui, non solo
+        # all'avvio: una scansione finita mentre la GUI era aperta lo fa
+        # sparire alla prossima apertura della pagina.
+        self.set_timer_scan_notice("" if interrotta is None else interrupted_notice(interrotta))
         if state is True:
             text = (
                 "La scansione programmata di sistema (klamav-scan.timer) è attiva: "
@@ -2877,6 +2983,10 @@ class SchedulerPage(QWidget):
     def set_dropin_notice(self, text: str) -> None:
         self.dropin_notice_label.setText(text)
         self.dropin_notice_label.setVisible(bool(text))
+
+    def set_timer_scan_notice(self, text: str) -> None:
+        self.timer_scan_label.setText(text)
+        self.timer_scan_label.setVisible(bool(text))
 
     def _browse_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Seleziona cartella da scansionare", self.target_edit.text())
@@ -3017,15 +3127,16 @@ class SchedulerPage(QWidget):
         self._update_exclusion_buttons()
 
     def _sync_system_dropin(
-        self, excludes: list[str], timer_disabled: bool = False
+        self, excludes: list[str], timer_time: str, timer_disabled: bool = False
     ) -> tuple[bool, bool] | None:
         """
-        Rigenera il drop-in di klamav-scan.service con le nuove esclusioni e
-        con quarantena ed endpoint già salvati nelle Impostazioni (stato
-        completo, vedi render_dropin). None, con un avviso, se il
-        salvataggio va annullato; altrimenti (drop-in cambiato, endpoint
-        TCP), per il daemon-reload e il controllo degli override estranei
-        che _save_write esegue fuori dal thread della GUI.
+        Rigenera i drop-in di klamav-scan.service (con le nuove esclusioni e
+        con quarantena ed endpoint già salvati nelle Impostazioni: stato
+        completo, vedi render_dropin) e di klamav-scan.timer (l'orario).
+        None, con un avviso, se il salvataggio va annullato; altrimenti
+        (drop-in cambiato — service o timer —, endpoint TCP), per il
+        daemon-reload e il controllo degli override estranei che _save_write
+        esegue fuori dal thread della GUI.
         """
         title = "Pianificazione Scansioni"
         try:
@@ -3038,7 +3149,20 @@ class SchedulerPage(QWidget):
             )
             return None
         try:
-            changed = sync_dropin(state.render())
+            # Conflitti su TUTTI e due i file prima di scriverne uno:
+            # scoprirlo sul secondo lascerebbe il primo scritto con valori
+            # che le impostazioni non hanno salvato (tutto o nulla).
+            for path in (dropin_path(), timer_dropin_path()):
+                conflict = dropin_conflict(path)
+                if conflict is not None:
+                    raise conflict
+            # Nessuna `or` fra le due chiamate: cortocircuiterebbe la
+            # seconda quando la prima ha già cambiato qualcosa.
+            service_changed = sync_dropin(state.render())
+            timer_changed = sync_dropin(
+                render_timer_dropin(timer_time), path=timer_dropin_path()
+            )
+            changed = service_changed or timer_changed
         except (DropinConflict, OSError) as exc:
             reason = str(exc) if isinstance(exc, DropinConflict) else (
                 f"Impossibile aggiornare la scansione programmata di sistema:\n{exc}"
@@ -3061,6 +3185,9 @@ class SchedulerPage(QWidget):
             self.unit_combo.setCurrentIndex(idx)
 
         self.target_edit.setText(self.settings.value("schedule_target", str(Path.home())))
+
+        hh, mm = normalize_timer_time(self.settings.value("timer_time", "00:00")).split(":")
+        self.timer_time_edit.setTime(QTime(int(hh), int(mm)))
 
         self.excl_list.clear()
         for raw in load_schedule_excludes(self.settings):
@@ -3093,6 +3220,7 @@ class SchedulerPage(QWidget):
             interval=self.interval_spin.value(),
             unit=self.unit_combo.currentText(),
             target=self.target_edit.text(),
+            timer_time=self.timer_time_edit.time().toString("HH:mm"),
         )
         raws = self.excluded_dirs()
         roots = schedule_roots(form.target)
@@ -3173,23 +3301,27 @@ class SchedulerPage(QWidget):
         self._save_write(excludes, form, timer_disabled=True)
 
     def _save_write(self, excludes: list[str], form: "_ScheduleForm", timer_disabled: bool) -> None:
-        # Il timer di sistema usa la stessa lista: drop-in prima di QSettings,
-        # e se non si può scrivere non si salva NULLA (GUI e timer
-        # escluderebbero cartelle diverse senza che nessuno lo sappia).
-        synced = self._sync_system_dropin(excludes, timer_disabled=timer_disabled)
+        # Il timer di sistema usa la stessa lista di esclusioni e lo stesso
+        # orario: drop-in prima di QSettings, e se non si può scrivere non si
+        # salva NULLA (GUI e timer userebbero configurazioni diverse senza
+        # che nessuno lo sappia).
+        synced = self._sync_system_dropin(
+            excludes, form.timer_time, timer_disabled=timer_disabled
+        )
         if synced is None:
             self._save_end()
             return
         changed, tcp = synced
 
-        # La casella mostra ciò che è stato salvato, anche se nel frattempo
-        # l'utente l'aveva cambiata.
+        # Le caselle mostrano ciò che è stato salvato, anche se nel frattempo
+        # l'utente le aveva cambiate.
         self.enable_check.setChecked(form.enabled)
         self.settings.setValue("schedule_enabled", form.enabled)
         self.settings.setValue("schedule_interval", form.interval)
         self.settings.setValue("schedule_unit", form.unit)
         self.settings.setValue("schedule_target", form.target)
         self.settings.setValue(SCHEDULE_EXCLUDES_KEY, excludes)
+        self.settings.setValue("timer_time", form.timer_time)
 
         # Il daemon-reload fallito e gli override estranei sono solo avvisi,
         # come nelle Impostazioni: le impostazioni sono già salvate.
@@ -3200,7 +3332,7 @@ class SchedulerPage(QWidget):
         notes = (
             [f"Impossibile completare l'aggiornamento del timer di sistema: {result}"]
             if isinstance(result, Exception)
-            else dropin_notes(*result, what="le nuove esclusioni")
+            else dropin_notes(*result, what="le nuove impostazioni")
         )
         if notes:
             QMessageBox.warning(
@@ -4108,25 +4240,29 @@ class MainWindow(QMainWindow):
             self.scan_page.start_external_scan(scan_target)
 
         self._refresh_system_dropin()
+        self._check_interrupted_timer_scan()
 
     def _refresh_system_dropin(self) -> None:
         """
         Una volta per avvio: un drop-in nostro scritto da una versione
         precedente torna al testo che il salvataggio produrrebbe adesso
-        (refresh_outdated), con daemon-reload. Lettura, scrittura e
-        systemctl --user fuori dal thread della GUI; l'esito, se c'è,
-        nella pagina Pianificazione e su stderr. Un fallimento non si
-        ritenta nella stessa sessione: il prossimo salvataggio delle
-        Impostazioni o della Pianificazione riscrive comunque il drop-in.
+        (refresh_outdated), con daemon-reload. Rigenera anche il drop-in
+        dell'orario del timer. Lettura, scrittura e systemctl --user fuori
+        dal thread della GUI; l'esito, se c'è, nella pagina Pianificazione
+        e su stderr. Un fallimento non si ritenta nella stessa sessione: il
+        prossimo salvataggio delle Impostazioni o della Pianificazione
+        riscrive comunque i drop-in.
         """
         since = dropin_generation()
+        timer_time = normalize_timer_time(self.settings.value("timer_time", "00:00"))
         try:
             state = DropinState.from_settings(self.settings)
         except DropinSettingsError as exc:
             self._dropin_refreshed(exc)
             return
         run_off_gui_thread(
-            lambda: refresh_dropin_at_startup(state, since), self._dropin_refreshed
+            lambda: refresh_dropin_at_startup(state, since, timer_time),
+            self._dropin_refreshed,
         )
 
     def _dropin_refreshed(self, result) -> None:
@@ -4135,6 +4271,45 @@ class MainWindow(QMainWindow):
             return
         self.scheduler_page.set_dropin_notice(notice)
         print(f"{APP_NAME}: {notice}", file=sys.stderr)
+
+    def _check_interrupted_timer_scan(self) -> None:
+        """
+        Una volta per avvio: una scansione del timer uccisa a metà (per
+        esempio dallo spegnimento del PC) non notifica nulla e Persistent=
+        true non la ripete, quindi resta visibile solo nel marcatore di
+        timer_scan_state. La pagina Pianificazione ripete il controllo a
+        ogni apertura.
+        """
+        run_off_gui_thread(check_interrupted_timer_scan, self._timer_scan_checked)
+
+    def _timer_scan_checked(self, result) -> None:
+        if isinstance(result, Exception):
+            # Non essenziale: si ripete alla prossima apertura della pagina
+            # Pianificazione.
+            print(
+                f"{APP_NAME}: controllo dell'ultima scansione del timer non riuscito: {result}",
+                file=sys.stderr,
+            )
+            return
+        self.scheduler_page.set_timer_scan_notice(
+            "" if result is None else interrupted_notice(result)
+        )
+        if result is None:
+            return
+        print(f"{APP_NAME}: {interrupted_notice(result)}", file=sys.stderr)
+        # Notifica una volta per interruzione: altrimenti chi spegne il PC
+        # ogni sera la vedrebbe a ogni login finché una scansione non
+        # arriva alla fine. La chiave è l'ora di avvio della scansione
+        # interrotta.
+        key = str(result.started_at)
+        if self.settings.value("timer_scan_notified", "") != key:
+            self.settings.setValue("timer_scan_notified", key)
+            self.tray_icon.showMessage(
+                APP_NAME,
+                interrupted_notice(result),
+                _icon("dialog-warning"),
+                7000,
+            )
 
     def _reset_tray_tooltip(self) -> None:
         """Riporta il tooltip della tray al riposo: chiamato a fine di

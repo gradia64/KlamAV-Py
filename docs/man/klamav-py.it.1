@@ -6,7 +6,7 @@
 .\" Coerenza con build_parser() e con la pagina inglese verificata da
 .\" tests/test_manpage.py.
 .\"
-.TH KLAMAV-PY 1 "2026-10-29" "KlamAV-Py 0.1.18" "Comandi utente"
+.TH KLAMAV-PY 1 "2026-11-05" "KlamAV-Py 0.1.19" "Comandi utente"
 .\" Sillabazione disattivata: i pattern italiani non sono garantiti ovunque
 .nh
 .
@@ -324,7 +324,14 @@ Impostata da systemd per ogni servizio.
 Se presente, una directory di quarantena volatile passata con
 .B \-\-quarantine
 diventa un errore invece di un avviso (vedere
-.BR SICUREZZA ).
+.BR SICUREZZA ),
+e la scansione segna il proprio inizio e la propria fine in
+.I timer\-scan.json
+(vedere
+.BR FILE ):
+l'assenza della fine è ciò che la GUI, al primo avvio successivo,
+riconosce come scansione interrotta, per esempio dallo spegnimento del
+computer.
 .
 .SH FILE
 .TP
@@ -403,6 +410,20 @@ registra la presa visione, quando il suo file non c'è più, o dopo 90
 giorni senza essere ritrovata.
 Stessi lock e gestione di un file non valido di
 .IR acknowledged.json .
+.TP
+.I \%~/.local/share/klamav\-py/timer\-scan.json
+Stato dell'ultima scansione della programmazione di sistema (0600):
+inizio e fine, scritti solo quando
+.B INVOCATION_ID
+è presente, l'inizio subito prima della traversata e la fine in ogni
+uscita con un codice (best-effort: un errore qui non cambia l'esito della
+scansione).
+Se manca la fine, la scansione è stata interrotta da un segnale, per
+esempio dallo spegnimento del computer: la GUI lo mostra al primo avvio
+successivo, una volta per interruzione, con il rimando alle pagine
+Segnalazioni e Quarantena.
+Il file non contiene dati dell'utente: uno non plausibile si ignora, e
+la prossima scansione lo riscrive.
 .
 .SH SICUREZZA
 .SS Directory di quarantena

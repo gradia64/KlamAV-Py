@@ -78,6 +78,7 @@ def env(app, tmp_path, monkeypatch):
         lambda raw, **kw: decide(raw, unit_hidden=(), mountinfo=MOUNTS_EXT4, volatile_roots=(), **kw),
     )
     monkeypatch.setattr(mw, "foreign_overrides", lambda **kw: [])
+    monkeypatch.setattr(mw, "foreign_timer_overrides", lambda **kw: [])
     for name in ("question", "warning", "information"):
         monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: QMessageBox.Yes))
 
@@ -87,7 +88,7 @@ def env(app, tmp_path, monkeypatch):
     settings.setValue("quarantine_dir", str(quarantine))
     settings.sync()
     return SimpleNamespace(home=home, quarantine=quarantine, settings=settings,
-                           dropin=sd.dropin_path())
+                           dropin=sd.dropin_path(), timer_dropin=sd.timer_dropin_path())
 
 
 @pytest.fixture
@@ -280,10 +281,12 @@ def test_testo_dell_avviso_da_un_solo_punto():
     rewritten = getattr(mw, "DROPIN_REWRITTEN", None)
     removed = getattr(mw, "DROPIN_REMOVED", None)
     assert rewritten is not None and removed is not None and rewritten != removed
-    assert mw.dropin_refresh_notice((None, None)) is None
-    riscritto = mw.dropin_refresh_notice((rewritten, None))
+    assert mw.dropin_refresh_notice((None, None, None)) is None
+    riscritto = mw.dropin_refresh_notice((rewritten, None, None))
     assert f"aggiornato alla versione {mw.__version__}" in riscritto
-    rimosso = mw.dropin_refresh_notice((removed, "bus assente"))
+    timer_riscritto = mw.dropin_refresh_notice((None, rewritten, None))
+    assert "orario" in timer_riscritto and "klamav-scan.timer.d" in timer_riscritto
+    rimosso = mw.dropin_refresh_notice((removed, None, "bus assente"))
     assert "rimosso" in rimosso and "aggiornato" not in rimosso
     assert "bus assente" in rimosso
 
@@ -308,6 +311,56 @@ def test_salvataggio_toglie_l_avviso(env, inline):
     assert page.dropin_notice_label.text()
     page._save_schedule()
     assert page.dropin_notice_label.isHidden()
+
+
+# -- drop-in del timer: l'orario (0.1.19) ----------------------------------
+
+def test_dropin_orario_vecchio_riscritto_all_avvio(env, inline, capsys):
+    """Un drop-in dell'orario scritto da una versione precedente (o con un
+    orario diverso da quello salvato) torna al testo attuale."""
+    env.settings.setValue("timer_time", "09:00")
+    env.settings.sync()
+    _write(env.timer_dropin, sd.HEADER + "\n[Timer]\nOnCalendar=*-*-* 08:00:00\n")
+    page = _startup(env)
+    assert env.timer_dropin.read_text() == sd.render_timer_dropin("09:00")
+    assert inline.reload == 1
+    notice = page.dropin_notice_label.text()
+    assert "orario" in notice and str(env.timer_dropin) in notice
+    assert "orario" in capsys.readouterr().err
+
+
+def test_dropin_orario_assente_non_creato(env, inline):
+    """Come per il service: il drop-in nasce solo da un salvataggio."""
+    env.settings.setValue("timer_time", "09:00")
+    env.settings.sync()
+    page = _startup(env)
+    assert not env.timer_dropin.exists()
+    assert inline.reload == 0 and page.dropin_notice_label.isHidden()
+
+
+def test_orario_tornato_mezzanotte_dropin_rimosso(env, inline, capsys):
+    """timer_time assente = 00:00 = il default della unit spedita: un
+    drop-in dell'orario ancora presente si toglie."""
+    _write(env.timer_dropin, sd.render_timer_dropin("09:00"))
+    page = _startup(env)
+    assert not env.timer_dropin.exists()
+    assert inline.reload == 1
+    notice = page.dropin_notice_label.text()
+    assert "rimosso" in notice and "orario" in notice, notice
+    assert str(env.timer_dropin) in notice
+
+
+def test_dropin_orario_scritto_a_mano_intatto(env, inline, capsys):
+    """Un file con il nostro nome ma senza intestazione non si tocca,
+    né si avvisa: come per il drop-in del service."""
+    testo = "[Timer]\nOnCalendar=07:00\n"
+    _write(env.timer_dropin, testo)
+    env.settings.setValue("timer_time", "09:00")
+    env.settings.sync()
+    page = _startup(env)
+    assert env.timer_dropin.read_text() == testo
+    assert inline.reload == 0 and page.dropin_notice_label.isHidden()
+    assert capsys.readouterr().err == ""
 
 
 # -- systemctl mai nel thread della GUI ----------------------------------

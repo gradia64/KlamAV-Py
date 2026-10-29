@@ -23,12 +23,14 @@ from pathlib import Path
 
 import pytest
 
+import klamav_py.systemd_dropin as sd
 from klamav_py.clamd_client import DEFAULT_SOCKET, ClamdEndpoint
 from klamav_py.cli import build_parser
 from klamav_py.quarantine_location import DEFAULT_QUARANTINE_SUBDIR
 from klamav_py.systemd_dropin import (
     EXEC_BINARY,
     foreign_overrides,
+    foreign_timer_overrides,
     EXEC_TEMPLATE,
     HEADER,
     DropinConflict,
@@ -37,9 +39,11 @@ from klamav_py.systemd_dropin import (
     quote_exec_arg,
     quote_path_value,
     render_dropin,
+    render_timer_dropin,
     split_exec,
     split_paths,
     sync_dropin,
+    timer_dropin_path,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -645,3 +649,135 @@ def test_systemd_analyze_verify_esclusioni(tmp_path):
         pytest.skip(output.strip())
     assert proc.returncode == 0, output
     assert "50-klamav-py.conf" not in output, output
+
+
+# -- drop-in del timer: l'orario della scansione (0.1.19) ------------------
+
+TIMER_UNIT = ROOT / "debian" / "klamav-py.klamav-scan.user.timer"
+
+GOLDEN_TIMER_0930 = f"""{HEADER}
+# Scritto e rimosso dalla pagina Pianificazione di klamav-py-gui; vedi klamav-py-gui(1).
+
+[Timer]
+OnCalendar=*-*-* 09:30:00
+"""
+
+
+def test_golden_orario_del_timer():
+    assert render_timer_dropin("09:30") == GOLDEN_TIMER_0930
+
+
+def test_mezzanotte_e_il_default_nessun_dropin():
+    # "daily" della unit spedita è mezzanotte: come per il drop-in del
+    # service, il ritorno ai valori predefiniti non scrive il file (e lo
+    # rimuove, in sync_dropin).
+    assert render_timer_dropin("00:00") is None
+
+
+@pytest.mark.parametrize("hhmm", [
+    "9:30", "09:5", "24:00", "09:60", "0930", "", "mezzogiorno", "09:30:00", "23:59\n09:00",
+])
+def test_orari_non_validi_rifiutati(hhmm):
+    with pytest.raises(ValueError):
+        render_timer_dropin(hhmm)
+
+
+def test_percorso_del_dropin_del_timer(tmp_path):
+    assert timer_dropin_path(tmp_path) == (
+        tmp_path / "systemd" / "user" / "klamav-scan.timer.d" / "50-klamav-py.conf"
+    )
+    assert timer_dropin_path(tmp_path) != dropin_path(tmp_path)
+
+
+def test_scrittura_e_rimozione_sul_percorso_del_timer(tmp_path):
+    path = timer_dropin_path(tmp_path)
+    assert sync_dropin(render_timer_dropin("09:00"), path)
+    assert is_ours(path) and "OnCalendar=*-*-* 09:00:00" in path.read_text()
+    assert not sync_dropin(render_timer_dropin("09:00"), path)  # idempotente
+    # Torno al default: rimosso, con la directory vuota.
+    assert sync_dropin(None, path)
+    assert not path.exists() and not path.parent.exists()
+
+
+def test_file_non_nostro_conflict_anche_sul_percorso_del_timer(tmp_path):
+    path = timer_dropin_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("[Timer]\nOnCalendar=09:00\n")  # scritto a mano, senza HEADER
+    with pytest.raises(DropinConflict):
+        sync_dropin(render_timer_dropin("09:00"), path)
+
+
+@pytest.fixture
+def timer_dirs(tmp_path):
+    user = tmp_path / "user" / "klamav-scan.timer.d"
+    user.mkdir(parents=True)
+    return SimpleNamespace(user=user, ours=user / "50-klamav-py.conf")
+
+
+def _timer_paths(dirs):
+    return sd._scan_dropin_dirs((dirs.user.parent,), unit=sd.TIMER_NAME)
+
+
+def test_dropin_del_timer_scritto_a_mano_dopo_il_nostro_vince(timer_dirs):
+    # Il caso reale: chi finora spostava l'orario con un drop-in scritto a
+    # mano. "override.conf" viene dopo "50-klamav-py.conf" e vince: senza
+    # avviso la GUI direbbe «salvato» un orario che systemd ignora.
+    sync_dropin(render_timer_dropin("09:00"), timer_dirs.ours)
+    (timer_dirs.user / "override.conf").write_text("[Timer]\nOnCalendar=07:00\n")
+    (found,) = foreign_timer_overrides(ours=timer_dirs.ours, paths=_timer_paths(timer_dirs))
+    assert found.after and found.keys == ("OnCalendar",)
+    assert "non quello scelto" in found.describe()
+
+
+def test_dropin_del_timer_precedente_viene_sostituito(timer_dirs):
+    sync_dropin(render_timer_dropin("09:00"), timer_dirs.ours)
+    (timer_dirs.user / "10-mattina.conf").write_text("[Timer]\nOnCalendar=07:00\n")
+    (found,) = foreign_timer_overrides(ours=timer_dirs.ours, paths=_timer_paths(timer_dirs))
+    assert not found.after and "sostituisce quello di quel file" in found.describe()
+
+
+def test_on_calendar_altrove_non_conta(timer_dirs):
+    sync_dropin(render_timer_dropin("09:00"), timer_dirs.ours)
+    (timer_dirs.user / "override.conf").write_text(
+        "[Service]\nOnCalendar=07:00\n[Timer]\nPersistent=false\nUnit=klamav-scan.service\n"
+    )
+    assert foreign_timer_overrides(ours=timer_dirs.ours, paths=_timer_paths(timer_dirs)) == []
+
+
+def test_il_nostro_dropin_del_timer_non_e_un_conflitto(timer_dirs):
+    sync_dropin(render_timer_dropin("09:00"), timer_dirs.ours)
+    assert foreign_timer_overrides(ours=timer_dirs.ours, paths=_timer_paths(timer_dirs)) == []
+
+
+@pytest.mark.skipif(not shutil.which("systemd-analyze"), reason="systemd-analyze non disponibile")
+def test_systemd_analyze_verify_dropin_del_timer(tmp_path):
+    true = shutil.which("true")
+    units = tmp_path / "units"
+    dropin_dir = units / "klamav-scan.timer.d"
+    dropin_dir.mkdir(parents=True)
+    runtime = tmp_path / "run"
+    runtime.mkdir(mode=0o700)
+    (units / "klamav-scan.timer").write_text(TIMER_UNIT.read_text())
+    (units / "klamav-scan.service").write_text(UNIT.read_text().replace(EXEC_BINARY, true))
+    (units / "klamav-scan-notify.service").write_text(f"[Service]\nType=oneshot\nExecStart={true}\n")
+    (dropin_dir / "50-klamav-py.conf").write_text(render_timer_dropin("09:30"))
+    env = {**os.environ, "SYSTEMD_UNIT_PATH": f"{units}:", "XDG_RUNTIME_DIR": str(runtime)}
+    proc = subprocess.run(
+        ["systemd-analyze", "--user", "verify", "--man=no", str(units / "klamav-scan.timer")],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    output = proc.stdout + proc.stderr
+    if _environmental(output):
+        pytest.skip(output.strip())
+    assert proc.returncode == 0, output
+    assert "50-klamav-py.conf" not in output, output
+
+
+def test_normalize_timer_time():
+    # Valori salvati: validi passano, il resto torna al default (config
+    # modificata a mano: la pagina mostra il valore normalizzato).
+    assert sd.normalize_timer_time("09:00") == "09:00"
+    assert sd.normalize_timer_time("00:00") == "00:00"
+    assert sd.normalize_timer_time("23:59") == "23:59"
+    for raw in (None, "", "9:00", "09:0", "24:00", "09:60", 900, ["09:00"]):
+        assert sd.normalize_timer_time(raw) == "00:00", raw

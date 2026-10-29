@@ -18,6 +18,17 @@ Un solo file, generato dallo stato completo: con più drop-in, ognuno
 azzererebbe ExecStart= e vincerebbe l'ultimo in ordine alfabetico, perdendo
 in silenzio gli altri.
 
+Lo stesso macchinario (HEADER, sync_dropin/refresh_outdated con il
+percorso esplicito, stessa generazione) genera anche il drop-in del timer,
+
+    ~/.config/systemd/user/klamav-scan.timer.d/50-klamav-py.conf
+
+che sposta l'orario della scansione (OnCalendar=daily nella unit spedita,
+cioè a mezzanotte): «daily» fisso costringeva a scrivere il drop-in a
+mano per spostare la scansione nelle ore di giorno. Il file sostituisce
+solo OnCalendar: RandomizedDelaySec e Persistent restano quelli della
+unit spedita.
+
 Tre insidie che il modulo chiude, ognuna con i suoi test:
 
 - ExecStart= vuoto prima della riga nuova: su Type=oneshot le ExecStart si
@@ -26,8 +37,8 @@ Tre insidie che il modulo chiude, ognuna con i suoi test:
   splitting, espande gli specificatori (%) e le variabili ($): un percorso
   con spazi, "%" o "$" va quotato con le regole di systemd, non di sh.
 - Pulizia: il file si riconosce dall'intestazione (HEADER, la prima riga)
-  e si cancella solo se è nostro; un file con lo stesso nome scritto a
-  mano non viene mai toccato.
+  e si cancella solo se è nostro; un file con lo stesso nome scritto
+  a mano non viene mai toccato.
 
 All'avvio la GUI riporta al testo attuale un drop-in nostro scritto da una
 versione precedente (refresh_outdated): un cambio di EXEC_TEMPLATE arriva
@@ -277,14 +288,62 @@ def render_dropin(
     return "\n".join(lines) + "\n"
 
 
+_HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def render_timer_dropin(hhmm: str) -> str | None:
+    """
+    Testo del drop-in di klamav-scan.timer per l'orario della scansione
+    (HH:MM, ogni giorno). None per "00:00": è il valore della unit spedita
+    (OnCalendar=daily), e come per il drop-in del service il ritorno ai
+    valori predefiniti si traduce nella rimozione del file.
+
+    Sostituisce OnCalendar e nient'altro: RandomizedDelaySec e Persistent
+    restano quelli della unit spedita. Il valore in un drop-in sovrascrive
+    tutte le assegnazioni precedenti della stessa direttiva, quindi il
+    "daily" della unit non si somma.
+    """
+    if not _HHMM.match(hhmm):
+        raise ValueError(f"orario non valido: {hhmm!r}")
+    if hhmm == "00:00":
+        return None
+    return (
+        HEADER + "\n"
+        "# Scritto e rimosso dalla pagina Pianificazione di klamav-py-gui; "
+        "vedi klamav-py-gui(1).\n"
+        "\n"
+        "[Timer]\n"
+        f"OnCalendar=*-*-* {hhmm}:00\n"
+    )
+
+
+def normalize_timer_time(raw) -> str:
+    """
+    Il valore salvato nelle impostazioni riportato a un "HH:MM" valido:
+    "00:00" (il default della unit spedita) se manca o non è plausibile,
+    per esempio in una configurazione modificata a mano. La pagina mostra
+    il valore normalizzato, quindi il ritorno al default è visibile.
+    """
+    return raw if isinstance(raw, str) and _HHMM.match(raw) else "00:00"
+
+
 # -- file system ---------------------------------------------------------
 
+def _config_home(config_home: Path | None) -> Path:
+    if config_home is not None:
+        return config_home
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".config"
+
+
 def dropin_path(config_home: Path | None = None) -> Path:
-    base = config_home
-    if base is None:
-        xdg = os.environ.get("XDG_CONFIG_HOME")
-        base = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".config"
-    return base / "systemd" / "user" / f"{UNIT_NAME}.d" / DROPIN_NAME
+    return _config_home(config_home) / "systemd" / "user" / f"{UNIT_NAME}.d" / DROPIN_NAME
+
+
+def timer_dropin_path(config_home: Path | None = None) -> Path:
+    """Il drop-in dell'ORARIO sta sulla unit timer, non sul service: la
+    sezione [Timer] vive lì."""
+    return _config_home(config_home) / "systemd" / "user" / f"{TIMER_NAME}.d" / DROPIN_NAME
 
 
 def is_ours(path: Path) -> bool:
@@ -293,6 +352,22 @@ def is_ours(path: Path) -> bool:
             return fh.readline().rstrip("\n") == HEADER
     except FileNotFoundError:
         return False
+
+
+def dropin_conflict(path: Path) -> DropinConflict | None:
+    """
+    DropinConflict se al posto di `path` c'è un file che non abbiamo
+    scritto noi, None altrimenti. Da controllare su TUTTI i drop-in prima
+    di scriverne uno: un salvataggio o riesce su tutti o non tocca nulla,
+    e scoprire il conflitto sul secondo file lascerebbe il primo scritto
+    con valori che le impostazioni non hanno salvato.
+    """
+    if (path.exists() or path.is_symlink()) and not is_ours(path):
+        return DropinConflict(
+            f"{path} esiste ma non è stato scritto da KlamAV-Py: rimuovilo o "
+            "rinominalo, poi salva di nuovo le Impostazioni."
+        )
+    return None
 
 
 # Scritture serializzate e numerate. La rigenerazione all'avvio gira in un
@@ -327,12 +402,10 @@ def sync_dropin(text: str | None, path: Path | None = None) -> bool:
 
 
 def _sync_locked(text: str | None, path: Path) -> bool:
+    conflict = dropin_conflict(path)
+    if conflict is not None:
+        raise conflict
     exists = path.exists() or path.is_symlink()
-    if exists and not is_ours(path):
-        raise DropinConflict(
-            f"{path} esiste ma non è stato scritto da KlamAV-Py: rimuovilo o "
-            "rinominalo, poi salva di nuovo le Impostazioni."
-        )
 
     if text is None:
         if not exists:
@@ -436,6 +509,30 @@ def timer_enabled() -> bool | None:
     return None
 
 
+def service_active() -> bool | None:
+    """
+    True/False se klamav-scan.service sta girando o no, None se non si può
+    sapere (niente manager utente). Serve a distinguere una scansione
+    interrotta (marcatore d'inizio senza fine, timer_scan_state) da una in
+    corso adesso: il timer con Persistent=true può rimettere in moto la
+    scansione al login, e allora il buco della notte lo copre la scansione
+    che gira.
+
+    Con Type=oneshot la scansione in corso è "activating" (ExecStart non
+    è ancora terminato); "active" non compare, senza RemainAfterExit, ma
+    non costa nulla accettarlo.
+    """
+    result = _systemctl_user("is-active", UNIT_NAME)
+    if result is None:
+        return None
+    state = result.stdout.strip()
+    if state in ("active", "activating", "reloading"):
+        return True
+    if state in ("inactive", "deactivated", "deactivating", "failed"):
+        return False
+    return None
+
+
 # -- drop-in di altri ----------------------------------------------------
 #
 # Altri drop-in della stessa unit (tipicamente override.conf, creato da
@@ -444,7 +541,9 @@ def timer_enabled() -> bool | None:
 # e con esso quarantena e connessione impostate nella GUI; uno applicato
 # PRIMA viene sostituito dal nostro, e sono le personalizzazioni di
 # quel file a sparire. Con TCP conta anche PrivateNetwork: un "true"
-# applicato dopo il nostro "no" richiude la rete.
+# applicato dopo il nostro "no" richiude la rete. Sulla unit timer vale
+# lo stesso per OnCalendar: un drop-in applicato dopo il nostro decide
+# lui l'orario della scansione.
 #
 # Il rilevamento avvisa e non blocca: la personalizzazione è dell'utente
 # ed è intenzionale, ma non deve restare silenziosa.
@@ -488,26 +587,35 @@ class ForeignOverride:
                 "la sua impostazione PrivateNetwork impedisce alla scansione "
                 "programmata di raggiungere clamd via TCP"
             )
+        if "OnCalendar" in self.keys:
+            effects.append(
+                "l'orario della scansione programmata è quello di quel file, "
+                "non quello scelto nella pagina Pianificazione di KlamAV-Py"
+                if wins
+                else "l'orario scelto in KlamAV-Py sostituisce quello di quel file "
+                "(OnCalendar), quindi le sue personalizzazioni dell'orario non "
+                "vengono applicate"
+            )
         return f"«{self.path}»: " + "; ".join(effects) + "."
 
 
-def dropin_paths() -> list[Path] | None:
+def dropin_paths(unit: str = UNIT_NAME) -> list[Path] | None:
     """
-    Drop-in di klamav-scan.service nell'ordine in cui systemd li applica,
-    da "systemctl --user show -p DropInPaths". None se il manager utente
+    Drop-in di `unit` nell'ordine in cui systemd li applica, da
+    "systemctl --user show -p DropInPaths". None se il manager utente
     non risponde (sessione SSH, sistema senza systemd): il chiamante usa
     allora la lettura diretta delle directory.
     """
-    result = _systemctl_user("show", "-p", "DropInPaths", "--value", UNIT_NAME)
+    result = _systemctl_user("show", "-p", "DropInPaths", "--value", unit)
     if result is None or result.returncode != 0:
         return None
     return [Path(p) for p in result.stdout.split()]
 
 
-def _scan_dropin_dirs(dirs=_DROPIN_DIRS) -> list[Path]:
+def _scan_dropin_dirs(dirs=_DROPIN_DIRS, unit: str = UNIT_NAME) -> list[Path]:
     by_name: dict[str, Path] = {}
     for base in dirs:
-        d = base.expanduser() / f"{UNIT_NAME}.d"
+        d = base.expanduser() / f"{unit}.d"
         try:
             files = sorted(d.glob("*.conf"))
         except OSError:
@@ -517,10 +625,10 @@ def _scan_dropin_dirs(dirs=_DROPIN_DIRS) -> list[Path]:
     return [by_name[name] for name in sorted(by_name)]
 
 
-def _service_keys(path: Path) -> set[str]:
-    """Direttive assegnate nella sezione [Service] di un drop-in."""
+def _assigned_keys(path: Path, section: str) -> set[str]:
+    """Direttive assegnate nella sezione `section` di un drop-in."""
     keys: set[str] = set()
-    in_service = False
+    in_section = False
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -530,9 +638,9 @@ def _service_keys(path: Path) -> set[str]:
         if not line or line.startswith(("#", ";")):
             continue
         if line.startswith("["):
-            in_service = line == "[Service]"
+            in_section = line == f"[{section}]"
             continue
-        if in_service and "=" in line:
+        if in_section and "=" in line:
             keys.add(line.split("=", 1)[0].strip())
     return keys
 
@@ -544,10 +652,11 @@ def foreign_overrides(
     paths: list[Path] | None = None,
 ) -> list[ForeignOverride]:
     """
-    Drop-in non nostri che impostano ExecStart (sempre) o PrivateNetwork
-    (solo con TCP, dove il nostro "no" deve restare l'ultimo). paths è
-    iniettabile per i test; di default DropInPaths, o le directory lette
-    direttamente se il manager utente non risponde.
+    Drop-in non nostri di klamav-scan.service che impostano ExecStart
+    (sempre) o PrivateNetwork (solo con TCP, dove il nostro "no" deve
+    restare l'ultimo). paths è iniettabile per i test; di default
+    DropInPaths, o le directory lette direttamente se il manager utente
+    non risponde.
     """
     ours = ours or dropin_path()
     if paths is None:
@@ -561,7 +670,7 @@ def foreign_overrides(
     for p in paths:
         if p.name == ours.name and (p == ours or is_ours(p)):
             continue
-        keys = _service_keys(p) & watched
+        keys = _assigned_keys(p, "Service") & watched
         after = p.name > ours.name
         if "PrivateNetwork" in keys and not (after or not ours_active):
             # Applicato prima del nostro "no": non ha effetto, niente avviso.
@@ -569,5 +678,37 @@ def foreign_overrides(
         if keys:
             # systemd applica i drop-in per nome del file, qualunque sia
             # la directory: il confronto sul nome dice chi viene dopo.
+            found.append(ForeignOverride(p, tuple(sorted(keys)), after, ours_active))
+    return found
+
+
+def foreign_timer_overrides(
+    *,
+    ours: Path | None = None,
+    paths: list[Path] | None = None,
+) -> list[ForeignOverride]:
+    """
+    Drop-in non nostri di klamav-scan.timer che impostano OnCalendar: senza
+    questo controllo l'orario scelto nella pagina Pianificazione potrebbe
+    non essere quello effettivo, e la GUI lo direbbe comunque «salvato».
+
+    Stesso giro di foreign_overrides, sulla unit timer: un drop-in scritto
+    a mano (come chi finora spostava l'orario da «daily») che risulti
+    applicato dopo il nostro vince, uno applicato prima viene sostituito.
+    """
+    ours = ours or timer_dropin_path()
+    if paths is None:
+        paths = dropin_paths(TIMER_NAME)
+    if paths is None:
+        paths = _scan_dropin_dirs(TIMER_NAME)
+
+    ours_active = is_ours(ours)
+    found = []
+    for p in paths:
+        if p.name == ours.name and (p == ours or is_ours(p)):
+            continue
+        keys = _assigned_keys(p, "Timer") & {"OnCalendar"}
+        if keys:
+            after = p.name > ours.name
             found.append(ForeignOverride(p, tuple(sorted(keys)), after, ours_active))
     return found

@@ -80,6 +80,7 @@ from .quarantine_location import decide as decide_quarantine_dir
 from .quarantine_policy import QuarantinePolicy, default_report_only_dirs
 from .scan_exclusions import decide as decide_exclusion
 from .scan_totals import io_fault_note
+from . import timer_scan_state
 
 
 def _socket_endpoint(value: str) -> ClamdEndpoint:
@@ -504,6 +505,19 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if log_fh:
             log_fh.write(f"{path}\tcartella non leggibile: {reason}\n")
 
+    # Marcatore d'inizio per l'avviso di scansione interrotta nella GUI
+    # (timer_scan_state). Solo sotto systemd (INVOCATION_ID, cioè il timer:
+    # un'interruzione manuale è visibile nel terminale) e solo adesso che
+    # le validazioni bloccanti sono passate: una scansione mai partita non
+    # deve sembrare interrotta. Best-effort: senza questo file la GUI non
+    # avvisa, ma la scansione non cambia.
+    marker_open = bool(os.environ.get("INVOCATION_ID"))
+    if marker_open:
+        try:
+            timer_scan_state.record_start(str(scan_root))
+        except OSError:
+            marker_open = False
+
     try:
         for result in client.scan_stream(
             scan_root,
@@ -589,6 +603,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(f"clamd non raggiungibile su {args.endpoint.describe()}: {exc}", file=sys.stderr)
         return 2
     finally:
+        # Ogni uscita con un codice (0, 1, 2) passa di qui: la scansione è
+        # arrivata alla fine e la notifica è già garantita da OnFailure.
+        # Resta senza fine solo la morte per segnale (spegnimento): è il
+        # caso che la GUI deve trovare al login. Stesso best-effort
+        # dell'inizio: un fallimento qui non cambia l'esito.
+        if marker_open:
+            try:
+                timer_scan_state.record_end()
+            except OSError:
+                pass
         if log_fh:
             log_fh.close()
         acks.finish()

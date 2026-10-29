@@ -103,6 +103,7 @@ def env(app, tmp_path, monkeypatch):
     # I drop-in reali della macchina (es. un override.conf dello sviluppatore)
     # non devono entrare nei test: vedi test_systemd_dropin per il rilevamento.
     monkeypatch.setattr(mw, "foreign_overrides", lambda **kw: [])
+    monkeypatch.setattr(mw, "foreign_timer_overrides", lambda **kw: [])
 
     def dialogs(*answers):
         d = Dialogs(answers)
