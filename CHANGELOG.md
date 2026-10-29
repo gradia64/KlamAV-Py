@@ -5,7 +5,7 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
-## Non rilasciato
+## 0.1.18 — 2026-10-29
 
 ### Modificato
 - **Le segnalazioni della scansione programmata di sistema compaiono
@@ -19,8 +19,10 @@ sono in `docs/CHANGELOG-archive.md`.
   stesse azioni di prima, anche dopo un riavvio della finestra. Una voce
   esce quando la elimini o ne registri la presa visione (anche da riga di
   comando) o quando il file non c'è più. La notifica del timer rimanda
-  alla pagina. Per controllare: dopo la prossima scansione del timer con
-  una segnalazione, aprire la pagina Segnalazioni.
+  alla pagina. Dopo l'aggiornamento chiudere KlamAV-Py con «Esci» e
+  riaprirlo (una finestra rimasta aperta usa ancora la versione
+  precedente); poi, dopo la prossima scansione del timer con una
+  segnalazione, aprire la pagina Segnalazioni.
 
 ### Corretto
 - **GUI: un possibile crash dopo un errore in un'operazione in
@@ -35,7 +37,11 @@ sono in `docs/CHANGELOG-archive.md`.
 - Test: dopo ogni test della GUI la suite controlla che nessun oggetto
   Qt resti tenuto in vita solo da un ciclo di riferimenti, la causa del
   segfault visto nella CI con Python 3.12 durante il rilascio della
-  0.1.17. La pagina man della CLI nomina anche `.<nome>.intent-pending`.
+  0.1.17; registro delle segnalazioni da valutare, scritto dalla CLI
+  anche in una scansione interrotta e dal worker della GUI, e pagina
+  Segnalazioni che lo legge, con presa visione, eliminazione e voci tolte
+  quando il file non c'è più. La pagina man della CLI nomina anche
+  `.<nome>.intent-pending`. Totale: 1082 test.
 
 ---
 ## 0.1.17 — 2026-10-22
