@@ -82,11 +82,13 @@ def _texts(page) -> str:
     return "\n".join(label.text() for label in page.findChildren(QLabel))
 
 
-def test_pagina_dice_ambito_e_sessione(page):
+def test_pagina_dice_ambito_e_provenienza(page):
     text = _texts(page)
     assert SCOPE_NOTE in text
-    assert "di questa sessione" in text
-    assert "journalctl --user -u klamav-scan.service" in text
+    # Dalla 0.1.18 la pagina mostra anche le segnalazioni del timer di
+    # sistema: niente più rimando al journal per trovarle.
+    assert "anche della scansione programmata di sistema" in text
+    assert "journalctl" not in text
     assert "klamav-py --acknowledge" in text
 
 

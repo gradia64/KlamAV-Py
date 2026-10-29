@@ -73,6 +73,8 @@ from ..acknowledged import (
 from ..clamd_client import (
     DEFAULT_SOCKET, DEFAULT_TCP_PORT, ClamdEndpoint, ScanResult, unreadable_dir_line,
 )
+from ..pending_reports import PendingStore, location
+from ..pending_reports import recovery_notice as pending_recovery_notice
 from ..quarantine import Quarantine, describe_recovery, peek_entries
 from ..quarantine_policy import REASON_MAIL_STORE
 from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
@@ -1924,8 +1926,10 @@ class ReportsPage(QWidget):
     Segnalazioni non spostate (firme euristiche, archivi di posta: vedi
     quarantine_policy) e prese visione (acknowledged.py).
 
-    Le segnalazioni arrivano dalle scansioni di questa sessione (manuale,
-    programmata interna, Real-Time) con due azioni: la presa visione, che
+    Le segnalazioni arrivano dal registro delle segnalazioni da valutare
+    (pending_reports.py), scritto da ogni scansione, anche dal timer di
+    sistema, e in diretta dalle scansioni di questa sessione (manuale,
+    programmata interna, Real-Time). Due azioni: la presa visione, che
     registra il contenuto riletto subito dopo il rilevamento (non quello
     del file al momento del clic), e l'eliminazione, solo se il percorso è
     ancora lo stesso file regolare. Il caso d'origine è la posta nel
@@ -1933,10 +1937,21 @@ class ReportsPage(QWidget):
     cercare il file a mano nel maildir.
     """
 
-    def __init__(self, registry: AckRegistry | None = None, parent=None) -> None:
+    def __init__(self, registry: AckRegistry | None = None, parent=None,
+                 pending_store: PendingStore | None = None) -> None:
         super().__init__(parent)
         self.registry = registry if registry is not None else AckRegistry()
+        self.pending_store = pending_store if pending_store is not None else PendingStore()
         self._pending: list[PendingReport] = []
+        # Lettura del registro delle segnalazioni nel thread di
+        # run_off_gui_thread: una alla volta, ripetuta se nel frattempo la
+        # pagina lo ha cambiato (presa visione, eliminazione).
+        self._pending_loading = False
+        self._pending_generation = 0
+        self._pending_reload_again = False
+        # Righe arrivate in diretta durante una lettura: l'istantanea
+        # letta può non averle ancora.
+        self._added_since_load: set = set()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
@@ -1956,13 +1971,13 @@ class ReportsPage(QWidget):
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        # La tabella non è persistente: chi cerca qui le segnalazioni della
-        # notte (timer di sistema) deve sapere dove trovarle.
+        # Da dove vengono e quando escono le righe: senza, una segnalazione
+        # della notte che sparisce dopo uno spostamento in KMail sembra
+        # persa.
         session = QLabel(
-            "Qui compaiono le segnalazioni delle scansioni di questa sessione della finestra "
-            "(manuale, programmata interna, Real-Time). Quelle della scansione programmata di "
-            "sistema sono nel journal («journalctl --user -u klamav-scan.service | grep "
-            "INFETTO») e si gestiscono con «klamav-py --acknowledge PERCORSO»."
+            "Qui compaiono le segnalazioni di tutte le scansioni, anche della scansione "
+            "programmata di sistema, finché non le elimini, non ne registri la presa visione "
+            "o il file non c'è più. Dalla riga di comando: «klamav-py --acknowledge PERCORSO»."
         )
         session.setStyleSheet("font-size: 12px; color: palette(mid);")
         session.setWordWrap(True)
@@ -2028,7 +2043,7 @@ class ReportsPage(QWidget):
 
         refresh_button = QPushButton("Aggiorna")
         refresh_button.setIcon(QIcon.fromTheme("view-refresh"))
-        refresh_button.clicked.connect(self.refresh_acknowledged)
+        refresh_button.clicked.connect(self.refresh)
         self.revoke_button = QPushButton("Revoca")
         self.revoke_button.setIcon(QIcon.fromTheme("edit-undo"))
         self.revoke_button.clicked.connect(self._revoke_selected)
@@ -2040,18 +2055,84 @@ class ReportsPage(QWidget):
 
         self._refresh_pending()
         self.refresh_acknowledged()
+        self.reload_pending()
+
+    def refresh(self) -> None:
+        """«Aggiorna»: prese visione e segnalazioni da valutare."""
+        self.refresh_acknowledged()
+        self.reload_pending()
+
+    def showEvent(self, event) -> None:
+        # La pagina si apre dopo una scansione del timer di sistema, che la
+        # GUI non vede: si rilegge il registro a ogni apertura.
+        super().showEvent(event)
+        self.reload_pending()
 
     # -- segnalazioni da valutare ------------------------------------------
 
     def add_report(self, report: PendingReport) -> None:
         """Una riga per file e firma: una nuova scansione dello stesso file
-        sostituisce la riga, con l'identità appena riletta."""
-        self._pending = [
-            r for r in self._pending
-            if (r.path, r.signature) != (report.path, report.signature)
-        ]
+        sostituisce la riga, con l'identità appena riletta. Il worker l'ha
+        già scritta nel registro (ScanAcknowledgements.report_new)."""
+        self._pending = [r for r in self._pending if location(r) != location(report)]
         self._pending.append(report)
+        self._added_since_load.add(location(report))
         self._refresh_pending()
+
+    def reload_pending(self) -> None:
+        """Rilegge il registro delle segnalazioni da valutare, togliendo
+        quelle già valutate (anche dalla CLI) e quelle il cui file non c'è
+        più. Fuori dal thread della GUI: controlla ogni file."""
+        if self._pending_loading:
+            self._pending_reload_again = True
+            return
+        self._pending_loading = True
+        self._pending_reload_again = False
+        self._added_since_load = set()
+        generation = self._pending_generation
+        store, registry = self.pending_store, self.registry
+
+        def load():
+            acknowledged = {e.key for e in registry.entries()}
+            result = store.prune(acknowledged)
+            recovery, store.last_recovery = store.last_recovery, None
+            return result, recovery
+
+        run_off_gui_thread(load, lambda result: self._pending_loaded(generation, result))
+
+    def _pending_loaded(self, generation: int, result) -> None:
+        self._pending_loading = False
+        if self._pending_reload_again or generation != self._pending_generation:
+            # La pagina ha cambiato il registro durante la lettura.
+            self.reload_pending()
+            return
+        if isinstance(result, Exception):
+            self._show_pending_problem(f"Segnalazioni da valutare non leggibili: {result}")
+            return
+        pruned, recovery = result
+        if recovery is not None:
+            notice = pending_recovery_notice(*recovery)
+            self._show_pending_problem(notice[0].upper() + notice[1:])
+        stored = {location(r): r for r in pruned.reports}
+        live = [r for r in self._pending
+                if location(r) in self._added_since_load and location(r) not in stored]
+        self._pending = list(stored.values()) + live
+        self._refresh_pending()
+
+    def _show_pending_problem(self, text: str) -> None:
+        self.recovery_label.setText(text)
+        self.recovery_label.setVisible(True)
+
+    def _forget(self, locations=(), contents=()) -> None:
+        """Toglie dal registro le segnalazioni gestite dalla pagina. Un
+        errore di scrittura non annulla l'azione già fatta: la voce esce
+        comunque alla prossima lettura (prune), perché il file è stato
+        valutato o non c'è più."""
+        self._pending_generation += 1
+        try:
+            self.pending_store.discard(locations, contents)
+        except OSError as exc:
+            self._show_pending_problem(f"Registro delle segnalazioni non aggiornato: {exc}")
 
     def pending(self) -> list[PendingReport]:
         return list(self._pending)
@@ -2105,6 +2186,8 @@ class ReportsPage(QWidget):
             r for r in self._pending
             if r.identity is None or (r.identity.sha256, r.signature) not in done
         ]
+        if done:
+            self._forget(contents=done)
         self._refresh_pending()
         self.refresh_acknowledged()
 
@@ -2136,6 +2219,7 @@ class ReportsPage(QWidget):
             QMessageBox.warning(self, title, str(exc))
             return
         self._pending = [r for r in self._pending if r is not report]
+        self._forget(locations=[location(report)])
         self._refresh_pending()
 
     # -- prese visione -----------------------------------------------------

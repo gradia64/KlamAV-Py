@@ -388,6 +388,16 @@ and never deleted, with a warning (on standard error, or in the Reports
 page of the GUI): the previous acknowledgements remain in that file, and
 the matching detections are reported as new again.
 Entries not found by any scan for 90 days are removed.
+.TP
+.I \%~/.local/share/klamav-py/pending-reports.json
+Detections still to be evaluated (0600): every scan writes each new
+detection that is only reported, as soon as it finds it, and the Reports
+page of the GUI lists them, also those of the scheduled system scan.
+An entry leaves the file when the detection is deleted or acknowledged,
+when its file is no longer there, or after 90 days without being found
+again.
+Same lock and handling of an invalid file as
+.IR acknowledged.json .
 .
 .SH SECURITY
 .SS Quarantine directory

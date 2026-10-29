@@ -22,12 +22,10 @@ Semantica dei file .fp di ClamAV, al livello dell'utente:
   rilevamento con O_NOFOLLOW e controllo di file regolare. Un errore di
   lettura vale come segnalazione nuova: si fallisce in modo visibile.
 
-File di stato con la stessa disciplina degli altri: 0600 in directory
+File di stato con la disciplina di json_registry.py: 0600 in directory
 0700, scrittura atomica, lock per i read-modify-write (GUI e timer possono
 scrivere insieme), parse validato con tetto di dimensione, file invalido
-messo da parte (.corrupt-*, mai cancellato) e si riparte da vuoto. La
-manomissione da parte dello stesso utente è robustezza, non sicurezza: il
-file sta nella sua home.
+messo da parte (.corrupt-*, mai cancellato) e si riparte da vuoto.
 
 Le voci senza riscontri da EXPIRY_DAYS giorni si tolgono alla scrittura
 successiva e non valgono più già alla lettura.
@@ -35,21 +33,16 @@ successiva e non valgono più già alla lettura.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
-import json
-import math
 import os
 import re
 import stat
 import time
-import uuid
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
-from .private_files import ensure_private_dir, open_private_fd, write_private_text
+from .json_registry import CorruptRegistry, JsonRegistry, is_text, is_time
 
 REGISTRY_NAME = "acknowledged.json"
 # Una voce occupa qualche centinaio di byte: 4 MiB sono decine di migliaia
@@ -95,10 +88,6 @@ def recovery_notice(backup: Path, reason: str) -> str:
         "Le prese visione precedenti sono in quel file, non sono state cancellate; "
         "il registro riparte vuoto, quindi quelle segnalazioni tornano nuove."
     )
-
-
-class _CorruptRegistry(Exception):
-    pass
 
 
 # -- identità del contenuto ----------------------------------------------
@@ -179,100 +168,52 @@ class Acknowledgement:
 _FIELDS = {f.name for f in fields(Acknowledgement)}
 
 
-def _is_time(value) -> bool:
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value) and value >= 0)
-
-
 def _entry_problem(item) -> Optional[str]:
     if not isinstance(item, dict) or not _FIELDS <= item.keys():
         return "voce malformata"
     if not isinstance(item["sha256"], str) or not _SHA256.fullmatch(item["sha256"]):
         return "sha256 non valido"
     for key in ("signature", "first_path"):
-        value = item[key]
-        if not isinstance(value, str) or not value or "\0" in value or "\n" in value:
+        if not is_text(item[key]):
             return f"{key} non valido"
     for key in ("acknowledged_at", "last_seen"):
-        if not _is_time(item[key]):
+        if not is_time(item[key]):
             return f"{key} non valido"
     return None
 
 
-class AckRegistry:
-    def __init__(self, path: Optional[Path] = None, now: Callable[[], float] = time.time):
-        self.path = Path(path) if path is not None else default_registry_path()
-        self.lock_path = self.path.with_name(self.path.name + ".lock")
-        self._now = now
-        # Ultimo registro messo da parte da QUESTA istanza: (file, motivo).
-        self.last_recovery: Optional[Tuple[Path, str]] = None
+class AckRegistry(JsonRegistry[Acknowledgement]):
+    @property
+    def max_bytes(self) -> int:
+        return MAX_REGISTRY_BYTES
 
-    # -- lettura -----------------------------------------------------------
+    def __init__(self, path: Optional[Path] = None, now: Callable[[], float] = time.time):
+        super().__init__(path if path is not None else default_registry_path(), now)
+
+    def _entry_from(self, item) -> Acknowledgement:
+        problem = _entry_problem(item)
+        if problem is not None:
+            raise CorruptRegistry(problem)
+        return Acknowledgement(**{k: item[k] for k in _FIELDS})
+
+    def _entry_to(self, entry: Acknowledgement) -> dict:
+        return asdict(entry)
+
+    def _keep(self, entry: Acknowledgement) -> bool:
+        return not self._expired(entry)
 
     def _parse(self) -> List[Acknowledgement]:
-        """FileNotFoundError se manca, _CorruptRegistry se non è plausibile."""
-        try:
-            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-        except FileNotFoundError:
-            raise
-        except OSError as exc:
-            raise _CorruptRegistry(f"registro non apribile: {exc}") from exc
-        with os.fdopen(fd, "rb") as fh:
-            st = os.fstat(fh.fileno())
-            if not stat.S_ISREG(st.st_mode):
-                raise _CorruptRegistry("il registro non è un file regolare")
-            if st.st_size > MAX_REGISTRY_BYTES:
-                raise _CorruptRegistry(f"registro di dimensione anomala ({st.st_size} byte)")
-            data = fh.read(MAX_REGISTRY_BYTES + 1)
-        if len(data) > MAX_REGISTRY_BYTES:
-            raise _CorruptRegistry("registro cresciuto durante la lettura")
-        try:
-            raw = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise _CorruptRegistry(f"JSON non valido: {exc}") from exc
-        if not isinstance(raw, dict) or not isinstance(raw.get("entries"), list):
-            raise _CorruptRegistry("struttura non valida")
-        entries = {}
-        for n, item in enumerate(raw["entries"]):
-            problem = _entry_problem(item)
-            if problem is not None:
-                raise _CorruptRegistry(f"voce {n}: {problem}")
-            # Campi sconosciuti ignorati: un registro scritto da una
-            # versione più recente resta leggibile dopo un downgrade.
-            entry = Acknowledgement(**{k: item[k] for k in _FIELDS})
-            entries[entry.key] = entry
-        return list(entries.values())
+        # Una voce per chiave: l'ultima vince.
+        return list({e.key: e for e in super()._parse()}.values())
 
     def _expired(self, entry: Acknowledgement) -> bool:
         return self._now() - entry.last_seen > EXPIRY_DAYS * 86400
 
-    def _load_locked(self) -> List[Acknowledgement]:
-        """Per un read-modify-write, con il lock tenuto. Un registro
-        corrotto si rinomina (mai cancellato) e si riparte da vuoto."""
-        try:
-            return self._parse()
-        except FileNotFoundError:
-            return []
-        except _CorruptRegistry as exc:
-            backup = self.path.with_name(
-                f"{self.path.name}.corrupt-"
-                f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
-            )
-            os.rename(self.path, backup)
-            self.last_recovery = (backup, str(exc))
-            return []
+    # -- lettura -----------------------------------------------------------
 
     def entries(self) -> List[Acknowledgement]:
         """Prese visione valide (non scadute), dalla più recente."""
-        try:
-            entries = self._parse()
-        except FileNotFoundError:
-            return []
-        except _CorruptRegistry:
-            with self._lock():
-                entries = self._load_locked()
-        live = [e for e in entries if not self._expired(e)]
-        return sorted(live, key=lambda e: e.acknowledged_at, reverse=True)
+        return sorted(self._read(), key=lambda e: e.acknowledged_at, reverse=True)
 
     def snapshot(self) -> "AckSnapshot":
         """Stato letto una volta, per una scansione: le ricerche non
@@ -280,26 +221,6 @@ class AckRegistry:
         return AckSnapshot({e.key: e for e in self.entries()})
 
     # -- scrittura ---------------------------------------------------------
-
-    @contextmanager
-    def _lock(self):
-        ensure_private_dir(self.path.parent)
-        fd = open_private_fd(self.lock_path, os.O_RDWR | os.O_CREAT)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
-
-    def _write_locked(self, entries: Iterable[Acknowledgement]) -> None:
-        live = [e for e in entries if not self._expired(e)]
-        write_private_text(
-            self.path,
-            json.dumps({"version": 1, "entries": [asdict(e) for e in live]}, indent=2),
-        )
 
     def acknowledge(self, sha256: str, signature: str, path: Path) -> Acknowledgement:
         if not _SHA256.fullmatch(sha256) or not signature:
@@ -400,10 +321,18 @@ class ScanAcknowledgements:
     scansione senza segnalazioni non tocca il file. Un registro che non si
     legge, come un file che non si rilegge per l'hash, vale «nessuna presa
     visione»: la segnalazione resta, e il motivo finisce in `problems`.
+
+    Le segnalazioni nuove si scrivono subito nel registro delle segnalazioni
+    da valutare (pending_reports.py, `report_new`), da cui le legge la
+    pagina Segnalazioni anche quando le ha trovate il timer di sistema.
     """
 
-    def __init__(self, registry: Optional[AckRegistry] = None):
+    def __init__(self, registry: Optional[AckRegistry] = None, pending=None):
         self.registry = registry if registry is not None else AckRegistry()
+        if pending is None:
+            from .pending_reports import PendingStore
+            pending = PendingStore()
+        self.pending = pending
         self._snapshot: Optional[AckSnapshot] = None
         self.problems: List[str] = []
 
@@ -426,6 +355,23 @@ class ScanAcknowledgements:
             if self.registry.last_recovery is not None:
                 self.problems.append(recovery_notice(*self.registry.last_recovery))
         return self._snapshot.check(identity, signature)
+
+    def report_new(self, path: Path, signature: Optional[str], reason: str,
+                   identity: Optional[FileIdentity]) -> PendingReport:
+        """Segnalazione nuova (né in quarantena né già valutata): la
+        registra fra quelle da valutare. Un errore di scrittura finisce in
+        `problems`; la segnalazione resta comunque nel riepilogo."""
+        report = PendingReport(str(path), signature or "", reason, identity, time.time())
+        try:
+            self.pending.record(report)
+        except (OSError, ValueError) as exc:
+            self.problems.append(f"impossibile registrare la segnalazione di {path}: {exc}")
+        else:
+            if self.pending.last_recovery is not None:
+                from .pending_reports import recovery_notice as pending_recovery_notice
+                self.problems.append(pending_recovery_notice(*self.pending.last_recovery))
+                self.pending.last_recovery = None
+        return report
 
     def finish(self) -> None:
         """Aggiorna l'ultimo riscontro delle prese visione ritrovate."""

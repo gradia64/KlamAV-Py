@@ -44,14 +44,18 @@ paths to the running instance and exits immediately.
 Detections that are reported but not moved (heuristic signatures and
 mail archives, see
 .BR klamav-py (1))
-found by the scans of the current session (manual, internal schedule,
-Real-Time) are listed in the Reports page
-.RI ( Segnalazioni ).
-The list is not kept across sessions; detections of the scheduled system
-scan are in the journal
-.RB ( "journalctl \-\-user \-u klamav\-scan.service" )
-and are acknowledged with
-.BR "klamav\-py \-\-acknowledge" .
+are listed in the Reports page
+.RI ( Segnalazioni ),
+whichever scan found them: the scans of the window (manual, internal
+schedule, Real-Time), the scheduled system scan and the
+.BR klamav-py (1)
+command line.
+Each scan records them as soon as it finds them, so they survive a scan
+that is interrupted later, and the page reads them at startup, every time
+it is opened and with \(lqAggiorna\(rq (refresh).
+A detection leaves the list when it is deleted or acknowledged (also with
+.BR "klamav\-py \-\-acknowledge" ),
+or when its file is no longer there.
 After checking one, it can be deleted, only if the path is still the same
 regular file that was detected, or acknowledged: later scans, including
 the scheduled system scan, no longer count its content as infected.
@@ -209,6 +213,11 @@ settings ineffective or are overridden by them.
 .TP
 .I \%~/.local/share/klamav-py/acknowledged.json
 Register of acknowledged detections, shared with
+.BR klamav-py (1).
+.TP
+.I \%~/.local/share/klamav-py/pending-reports.json
+Detections still to be evaluated, written by every scan and read by the
+Reports page; see
 .BR klamav-py (1).
 .TP
 .I \%/usr/share/applications/klamav-py.desktop

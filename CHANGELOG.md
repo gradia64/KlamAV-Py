@@ -7,6 +7,21 @@ sono in `docs/CHANGELOG-archive.md`.
 ---
 ## Non rilasciato
 
+### Modificato
+- **Le segnalazioni della scansione programmata di sistema compaiono
+  nella pagina Segnalazioni.** I file solo segnalati (firme euristiche,
+  archivi di posta) trovati dal timer di sistema stavano solo nel
+  journal: la notifica del mattino diceva «file infetti», ma per sapere
+  quali bisognava cercarli con `journalctl`. Ora ogni scansione (timer,
+  riga di comando, finestra) li registra in
+  `~/.local/share/klamav-py/pending-reports.json` appena li trova, anche
+  se poi viene interrotta, e la pagina Segnalazioni li mostra con le
+  stesse azioni di prima, anche dopo un riavvio della finestra. Una voce
+  esce quando la elimini o ne registri la presa visione (anche da riga di
+  comando) o quando il file non c'è più. La notifica del timer rimanda
+  alla pagina. Per controllare: dopo la prossima scansione del timer con
+  una segnalazione, aprire la pagina Segnalazioni.
+
 ### Corretto
 - **GUI: un possibile crash dopo un errore in un'operazione in
   background.** Quando il caricamento della quarantena falliva, o una

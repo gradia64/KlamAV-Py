@@ -47,13 +47,17 @@ all'istanza già attiva e termina subito.
 I rilevamenti segnalati ma non spostati (firme euristiche e archivi di
 posta, vedere
 .BR klamav-py (1))
-trovati dalle scansioni della sessione corrente (manuale, programmata
-interna, Real-Time) compaiono nella pagina Segnalazioni.
-L'elenco non si conserva fra le sessioni; i rilevamenti della scansione
-programmata di sistema sono nel journal
-.RB ( "journalctl \-\-user \-u klamav\-scan.service" )
-e la presa visione si registra con
-.BR "klamav\-py \-\-acknowledge" .
+compaiono nella pagina Segnalazioni, qualunque scansione li abbia
+trovati: quelle della finestra (manuale, programmata interna, Real-Time),
+la scansione programmata di sistema e la riga di comando di
+.BR klamav-py (1).
+Ogni scansione li registra appena li trova, quindi restano anche se la
+scansione viene interrotta dopo, e la pagina li legge all'avvio, a ogni
+apertura e con Aggiorna.
+Un rilevamento esce dall'elenco quando lo si elimina o se ne registra la
+presa visione (anche con
+.BR "klamav\-py \-\-acknowledge" ),
+o quando il suo file non c'è più.
 Dopo averne verificato uno si può eliminarlo, solo se il percorso è
 ancora lo stesso file regolare rilevato, oppure registrarne la presa
 visione: le scansioni successive, anche quella programmata di sistema,
@@ -210,6 +214,11 @@ rendono inefficaci queste impostazioni o ne vengono sostituiti.
 .TP
 .I \%~/.local/share/klamav-py/acknowledged.json
 Registro delle prese visione, condiviso con
+.BR klamav-py (1).
+.TP
+.I \%~/.local/share/klamav-py/pending-reports.json
+Segnalazioni da valutare, scritte da ogni scansione e lette dalla pagina
+Segnalazioni; vedere
 .BR klamav-py (1).
 .TP
 .I \%/usr/share/applications/klamav-py.desktop

@@ -14,12 +14,19 @@ import pytest
 @pytest.fixture(autouse=True)
 def _registro_prese_visione_isolato(tmp_path_factory, monkeypatch):
     """Nessun test legge o scrive il registro delle prese visione reale
-    (~/.local/share/klamav-py/acknowledged.json) di chi lancia la suite:
-    worker e CLI lo consultano per ogni rilevamento «solo segnalazione»."""
+    (~/.local/share/klamav-py/acknowledged.json), né quello delle
+    segnalazioni da valutare, di chi lancia la suite: worker e CLI li usano
+    per ogni rilevamento «solo segnalazione»."""
     import klamav_py.acknowledged as acknowledged
+
+    import klamav_py.pending_reports as pending_reports
 
     path = tmp_path_factory.mktemp("prese-visione") / acknowledged.REGISTRY_NAME
     monkeypatch.setattr(acknowledged, "default_registry_path", lambda: path)
+    # Stesso discorso per le segnalazioni da valutare, scritte a ogni
+    # rilevamento «solo segnalazione» (0.1.18).
+    pending = path.with_name(pending_reports.REGISTRY_NAME)
+    monkeypatch.setattr(pending_reports, "default_pending_path", lambda: pending)
 
 
 # -- oggetti Qt tenuti in vita da un ciclo (0.1.17) ----------------------

@@ -17,7 +17,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from ..acknowledged import AckRegistry, PendingReport, ScanAcknowledgements
+from ..acknowledged import AckRegistry, ScanAcknowledgements
 from ..clamd_client import (
     ClamdEndpoint,
     ClamdError,
@@ -421,9 +421,9 @@ class ScanWorker(QThread):
                             acknowledged += 1
                             self.acknowledged.emit(result.path, result.signature or "")
                             continue
-                        pending = PendingReport(
-                            result.path, result.signature or "", decision.reason or "",
-                            identity, time.time(),
+                        pending = acks.report_new(
+                            Path(result.path), result.signature, decision.reason or "",
+                            identity,
                         )
 
                 if result.too_large:

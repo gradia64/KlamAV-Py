@@ -393,6 +393,16 @@ e mai cancellato, con un avviso (su standard error, o nella pagina
 Segnalazioni della GUI): le prese visione precedenti restano in quel
 file, e le segnalazioni corrispondenti tornano nuove.
 Le voci che nessuna scansione ritrova da 90 giorni vengono tolte.
+.TP
+.I \%~/.local/share/klamav-py/pending-reports.json
+Segnalazioni da valutare (0600): ogni scansione vi scrive ogni nuovo
+rilevamento solo segnalato, appena lo trova, e la pagina Segnalazioni
+della GUI le elenca, anche quelle della scansione programmata di sistema.
+Una voce esce dal file quando il rilevamento viene eliminato o se ne
+registra la presa visione, quando il suo file non c'è più, o dopo 90
+giorni senza essere ritrovata.
+Stessi lock e gestione di un file non valido di
+.IR acknowledged.json .
 .
 .SH SICUREZZA
 .SS Directory di quarantena

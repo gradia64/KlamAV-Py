@@ -528,6 +528,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
                         print(f"GIÀ VALUTATO: {result.path} ({result.signature})")
                         continue
                     acknowledgeable += 1
+                    acks.report_new(Path(result.path), result.signature,
+                                    decision.reason or "", identity)
                 infections += 1
                 print(f"INFETTO: {result.path} ({result.signature})")
                 if quarantine:
@@ -607,7 +609,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(
             f"Dopo averli verificati: eliminali, oppure registra la presa visione "
             f"con «klamav-py --acknowledge PERCORSO» ({acknowledgeable} "
-            "segnalazioni) per non contarli più finché il contenuto non cambia."
+            "segnalazioni) per non contarli più finché il contenuto non cambia. "
+            "Li trovi anche nella pagina Segnalazioni della GUI."
         )
     if acknowledged:
         print(f"{acknowledged} segnalazioni già valutate (--list-acknowledged per l'elenco).")
