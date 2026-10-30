@@ -299,9 +299,12 @@ def render_timer_dropin(hhmm: str) -> str | None:
     valori predefiniti si traduce nella rimozione del file.
 
     Sostituisce OnCalendar e nient'altro: RandomizedDelaySec e Persistent
-    restano quelli della unit spedita. Il valore in un drop-in sovrascrive
-    tutte le assegnazioni precedenti della stessa direttiva, quindi il
-    "daily" della unit non si somma.
+    restano quelli della unit spedita. OnCalendar è una lista che si
+    accumula fra unit e drop-in, come ExecStart: senza la riga vuota che la
+    azzera, il timer scatterebbe sia all'orario scelto sia al "daily" della
+    unit (verificato con systemd 262, vedi tests/test_systemd_dropin.py).
+    Con Persistent=true, poi, la mezzanotte persa a PC spento si
+    recupererebbe a ogni accensione.
     """
     if not _HHMM.match(hhmm):
         raise ValueError(f"orario non valido: {hhmm!r}")
@@ -313,6 +316,8 @@ def render_timer_dropin(hhmm: str) -> str | None:
         "vedi klamav-py-gui(1).\n"
         "\n"
         "[Timer]\n"
+        # Azzeramento obbligatorio: OnCalendar si somma a quello della unit.
+        "OnCalendar=\n"
         f"OnCalendar=*-*-* {hhmm}:00\n"
     )
 
@@ -588,9 +593,13 @@ class ForeignOverride:
                 "programmata di raggiungere clamd via TCP"
             )
         if "OnCalendar" in self.keys:
+            # Il nostro drop-in azzera OnCalendar: chi viene prima è
+            # sostituito; chi viene dopo, se azzera a sua volta, decide lui
+            # l'orario, altrimenti aggiunge il suo a quello scelto qui.
             effects.append(
-                "l'orario della scansione programmata è quello di quel file, "
-                "non quello scelto nella pagina Pianificazione di KlamAV-Py"
+                "l'orario della scansione programmata dipende da quel file "
+                "(lo sostituisce, o vi aggiunge un altro orario), non solo da quello "
+                "scelto nella pagina Pianificazione di KlamAV-Py"
                 if wins
                 else "l'orario scelto in KlamAV-Py sostituisce quello di quel file "
                 "(OnCalendar), quindi le sue personalizzazioni dell'orario non "

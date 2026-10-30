@@ -230,6 +230,10 @@ Drop-in for the time of the scheduled system scan, written and removed by
 the Scheduling page when the chosen time ("Every day at") differs from
 midnight, the value of the shipped unit
 .RB ( OnCalendar = daily).
+It first resets
+.B OnCalendar
+with an empty assignment, because the setting accumulates: without the
+reset the timer would also start at midnight.
 Same discipline as the service drop-in: a header declaring it ours,
 regeneration at startup, never touching a file with the same name but
 without the header.

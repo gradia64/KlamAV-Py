@@ -2780,7 +2780,10 @@ class SchedulerPage(QWidget):
         timer_desc = QLabel(
             "Con un ritardo casuale fino a 30 minuti (RandomizedDelaySec). La "
             "scansione di sistema vale anche con KlamAV-Py chiuso; a mezzanotte è "
-            "quella predefinita della unit, senza drop-in da gestire."
+            "quella predefinita della unit, senza drop-in da gestire. Se l'orario "
+            "scelto per oggi è già passato e da allora la scansione non è partita, "
+            "parte subito dopo il salvataggio: systemd recupera quella persa "
+            "(Persistent=true), come all'accensione dopo un orario a PC spento."
         )
         timer_desc.setWordWrap(True)
         timer_desc.setStyleSheet("font-size: 12px; color: palette(mid);")

@@ -659,6 +659,7 @@ GOLDEN_TIMER_0930 = f"""{HEADER}
 # Scritto e rimosso dalla pagina Pianificazione di klamav-py-gui; vedi klamav-py-gui(1).
 
 [Timer]
+OnCalendar=
 OnCalendar=*-*-* 09:30:00
 """
 
@@ -726,7 +727,9 @@ def test_dropin_del_timer_scritto_a_mano_dopo_il_nostro_vince(timer_dirs):
     (timer_dirs.user / "override.conf").write_text("[Timer]\nOnCalendar=07:00\n")
     (found,) = foreign_timer_overrides(ours=timer_dirs.ours, paths=_timer_paths(timer_dirs))
     assert found.after and found.keys == ("OnCalendar",)
-    assert "non quello scelto" in found.describe()
+    # Senza azzeramento quel file aggiunge le 07:00 alle 09:00 scelte qui
+    # (il nostro azzera, il suo no): l'avviso non può dire «sostituisce».
+    assert "non solo da quello scelto" in found.describe()
 
 
 def test_dropin_del_timer_precedente_viene_sostituito(timer_dirs):
@@ -771,6 +774,69 @@ def test_systemd_analyze_verify_dropin_del_timer(tmp_path):
         pytest.skip(output.strip())
     assert proc.returncode == 0, output
     assert "50-klamav-py.conf" not in output, output
+
+
+_SYSTEMD = next((p for p in ("/usr/lib/systemd/systemd", "/lib/systemd/systemd")
+                 if os.access(p, os.X_OK)), None)
+
+
+def _effective_oncalendar(tmp_path: Path, dropin_text: str) -> list[str] | None:
+    """Gli OnCalendar effettivi di klamav-scan.timer (unit spedita più
+    `dropin_text`), da un'istanza di prova di systemd (--test: carica le
+    unit, stampa lo stato e esce, senza toccare il manager in esecuzione).
+    None se l'ambiente non lo permette."""
+    units = tmp_path / "units"
+    dropin_dir = units / "klamav-scan.timer.d"
+    dropin_dir.mkdir(parents=True)
+    runtime = tmp_path / "run"
+    runtime.mkdir(mode=0o700)
+    true = shutil.which("true")
+    (units / "klamav-scan.timer").write_text(TIMER_UNIT.read_text())
+    (units / "klamav-scan.service").write_text(UNIT.read_text().replace(EXEC_BINARY, true))
+    (units / "klamav-scan-notify.service").write_text(f"[Service]\nType=oneshot\nExecStart={true}\n")
+    (dropin_dir / "50-klamav-py.conf").write_text(dropin_text)
+    # Senza ":" finale: solo questa cartella. Con i percorsi predefiniti
+    # aggiunti, l'istanza leggerebbe anche i drop-in veri di chi lancia la
+    # suite (~/.config/systemd/user/klamav-scan.timer.d).
+    env = {**os.environ, "SYSTEMD_UNIT_PATH": str(units), "XDG_RUNTIME_DIR": str(runtime)}
+    try:
+        proc = subprocess.run(
+            [_SYSTEMD, "--test", "--user", "--no-pager", "--unit=klamav-scan.timer"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    found, inside = [], False
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("→ Unit ") or stripped.startswith("-> Unit "):
+            inside = stripped.endswith("Unit klamav-scan.timer:")
+            continue
+        if inside and stripped.startswith("OnCalendar:"):
+            found.append(stripped.split(":", 1)[1].strip())
+    return found or None
+
+
+@pytest.mark.skipif(_SYSTEMD is None, reason="systemd non disponibile")
+def test_orario_del_timer_sostituisce_daily(tmp_path):
+    """OnCalendar si accumula fra unit e drop-in: senza la riga vuota che lo
+    azzera, il timer scattava sia all'orario scelto sia a mezzanotte (e con
+    Persistent=true la mezzanotte persa a PC spento si recuperava a ogni
+    accensione). Verifica sulla semantica di systemd, non sul testo."""
+    effective = _effective_oncalendar(tmp_path, render_timer_dropin("09:30"))
+    if effective is None:
+        pytest.skip("systemd --test non utilizzabile in questo ambiente")
+    assert effective == ["*-*-* 09:30:00"], effective
+
+
+@pytest.mark.skipif(_SYSTEMD is None, reason="systemd non disponibile")
+def test_controllo_della_semantica_vede_l_accumulo(tmp_path):
+    # Controprova permanente del test qui sopra: un drop-in senza
+    # azzeramento deve risultare con due orari.
+    effective = _effective_oncalendar(tmp_path, "[Timer]\nOnCalendar=*-*-* 09:30:00\n")
+    if effective is None:
+        pytest.skip("systemd --test non utilizzabile in questo ambiente")
+    assert sorted(effective) == ["*-*-* 00:00:00", "*-*-* 09:30:00"], effective
 
 
 def test_normalize_timer_time():

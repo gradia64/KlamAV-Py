@@ -232,6 +232,10 @@ Drop-in dell'orario della scansione programmata di sistema, scritto e
 rimosso dalla pagina Pianificazione quando l'orario scelto («Ogni giorno
 alle») differisce da mezzanotte, il valore della unit spedita
 .RB ( OnCalendar = daily).
+Prima azzera
+.B OnCalendar
+con un'assegnazione vuota, perché l'impostazione si somma: senza
+azzeramento il timer partirebbe anche a mezzanotte.
 Stessa disciplina del drop-in del service: intestazione che lo dichiara
 nostro, rigenerazione all'avvio, mai toccato un file con lo stesso nome
 privo di intestazione.
