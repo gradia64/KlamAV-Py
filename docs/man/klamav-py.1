@@ -319,13 +319,8 @@ Set by systemd for each service.
 If present, a volatile quarantine directory passed with
 .B \-\-quarantine
 becomes an error instead of a warning (see
-.BR SECURITY ),
-and the scan records its start and end in
-.I timer\-scan.json
-(see
-.BR FILES ):
-a missing end is how the GUI, at the next startup, recognizes a scan that
-was interrupted, for example by switching the computer off.
+.BR SECURITY ).
+Some desktop sessions pass it to every application, terminal included.
 .
 .SH FILES
 .TP
@@ -407,9 +402,10 @@ Same lock and handling of an invalid file as
 .TP
 .I \%~/.local/share/klamav\-py/timer\-scan.json
 State of the last scheduled system scan (0600): start and end, written
-only when
-.B INVOCATION_ID
-is present, the start right before the traversal and the end on every
+only by a scan running inside
+.B klamav-scan.service
+(recognized from the control group of the process, so a scan started from
+a terminal never writes it), the start right before the traversal and the end on every
 exit with a code (best effort: a failure here does not change the scan
 outcome).
 If the end is missing, the scan was interrupted by a signal, for example

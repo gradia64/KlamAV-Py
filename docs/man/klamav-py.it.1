@@ -324,14 +324,9 @@ Impostata da systemd per ogni servizio.
 Se presente, una directory di quarantena volatile passata con
 .B \-\-quarantine
 diventa un errore invece di un avviso (vedere
-.BR SICUREZZA ),
-e la scansione segna il proprio inizio e la propria fine in
-.I timer\-scan.json
-(vedere
-.BR FILE ):
-l'assenza della fine è ciò che la GUI, al primo avvio successivo,
-riconosce come scansione interrotta, per esempio dallo spegnimento del
-computer.
+.BR SICUREZZA ).
+Alcune sessioni del desktop la passano a ogni applicazione, terminale
+compreso.
 .
 .SH FILE
 .TP
@@ -413,9 +408,11 @@ Stessi lock e gestione di un file non valido di
 .TP
 .I \%~/.local/share/klamav\-py/timer\-scan.json
 Stato dell'ultima scansione della programmazione di sistema (0600):
-inizio e fine, scritti solo quando
-.B INVOCATION_ID
-è presente, l'inizio subito prima della traversata e la fine in ogni
+inizio e fine, scritti solo da una scansione che gira dentro
+.B klamav-scan.service
+(riconosciuta dal control group del processo, quindi una scansione
+avviata da un terminale non lo scrive mai), l'inizio subito prima della
+traversata e la fine in ogni
 uscita con un codice (best-effort: un errore qui non cambia l'esito della
 scansione).
 Se manca la fine, la scansione è stata interrotta da un segnale, per

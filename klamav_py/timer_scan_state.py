@@ -17,10 +17,15 @@ La scansione scrive l'inizio subito prima della traversata, dopo tutte le
 validazioni bloccanti (una scansione mai partita non lascia marcatori), e la
 fine nel finally: le uscite con codice 0, 1 e 2 passano dal finally e non
 hanno bisogno di questo avviso (notifica già garantita da OnFailure); resta
-senza fine solo la morte per segnale. Il marcatore si scrive solo con
-INVOCATION_ID, cioè dentro klamav-scan.service: un'interruzione manuale
-dalla shell è visibile nel terminale e non deve produrre avvisi al prossimo
-avvio della GUI.
+senza fine solo la morte per segnale. Il marcatore si scrive solo dentro
+klamav-scan.service, riconosciuto dal cgroup del processo
+(in_timer_service): un'interruzione manuale dalla shell è visibile nel
+terminale e non deve produrre avvisi al prossimo avvio della GUI. Non
+INVOCATION_ID, come nella prima versione: in una sessione Plasma la
+ereditano Konsole e le sue shell, quindi ogni scansione manuale scriveva il
+marcatore, e chiudendo la finestra a metà lasciava un falso «scansione
+programmata interrotta», o, completata, cancellava l'avviso di una vera
+interruzione del timer.
 
 Le scritture sono best-effort: chi le chiama non deve fallire per questo
 (cmd_scan ingoia gli OSError), e un file non plausibile si ignora e basta —
@@ -42,8 +47,13 @@ from pathlib import Path
 
 from .json_registry import is_text, is_time
 from .private_files import ensure_private_dir, write_private_text
+from .systemd_dropin import UNIT_NAME
 
 STATE_NAME = "timer-scan.json"
+# Cgroup del processo: per una unit di systemd il percorso termina con il
+# nome della unit (…/app.slice/klamav-scan.service). Letto a ogni chiamata
+# (in_timer_service), così i test possono sostituirlo.
+CGROUP_FILE = Path("/proc/self/cgroup")
 # Il file è di poche decine di byte: qualunque cosa più grande non è nostro.
 MAX_STATE_BYTES = 64 * 1024
 
@@ -56,6 +66,24 @@ class TimerScanState:
     started_at: float
     target: str
     finished_at: float | None
+
+
+def in_timer_service(cgroup_file: Path | None = None) -> bool:
+    """True se il processo gira dentro klamav-scan.service, cioè è la
+    scansione del timer di sistema (o un suo avvio a mano con systemctl).
+    Ogni riga del file (cgroup v2: «0::/percorso»; v1 ibrido:
+    «N:controller:/percorso») si confronta sull'ultima componente del
+    percorso. False se il file non si legge: niente marcatore, come prima
+    di questa funzione."""
+    try:
+        text = (cgroup_file or CGROUP_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) == 3 and parts[2].rstrip("/").rsplit("/", 1)[-1] == UNIT_NAME:
+            return True
+    return False
 
 
 def default_state_path() -> Path:

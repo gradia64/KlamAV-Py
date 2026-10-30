@@ -32,10 +32,12 @@ sono in `docs/CHANGELOG-archive.md`.
   avere effetto: chi aveva il drop-in manuale può toglierlo e salvare
   l'orario dalla GUI.
 - Test: stato dell'ultima scansione del timer (scritture best-effort della
-  CLI, lettura severa), `service_active` per distinguere una scansione in
-  corso da una interrotta, drop-in dell'orario (golden, `systemd-analyze
-  verify`, conflitti e override estranei), orario ed esclusioni scritti
-  insieme senza cortocircuiti. Totale: 1124 test.
+  CLI, lettura severa, solo dentro klamav-scan.service e mai da un
+  terminale), `service_active` per distinguere una scansione in corso da
+  una interrotta, drop-in dell'orario (golden, `systemd-analyze verify`,
+  orari effettivi letti da un'istanza di prova di systemd, conflitti e
+  override estranei), orario ed esclusioni scritti insieme senza
+  cortocircuiti. Totale: 1135 test.
 
 ---
 ## 0.1.18 — 2026-10-29

@@ -506,12 +506,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
             log_fh.write(f"{path}\tcartella non leggibile: {reason}\n")
 
     # Marcatore d'inizio per l'avviso di scansione interrotta nella GUI
-    # (timer_scan_state). Solo sotto systemd (INVOCATION_ID, cioè il timer:
-    # un'interruzione manuale è visibile nel terminale) e solo adesso che
-    # le validazioni bloccanti sono passate: una scansione mai partita non
-    # deve sembrare interrotta. Best-effort: senza questo file la GUI non
-    # avvisa, ma la scansione non cambia.
-    marker_open = bool(os.environ.get("INVOCATION_ID"))
+    # (timer_scan_state). Solo dentro klamav-scan.service, riconosciuto dal
+    # cgroup (non da INVOCATION_ID, che in una sessione Plasma hanno anche le
+    # shell di Konsole: un'interruzione manuale è visibile nel terminale), e
+    # solo adesso che le validazioni bloccanti sono passate: una scansione
+    # mai partita non deve sembrare interrotta. Best-effort: senza questo
+    # file la GUI non avvisa, ma la scansione non cambia.
+    marker_open = timer_scan_state.in_timer_service()
     if marker_open:
         try:
             timer_scan_state.record_start(str(scan_root))

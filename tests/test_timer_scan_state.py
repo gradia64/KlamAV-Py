@@ -167,6 +167,39 @@ def home(tmp_path, monkeypatch):
     return h
 
 
+TIMER_CGROUP = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/klamav-scan.service\n"
+# Konsole in una sessione Plasma: scope dell'applicazione, ma con
+# INVOCATION_ID ereditato dalla sessione (verificato sul PC del maintainer).
+KONSOLE_CGROUP = (
+    "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+    "app-org.kde.konsole-14165.scope/main.scope\n"
+)
+
+
+def _set_cgroup(monkeypatch, tmp_path, text):
+    mod = _module()
+    assert hasattr(mod, "CGROUP_FILE"), (
+        "la scansione del timer non si riconosce dal cgroup: basta INVOCATION_ID, che "
+        "in una sessione Plasma hanno anche le shell di Konsole"
+    )
+    cgroup = tmp_path / "cgroup"
+    cgroup.write_text(text)
+    monkeypatch.setattr(mod, "CGROUP_FILE", cgroup)
+
+
+@pytest.fixture
+def in_timer(monkeypatch, tmp_path):
+    """Il processo gira dentro klamav-scan.service."""
+    _set_cgroup(monkeypatch, tmp_path, TIMER_CGROUP)
+
+
+@pytest.fixture
+def in_konsole(monkeypatch, tmp_path):
+    """Scansione manuale da Konsole: INVOCATION_ID presente, cgroup no."""
+    monkeypatch.setenv("INVOCATION_ID", "9fc65ee6ef5948729bb234697ad7cc13")
+    _set_cgroup(monkeypatch, tmp_path, KONSOLE_CGROUP)
+
+
 def _scan(home):
     # Senza --quarantine: il marcatore non c'entra con la quarantena, e con
     # INVOCATION_ID una quarantena sotto /tmp (dove sta la home dei test)
@@ -174,9 +207,8 @@ def _scan(home):
     return cli.main(["scan", str(home), "--quiet"])
 
 
-def test_cli_sotto_systemd_scrive_inizio_e_fine(home, monkeypatch):
+def test_cli_sotto_systemd_scrive_inizio_e_fine(home, in_timer):
     mod = _module()
-    monkeypatch.setenv("INVOCATION_ID", "1")
     assert _scan(home) == 0
     stato = mod.read_state()
     assert stato is not None and stato.finished_at is not None
@@ -188,20 +220,18 @@ def test_cli_sotto_systemd_scrive_inizio_e_fine(home, monkeypatch):
     )
 
 
-def test_cli_interrotta_da_clamd_registra_comunque_la_fine(home, monkeypatch):
+def test_cli_interrotta_da_clamd_registra_comunque_la_fine(home, in_timer):
     # Un'uscita con codice (2) passa dal finally e ha la notifica di
     # OnFailure: non dev'essere scambiata per una scansione interrotta.
     mod = _module()
-    monkeypatch.setenv("INVOCATION_ID", "1")
     FakeClient.die_after = "b"
     assert _scan(home) == 2
     stato = mod.read_state()
     assert stato is not None and stato.finished_at is not None
 
 
-def test_cli_mai_partita_non_lascia_marcatori(home, monkeypatch):
+def test_cli_mai_partita_non_lascia_marcatori(home, in_timer):
     mod = _module()
-    monkeypatch.setenv("INVOCATION_ID", "1")
     assert cli.main(["scan", str(home / "inesistente"),
                      "--quarantine", str(home / "q"), "--quiet"]) == 2
     assert mod.read_state() is None, (
@@ -217,6 +247,55 @@ def test_cli_in_primo_piano_non_scrive_nulla(home):
         "il marcatore vale solo per il timer di sistema: una scansione manuale "
         "interrotta è visibile nel terminale e non deve avvisare la GUI"
     )
+
+
+def test_cli_da_konsole_non_scrive_nulla(home, in_konsole):
+    # INVOCATION_ID c'è, ma non è il timer: con il marcatore scritto, una
+    # finestra chiusa a metà scansione diventava «scansione programmata di
+    # sistema non completata» al prossimo avvio della GUI.
+    mod = _module()
+    assert _scan(home) == 0
+    assert mod.read_state() is None, (
+        "una scansione manuale da Konsole ha scritto il marcatore del timer"
+    )
+
+
+def test_scansione_manuale_non_cancella_l_avviso_del_timer(home, in_konsole):
+    # Il timer è stato interrotto stanotte (marcatore aperto); una scansione
+    # manuale completata da Konsole non deve chiuderlo né sostituirlo.
+    mod = _module()
+    mod.record_start("/home/gradia", now=1_793_300_000.0)
+    assert _scan(home) == 0
+    stato = mod.read_state()
+    assert stato is not None and stato.started_at == 1_793_300_000.0, stato
+    assert stato.finished_at is None, "l'avviso di una vera interruzione è sparito"
+
+
+@pytest.mark.parametrize("text, expected", [
+    (TIMER_CGROUP, True),
+    # cgroup v1 ibrido: la riga name=systemd porta il percorso della unit.
+    ("12:pids:/user.slice\n1:name=systemd:/user.slice/user-1000.slice/"
+     "user@1000.service/app.slice/klamav-scan.service\n", True),
+    (KONSOLE_CGROUP, False),
+    ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/klamav-scan-notify.service\n",
+     False),
+    ("0::/system.slice/klamav-scan.service.d\n", False),
+    ("", False),
+])
+def test_riconoscimento_dal_cgroup(tmp_path, text, expected):
+    cgroup = tmp_path / "cgroup"
+    cgroup.write_text(text)
+    assert _in_timer_service()(cgroup) is expected
+
+
+def test_cgroup_illeggibile_niente_marcatore(tmp_path):
+    assert _in_timer_service()(tmp_path / "manca") is False
+
+
+def _in_timer_service():
+    fn = getattr(_module(), "in_timer_service", None)
+    assert fn is not None, "la scansione del timer non si riconosce dal cgroup"
+    return fn
 
 
 # -- l'avviso nella GUI -------------------------------------------------------
