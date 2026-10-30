@@ -5,7 +5,7 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
-## 0.1.19 — 2026-11-05
+## 0.1.19 — 2026-10-30
 
 ### Aggiunto
 - **La GUI avverte quando la scansione del timer è stata interrotta.** Con
