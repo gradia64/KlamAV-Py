@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -57,6 +58,47 @@ def version_key(version: str) -> tuple:
     stage = _PRE_STAGES.get(pre.group(1), -1) if pre else -1
     number = int(pre.group(2)) if pre and pre.group(2) else 0
     return (tuple(release), 0, stage, number)
+
+
+def github_http_error(exc: urllib.error.HTTPError, now: float | None = None) -> str:
+    """
+    Messaggio per una risposta di errore dell'API di GitHub.
+
+    Senza autenticazione GitHub concede 60 richieste all'ora per indirizzo
+    IP, contate su tutto ciò che esce da quell'indirizzo (altri programmi,
+    altri utenti dietro lo stesso NAT dell'operatore): il controllo di
+    KlamAV-Py può trovarlo esaurito senza averlo consumato. Oltre il limite
+    GitHub risponde 403 (o 429) con X-RateLimit-Remaining: 0 e l'ora di
+    azzeramento in X-RateLimit-Reset (epoch), oppure con Retry-After in
+    secondi. Un 403 senza quelle intestazioni è un rifiuto vero e non va
+    presentato come limite.
+    """
+    headers = exc.headers or {}
+    remaining = (headers.get("X-RateLimit-Remaining") or "").strip()
+    retry_after = (headers.get("Retry-After") or "").strip()
+    limited = exc.code == 429 or (exc.code == 403 and (remaining == "0" or bool(retry_after)))
+    if not limited:
+        return f"Errore HTTP {exc.code} dal server GitHub"
+    now = time.time() if now is None else now
+    reset = None
+    try:
+        reset_header = (headers.get("X-RateLimit-Reset") or "").strip()
+        if remaining == "0" and reset_header:
+            reset = float(reset_header)
+        elif retry_after:
+            # Retry-After può essere anche una data HTTP: illeggibile qui,
+            # quindi «riprova più tardi».
+            reset = now + float(retry_after)
+    except ValueError:
+        reset = None
+    # Un orario già passato o oltre un giorno non è plausibile (orologio
+    # sbagliato, intestazione strana): meglio non indicarne uno.
+    if reset is None or reset != reset or reset <= now or reset - now > 24 * 3600:
+        return "Limite di richieste a GitHub raggiunto, riprova più tardi"
+    return (
+        "Limite di richieste a GitHub raggiunto (60 all'ora per indirizzo IP): "
+        f"riprova dopo le {time.strftime('%H:%M', time.localtime(reset))}"
+    )
 
 
 class UpdateCheckWorker(QThread):
@@ -129,7 +171,7 @@ class UpdateCheckWorker(QThread):
             self.check_finished.emit(info)
 
         except urllib.error.HTTPError as exc:
-            self.error.emit(f"Errore HTTP {exc.code} dal server GitHub")
+            self.error.emit(github_http_error(exc))
         except urllib.error.URLError as exc:
             self.error.emit(f"Impossibile raggiungere GitHub: {exc.reason}")
         except (json.JSONDecodeError, UnicodeDecodeError):
