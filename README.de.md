@@ -297,9 +297,9 @@ Bei einem home-weiten Scan einer echten Entwicklermaschine (330k+ Dateien) sind 
 - **Fehler in Massen eines einzelnen Typs (Tausende)** — fast sicher clamd tot oder mitten im Scan neu gestartet:
   `journalctl -u clamav-daemon.service` im Zeitraum des Scans, und `dmesg | grep -i oom` für den OOM-Fall. Die CLI-Zusammenfassung nach Typ (oder das persistente Log der Planung) macht diesen Fall sofort vom physiologischen Rauschen unterscheidbar.
 
-## Sicherheits-Fixes nach 0.1.19
+## Sicherheits-Fixes in 0.1.20
 
-Aus einem Penetrationstest von 0.1.19; sie erscheinen mit der nächsten Version.
+Aus einem Penetrationstest von 0.1.19.
 
 - **Quarantäne einer von clamd gewählten Datei.** Der Pfad eines `FOUND`-Ergebnisses wurde aus der Antwort von clamd übernommen: ein per unverschlüsseltem TCP erreichter oder kompromittierter clamd konnte eine andere Datei des Benutzers nennen und in die Quarantäne verschieben lassen, während die gescannte Datei an ihrem Platz blieb. Das Ergebnis bezieht sich jetzt immer auf die Datei, die dieser Prozess gesendet hat.
 - **Hardlinks entgingen der Quarantäne.** Das Verschieben eines Namens einer Datei mit mehreren Hardlinks ließ den Inhalt über die anderen erreichbar, während die Quarantäne als erfolgreich galt. Solche Dateien werden jetzt von der Quarantäne abgelehnt und unter Meldungen als reine Meldung geführt.
@@ -469,4 +469,4 @@ die Signatur eines Anhangs nicht erkennt, ist deine Kopie des Schlüssels
 älter als der CI-Unterschlüssel: lade sie wie oben vom Keyserver oder aus
 dem Repository neu herunter.
 
-Nach 0.1.19 prüft das AUR-PKGBUILD außerdem in `prepare()`, dass der Tag vom Tag-Unterschlüssel signiert wurde: `makepkg` allein akzeptiert jeden Unterschlüssel des Primärschlüssels, auch den der CI. Das PKGBUILD veröffentlicht der Maintainer von seinem eigenen Rechner auf AUR; in der CI liegt kein AUR-Schlüssel.
+Ab 0.1.20 prüft das AUR-PKGBUILD außerdem in `prepare()`, dass der Tag vom Tag-Unterschlüssel signiert wurde: `makepkg` allein akzeptiert jeden Unterschlüssel des Primärschlüssels, auch den der CI. Das PKGBUILD veröffentlicht der Maintainer von seinem eigenen Rechner auf AUR; in der CI liegt kein AUR-Schlüssel.

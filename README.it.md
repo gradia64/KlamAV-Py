@@ -297,9 +297,9 @@ Su una scansione home-wide di una macchina di sviluppo reale (330k+ file) gli er
 - **Errori a raffica di un solo tipo (migliaia)** — quasi certamente clamd morto o riavviato a metà scansione:
   `journalctl -u clamav-daemon.service` nell'intervallo della scansione, e `dmesg | grep -i oom` per il caso OOM. Il riepilogo per tipo della CLI (o il log persistente della programmata) rende questo caso immediatamente distinguibile dal rumore fisiologico.
 
-## Fix di sicurezza dopo la 0.1.19
+## Fix di sicurezza nella 0.1.20
 
-Da un penetration test della 0.1.19; usciranno con la prossima versione.
+Da un penetration test della 0.1.19.
 
 - **Quarantena di un file scelto da clamd.** Il percorso di un risultato `FOUND` veniva preso dalla risposta di clamd: un clamd raggiunto in TCP in chiaro, o uno compromesso, poteva indicare un altro file dell'utente e farlo spostare in quarantena, lasciando al suo posto quello scansionato. Ora il risultato si riferisce sempre al file inviato da questo processo.
 - **Gli hardlink sfuggivano alla quarantena.** Spostare uno dei nomi di un file con più collegamenti fisici lasciava il contenuto raggiungibile dagli altri, mentre la quarantena risultava riuscita. Questi file ora vengono rifiutati dalla quarantena ed elencati in Segnalazioni come solo segnalazione.
@@ -476,4 +476,4 @@ non riconosce la firma di un allegato, la tua copia della chiave è
 precedente alla sottochiave della CI: riscaricala dal keyserver o dal
 repository come sopra.
 
-Dopo la 0.1.19 il PKGBUILD di AUR controlla anche, in `prepare()`, che il tag sia firmato dalla sottochiave dei tag: `makepkg` da solo accetta qualunque sottochiave della primaria, compresa quella della CI. Il PKGBUILD lo pubblica su AUR il maintainer dalla sua macchina: nessuna chiave AUR sta nella CI.
+Dalla 0.1.20 il PKGBUILD di AUR controlla anche, in `prepare()`, che il tag sia firmato dalla sottochiave dei tag: `makepkg` da solo accetta qualunque sottochiave della primaria, compresa quella della CI. Il PKGBUILD lo pubblica su AUR il maintainer dalla sua macchina: nessuna chiave AUR sta nella CI.

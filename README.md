@@ -297,9 +297,9 @@ On a home-wide scan of a real development machine (330k+ files) the residual err
 - **Bursts of errors of a single type (thousands)** — almost certainly clamd dead or restarted mid-scan:
   `journalctl -u clamav-daemon.service` over the scan interval, and `dmesg | grep -i oom` for the OOM case. The CLI's per-type summary (or the persistent log of the scheduled scan) makes this case immediately distinguishable from physiological noise.
 
-## Security fixes after 0.1.19
+## Security fixes in 0.1.20
 
-From a penetration test of 0.1.19; they will ship in the next release.
+From a penetration test of 0.1.19.
 
 - **Quarantine of a file chosen by clamd.** The path of a `FOUND` result was taken from clamd's reply: a clamd reached over plain TCP, or a compromised one, could name another file of the user and have it moved to quarantine, leaving the scanned one in place. The result now always refers to the file this process sent.
 - **Hardlinks escaped quarantine.** Moving one name of a file with several hardlinks left the content reachable through the others, while the quarantine reported success. Such files are now refused by the quarantine and listed in Reports as report-only.
@@ -464,4 +464,4 @@ gpg --verify klamav-py_0.1.15-1_all.deb.sig klamav-py_0.1.15-1_all.deb
 
 The attachments are signed by CI with a dedicated subkey, `F9F4 2835 8660 2F8D D724  C467 0888 61B0 4D8D 328D`; tags are signed by the maintainer with `FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 FD2E`. `gpg` attributes both to the primary key shown above. If `gpg` does not recognize an attachment's signature, your copy of the key predates the CI subkey: re-download it from the keyserver or the repository as above.
 
-After 0.1.19 the AUR PKGBUILD also checks, in `prepare()`, that the tag was signed by the tags subkey: `makepkg` alone accepts any subkey of the primary key, the CI one included. The PKGBUILD is published to AUR by the maintainer from their own machine; no AUR key is stored in CI.
+From 0.1.20 the AUR PKGBUILD also checks, in `prepare()`, that the tag was signed by the tags subkey: `makepkg` alone accepts any subkey of the primary key, the CI one included. The PKGBUILD is published to AUR by the maintainer from their own machine; no AUR key is stored in CI.

@@ -37,10 +37,10 @@ pubblica ripubblicata:
   esistenti (`--clobber`);
 - **tag per makepkg**: un tag firmato con la sottochiave della CI passa la
   firma controllata da makepkg (vedi i limiti sotto), ma non `verify` né
-  il `prepare()` del PKGBUILD (dopo la 0.1.19), che accetta solo le
+  il `prepare()` del PKGBUILD (dalla 0.1.20), che accetta solo le
   sottochiavi dei tag.
 
-AUR non è più nella CI (dopo la 0.1.19): la chiave SSH di AUR vale per
+AUR non è più nella CI (dalla 0.1.20): la chiave SSH di AUR vale per
 tutto l'account (`klamav-py`, `olladesk`, gli altri pacchetti) e chi la
 avesse potrebbe pubblicare un PKGBUILD qualunque, anche con un'altra
 sorgente o un altro `validpgpkeys`, senza passare da nessuna firma. Il
@@ -58,7 +58,7 @@ Limiti da sapere:
   primaria in `validpgpkeys`. Per questo il `prepare()` del PKGBUILD
   rilegge la firma e accetta solo le sottochiavi di `_tag_subkeys` (le
   stesse di `TAG_SIGNING_SUBKEYS`, un test lo verifica). Il controllo vale
-  dai PKGBUILD pubblicati dopo la 0.1.19; la sottochiave della CI sta
+  dai PKGBUILD della 0.1.20; la sottochiave della CI sta
   comunque solo nell'environment protetto, e va revocata subito al primo
   sospetto.
 

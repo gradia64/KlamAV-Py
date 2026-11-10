@@ -297,9 +297,9 @@ Sur une numérisation home-wide d'une machine de développement réelle (330k+ f
 - **Erreurs en rafale d'un seul type (milliers)** — presque certainement clamd mort ou redémarré à mi-numérisation :
   `journalctl -u clamav-daemon.service` dans l'intervalle de la numérisation, et `dmesg | grep -i oom` pour le cas OOM. Le résumé par type de la CLI (ou le journal persistant de la planifiée) rend ce cas immédiatement distinguable du bruit physiologique.
 
-## Correctifs de sécurité après la 0.1.19
+## Correctifs de sécurité dans la 0.1.20
 
-Issus d'un test d'intrusion de la 0.1.19 ; ils sortiront avec la prochaine version.
+Issus d'un test d'intrusion de la 0.1.19.
 
 - **Mise en quarantaine d'un fichier choisi par clamd.** Le chemin d'un résultat `FOUND` était pris dans la réponse de clamd : un clamd joint en TCP en clair, ou compromis, pouvait désigner un autre fichier de l'utilisateur et le faire mettre en quarantaine, en laissant en place le fichier analysé. Le résultat se rapporte désormais toujours au fichier envoyé par ce processus.
 - **Les liens physiques échappaient à la quarantaine.** Déplacer l'un des noms d'un fichier ayant plusieurs liens physiques laissait le contenu accessible par les autres, alors que la quarantaine était signalée comme réussie. Ces fichiers sont maintenant refusés par la quarantaine et listés dans Signalements comme simple signalement.
@@ -468,4 +468,4 @@ ne reconnaît pas la signature d'une pièce jointe, ta copie de la clé est
 antérieure à la sous-clé de la CI : retélécharge-la depuis le keyserver ou le
 dépôt comme ci-dessus.
 
-Après la 0.1.19, le PKGBUILD d'AUR vérifie aussi, dans `prepare()`, que le tag a été signé par la sous-clé des tags : `makepkg` seul accepte n'importe quelle sous-clé de la clé primaire, y compris celle de la CI. Le PKGBUILD est publié sur AUR par le mainteneur depuis sa propre machine : aucune clé AUR n'est stockée dans la CI.
+Depuis la 0.1.20, le PKGBUILD d'AUR vérifie aussi, dans `prepare()`, que le tag a été signé par la sous-clé des tags : `makepkg` seul accepte n'importe quelle sous-clé de la clé primaire, y compris celle de la CI. Le PKGBUILD est publié sur AUR par le mainteneur depuis sa propre machine : aucune clé AUR n'est stockée dans la CI.

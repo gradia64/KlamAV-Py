@@ -297,9 +297,9 @@ En un escaneo de toda la home de una máquina de desarrollo real (330k+ archivos
 - **Errores en avalancha de un solo tipo (miles)** — casi con seguridad clamd muerto o reiniciado a mitad del escaneo:
   `journalctl -u clamav-daemon.service` en el intervalo del escaneo, y `dmesg | grep -i oom` para el caso OOM. El resumen por tipo de la CLI (o el log persistente del programado) hace este caso inmediatamente distinguible del ruido fisiológico.
 
-## Fix de seguridad después de la 0.1.19
+## Fix de seguridad en la 0.1.20
 
-De una prueba de penetración de la 0.1.19; saldrán con la próxima versión.
+De una prueba de penetración de la 0.1.19.
 
 - **Cuarentena de un archivo elegido por clamd.** La ruta de un resultado `FOUND` se tomaba de la respuesta de clamd: un clamd alcanzado por TCP sin cifrar, o uno comprometido, podía indicar otro archivo del usuario y hacerlo mover a cuarentena, dejando en su sitio el archivo escaneado. Ahora el resultado se refiere siempre al archivo enviado por este proceso.
 - **Los enlaces duros escapaban a la cuarentena.** Mover uno de los nombres de un archivo con varios enlaces duros dejaba el contenido accesible desde los demás, mientras la cuarentena constaba como realizada. Estos archivos ahora la cuarentena los rechaza y aparecen en Señalizaciones como solo señalización.
@@ -476,4 +476,4 @@ anterior a la subclave de la CI: vuelve a descargarla del keyserver o del
 repositorio como arriba.
 
 
-Después de la 0.1.19 el PKGBUILD de AUR comprueba además, en `prepare()`, que el tag esté firmado por la subclave de los tags: `makepkg` por sí solo acepta cualquier subclave de la clave primaria, incluida la de la CI. El PKGBUILD lo publica en AUR el mantenedor desde su propia máquina: ninguna clave de AUR está en la CI.
+Desde la 0.1.20 el PKGBUILD de AUR comprueba además, en `prepare()`, que el tag esté firmado por la subclave de los tags: `makepkg` por sí solo acepta cualquier subclave de la clave primaria, incluida la de la CI. El PKGBUILD lo publica en AUR el mantenedor desde su propia máquina: ninguna clave de AUR está en la CI.
