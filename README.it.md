@@ -75,6 +75,25 @@ A differenza del `.deb`, il timer di scansione programmata **non** viene abilita
 systemctl --user enable --now klamav-scan.timer
 ```
 
+### AppImage (altre distribuzioni, x86_64)
+
+Dalla 0.1.21, per le distribuzioni senza il `.deb` né AUR (Fedora, openSUSE, …). Scarica `KlamAV-Py-<versione>-x86_64.AppImage` dalla pagina Releases, verificane la firma (vedi «Verifica dei rilasci» più sotto), poi:
+
+```bash
+chmod +x KlamAV-Py-*-x86_64.AppImage
+./KlamAV-Py-*-x86_64.AppImage                     # GUI
+./KlamAV-Py-*-x86_64.AppImage cli scan ~/Scaricati  # CLI
+```
+
+Un collegamento simbolico chiamato `klamav-py` all'AppImage (per esempio in `~/.local/bin`) esegue la CLI senza `cli`. Serve glibc 2.34 o successiva (Debian 12, Ubuntu 22.04, Fedora 35 e successive).
+
+Cosa cambia rispetto ai pacchetti:
+
+- **ClamAV non è incluso.** Installa clamd e freshclam dalla distribuzione e abilitane i servizi; i nomi cambiano (su Fedora: pacchetti `clamd` e `clamav-update`, servizi `clamd@scan` e `clamav-freshclam`). Fuori da Debian e Arch il socket di clamd spesso non è `/run/clamav/clamd.ctl`: indicalo nelle Impostazioni o con `--socket`.
+- **Nessuna scansione programmata di sistema.** Le unit di `klamav-scan.timer` le installano solo il `.deb` e il pacchetto Arch: con l'AppImage la pagina Pianificazione offre solo la pianificazione interna, che gira con KlamAV-Py aperto (anche nella system tray).
+- **Avvio automatico e menu di Dolphin puntano al file `.AppImage`.** Se lo sposti o lo rinomini, salva di nuovo le Impostazioni e reinstalla l'integrazione con Dolphin.
+- Niente pagine man: sono in `docs/man/` nel repository. Il controllo aggiornamenti rimanda alla pagina della release, come per gli altri pacchetti.
+
 ### Da sorgenti (sviluppo o build del pacchetto)
 
 **Build del .deb:**
@@ -459,7 +478,7 @@ keyserver con `--keyserver`: senza, `gpg` usa quello configurato, che può
 non avere la chiave. I tag precedenti alla 0.1.10 non sono firmati.
 
 Dalla 0.1.15 anche i file allegati alla release (`.deb`, pacchetto Arch,
-sorgente) hanno una firma staccata `.sig`, più `SHA256SUMS` firmato. Con la
+sorgente e, dalla 0.1.21, l'AppImage) hanno una firma staccata `.sig`, più `SHA256SUMS` firmato. Con la
 chiave importata come sopra:
 
 ```bash

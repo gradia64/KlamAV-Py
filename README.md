@@ -75,6 +75,25 @@ Unlike the `.deb`, the scheduled scan timer is **not** enabled during installati
 systemctl --user enable --now klamav-scan.timer
 ```
 
+### AppImage (other distributions, x86_64)
+
+From 0.1.21, for distributions without the `.deb` or AUR (Fedora, openSUSE, …). Download `KlamAV-Py-<version>-x86_64.AppImage` from the Releases page, check its signature (see "Release verification" below), then:
+
+```bash
+chmod +x KlamAV-Py-*-x86_64.AppImage
+./KlamAV-Py-*-x86_64.AppImage                     # GUI
+./KlamAV-Py-*-x86_64.AppImage cli scan ~/Downloads  # CLI
+```
+
+A symbolic link named `klamav-py` to the AppImage (for example in `~/.local/bin`) runs the CLI without `cli`. It needs glibc 2.34 or later (Debian 12, Ubuntu 22.04, Fedora 35 and later).
+
+What differs from the packages:
+
+- **ClamAV is not included.** Install clamd and freshclam from your distribution and enable their services; names vary (on Fedora: packages `clamd` and `clamav-update`, services `clamd@scan` and `clamav-freshclam`). Outside Debian and Arch clamd's socket is often not `/run/clamav/clamd.ctl`: set it in Settings or with `--socket`.
+- **No scheduled system scan.** The `klamav-scan.timer` units are installed only by the `.deb` and the Arch package: with the AppImage the Scheduling page offers only the internal schedule, which runs while KlamAV-Py is open (in the system tray too).
+- **Autostart and Dolphin menu point to the `.AppImage` file.** If you move or rename it, save Settings again and reinstall the Dolphin integration.
+- No man pages: they are in `docs/man/` in the repository. The update check links to the release page, as for the other packages.
+
 ### From source (development or package build)
 
 **Build the .deb:**
@@ -454,7 +473,7 @@ gpg --fingerprint EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
 
 In any case check that the fingerprint reported by `gpg` matches the one shown above: the keyserver (or the file in the repository) only guarantees delivering a key, not that it is the right one. Always specify the keyserver with `--keyserver`: without it, `gpg` uses the configured one, which may not have the key. Tags before 0.1.10 are not signed.
 
-Since 0.1.15 the files attached to the release (`.deb`, Arch package, source) also have a detached `.sig` signature, plus a signed `SHA256SUMS`. With the key imported as above:
+Since 0.1.15 the files attached to the release (`.deb`, Arch package, source, and from 0.1.21 the AppImage) also have a detached `.sig` signature, plus a signed `SHA256SUMS`. With the key imported as above:
 
 ```bash
 gpg --verify SHA256SUMS.sig SHA256SUMS

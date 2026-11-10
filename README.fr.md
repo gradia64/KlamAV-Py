@@ -75,6 +75,25 @@ Contrairement au `.deb`, le timer de numérisation planifiée **n'est pas** acti
 systemctl --user enable --now klamav-scan.timer
 ```
 
+### AppImage (autres distributions, x86_64)
+
+Depuis la 0.1.21, pour les distributions sans le `.deb` ni AUR (Fedora, openSUSE, …). Téléchargez `KlamAV-Py-<version>-x86_64.AppImage` depuis la page Releases, vérifiez sa signature (voir « Vérification des releases » plus bas), puis :
+
+```bash
+chmod +x KlamAV-Py-*-x86_64.AppImage
+./KlamAV-Py-*-x86_64.AppImage                           # GUI
+./KlamAV-Py-*-x86_64.AppImage cli scan ~/Téléchargements  # CLI
+```
+
+Un lien symbolique nommé `klamav-py` vers l'AppImage (par exemple dans `~/.local/bin`) lance la CLI sans `cli`. Nécessite glibc 2.34 ou plus récente (Debian 12, Ubuntu 22.04, Fedora 35 et suivantes).
+
+Ce qui change par rapport aux paquets :
+
+- **ClamAV n'est pas inclus.** Installez clamd et freshclam depuis votre distribution et activez leurs services ; les noms varient (sur Fedora : paquets `clamd` et `clamav-update`, services `clamd@scan` et `clamav-freshclam`). En dehors de Debian et Arch le socket de clamd n'est souvent pas `/run/clamav/clamd.ctl` : indiquez-le dans les Paramètres ou avec `--socket`.
+- **Pas de scan programmé du système.** Les unités de `klamav-scan.timer` ne sont installées que par le `.deb` et le paquet Arch : avec l'AppImage la page Planification ne propose que la planification interne, qui fonctionne tant que KlamAV-Py est ouvert (y compris dans la zone de notification).
+- **Démarrage automatique et menu de Dolphin pointent vers le fichier `.AppImage`.** Si vous le déplacez ou le renommez, enregistrez à nouveau les Paramètres et réinstallez l'intégration Dolphin.
+- Pas de pages man : elles sont dans `docs/man/` dans le dépôt. La vérification des mises à jour renvoie à la page de la release, comme pour les autres paquets.
+
 ### Depuis les sources (développement ou build du paquet)
 
 **Build du .deb :**
@@ -451,7 +470,7 @@ keyserver avec `--keyserver` : sans, `gpg` utilise celui configuré, qui peut ne
 pas avoir la clé. Les tags précédents la 0.1.10 ne sont pas signés.
 
 Depuis la 0.1.15 aussi les fichiers attachés à la release (`.deb`, paquet Arch,
-source) ont une signature détachée `.sig`, plus `SHA256SUMS` signé. Avec la
+source et, depuis la 0.1.21, l'AppImage) ont une signature détachée `.sig`, plus `SHA256SUMS` signé. Avec la
 clé importée comme ci-dessus :
 
 ```bash

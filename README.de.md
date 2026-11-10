@@ -75,6 +75,25 @@ Im Gegensatz zum `.deb` wird der Timer für den geplanten Scan **nicht** währen
 systemctl --user enable --now klamav-scan.timer
 ```
 
+### AppImage (andere Distributionen, x86_64)
+
+Ab 0.1.21, für Distributionen ohne `.deb` oder AUR (Fedora, openSUSE, …). Lade `KlamAV-Py-<Version>-x86_64.AppImage` von der Releases-Seite herunter, prüfe die Signatur (siehe „Verifikation der Releases“ weiter unten), dann:
+
+```bash
+chmod +x KlamAV-Py-*-x86_64.AppImage
+./KlamAV-Py-*-x86_64.AppImage                       # GUI
+./KlamAV-Py-*-x86_64.AppImage cli scan ~/Downloads  # CLI
+```
+
+Ein symbolischer Link namens `klamav-py` auf das AppImage (zum Beispiel in `~/.local/bin`) startet die CLI ohne `cli`. Benötigt glibc 2.34 oder neuer (Debian 12, Ubuntu 22.04, Fedora 35 und neuer).
+
+Was sich gegenüber den Paketen ändert:
+
+- **ClamAV ist nicht enthalten.** Installiere clamd und freshclam aus der Distribution und aktiviere ihre Dienste; die Namen variieren (auf Fedora: Pakete `clamd` und `clamav-update`, Dienste `clamd@scan` und `clamav-freshclam`). Außerhalb von Debian und Arch ist der Socket von clamd oft nicht `/run/clamav/clamd.ctl`: gib ihn in den Einstellungen oder mit `--socket` an.
+- **Kein geplanter System-Scan.** Die Units von `klamav-scan.timer` installieren nur das `.deb` und das Arch-Paket: mit dem AppImage bietet die Seite Planung nur die interne Planung, die läuft, solange KlamAV-Py geöffnet ist (auch im System-Tray).
+- **Autostart und Dolphin-Menü zeigen auf die `.AppImage`-Datei.** Wenn du sie verschiebst oder umbenennst, speichere die Einstellungen erneut und installiere die Dolphin-Integration neu.
+- Keine Man-Pages: sie liegen im Repository unter `docs/man/`. Die Update-Prüfung verweist wie bei den anderen Paketen auf die Release-Seite.
+
 ### Aus Quellen (Entwicklung oder Paket-Build)
 
 **Build des .deb:**
@@ -452,7 +471,7 @@ konfigurierten, der den Schlüssel möglicherweise nicht hat. Tags vor 0.1.10
 sind nicht signiert.
 
 Seit 0.1.15 haben auch die an die Release angehängten Dateien (`.deb`,
-Arch-Paket, Quelle) eine abgetrennte Signatur `.sig`, plus ein signiertes
+Arch-Paket, Quelle und ab 0.1.21 das AppImage) eine abgetrennte Signatur `.sig`, plus ein signiertes
 `SHA256SUMS`. Mit dem importierten Schlüssel wie oben:
 
 ```bash

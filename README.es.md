@@ -75,6 +75,25 @@ A diferencia del `.deb`, el temporizador de escaneo programado **no** se habilit
 systemctl --user enable --now klamav-scan.timer
 ```
 
+### AppImage (otras distribuciones, x86_64)
+
+Desde la 0.1.21, para las distribuciones sin el `.deb` ni AUR (Fedora, openSUSE, …). Descarga `KlamAV-Py-<versión>-x86_64.AppImage` de la página Releases, verifica su firma (ver «Verificación de los releases» más abajo) y luego:
+
+```bash
+chmod +x KlamAV-Py-*-x86_64.AppImage
+./KlamAV-Py-*-x86_64.AppImage                        # GUI
+./KlamAV-Py-*-x86_64.AppImage cli scan ~/Descargas  # CLI
+```
+
+Un enlace simbólico llamado `klamav-py` a la AppImage (por ejemplo en `~/.local/bin`) ejecuta la CLI sin `cli`. Requiere glibc 2.34 o posterior (Debian 12, Ubuntu 22.04, Fedora 35 y posteriores).
+
+Qué cambia respecto a los paquetes:
+
+- **ClamAV no está incluido.** Instala clamd y freshclam de tu distribución y habilita sus servicios; los nombres varían (en Fedora: paquetes `clamd` y `clamav-update`, servicios `clamd@scan` y `clamav-freshclam`). Fuera de Debian y Arch el socket de clamd a menudo no es `/run/clamav/clamd.ctl`: indícalo en Ajustes o con `--socket`.
+- **Sin escaneo programado del sistema.** Las unidades de `klamav-scan.timer` solo las instalan el `.deb` y el paquete Arch: con la AppImage la página Planificación ofrece solo la planificación interna, que funciona con KlamAV-Py abierto (también en la bandeja del sistema).
+- **Inicio automático y menú de Dolphin apuntan al archivo `.AppImage`.** Si lo mueves o lo renombras, guarda de nuevo los Ajustes y reinstala la integración con Dolphin.
+- Sin páginas man: están en `docs/man/` en el repositorio. La comprobación de actualizaciones remite a la página de la release, como para los demás paquetes.
+
 ### Desde fuentes (desarrollo o build del paquete)
 
 **Build del .deb:**
@@ -458,7 +477,7 @@ con `--keyserver`: sin él, `gpg` usa el configurado, que puede no tener la
 clave. Los tags anteriores a la 0.1.10 no están firmados.
 
 Desde la 0.1.15 también los archivos adjuntos a la release (`.deb`, paquete Arch,
-fuente) tienen una firma separada `.sig`, más `SHA256SUMS` firmado. Con la
+fuente y, desde la 0.1.21, la AppImage) tienen una firma separada `.sig`, más `SHA256SUMS` firmado. Con la
 clave importada como arriba:
 
 ```bash

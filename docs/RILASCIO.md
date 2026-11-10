@@ -75,6 +75,7 @@ Al push di un tag `v<versione>` parte `.github/workflows/release.yml`:
 | `tests`   | la stessa matrice di `tests.yml` (Python 3.10–3.14) |
 | `deb`     | in `debian:sid`: `dpkg-buildpackage -us -uc -b`, lintian (gli errori bloccano), tarball del sorgente da `git archive` |
 | `arch`    | in `archlinux:base-devel`: il PKGBUILD così com'è, che clona il tag da GitHub e ne verifica la firma; namcap (gli errori bloccano), `.SRCINFO` rigenerato, installazione e prova della CLI (`tools/build-arch.sh`) |
+| `appimage` | `tools/build-appimage.sh` (ogni download fissato per SHA-256, dipendenze Python con `--require-hashes`), poi `packaging/appimage/smoke-test.sh`: controlli con il Python dell'AppImage, CLI contro un finto clamd, GUI offscreen e su X11 (dalla 0.1.21) |
 | `publish` | **attende la tua approvazione** (environment `release`), poi: firma degli allegati con la sottochiave della CI (`tools/sign-release.sh`), release GitHub con le note dalla voce di `CHANGELOG.md` (`tools/release-notes.sh`). AUR no: lo pubblichi tu con `tools/aur-release.sh` (sezione «Rilascio») |
 
 Solo `publish` vede i secret. Nessun altro job, e nessun altro workflow
@@ -86,6 +87,7 @@ File allegati alla release:
 klamav-py_X.Y.Z-1_all.deb           pacchetto Debian (costruito su sid)
 klamav-py-X.Y.Z-1-any.pkg.tar.zst   pacchetto Arch (lo stesso che AUR costruisce)
 klamav-py-X.Y.Z.tar.gz              sorgente del tag (git archive)
+KlamAV-Py-X.Y.Z-x86_64.AppImage     AppImage (dalla 0.1.21)
 *.sig                               firma GPG staccata di ciascun file
 SHA256SUMS, SHA256SUMS.sig          checksum di tutto, firmati
 klamav-py-release-key.asc           chiave pubblica di rilascio
@@ -184,8 +186,8 @@ Nessuna chiave AUR nella CI: fino alla 0.1.19 c'erano il secret
    ```
    `tools/verify-tag.sh` in locale, prima del push, dice subito se il tag è
    stato firmato con la sottochiave sbagliata.
-3. Segui il workflow (`gh run watch`) e approva `publish` quando `deb` e
-   `arch` sono verdi. Se `publish` fallisce dopo l'upload si può
+3. Segui il workflow (`gh run watch`) e approva `publish` quando `deb`,
+   `arch` e `appimage` sono verdi. Se `publish` fallisce dopo l'upload si può
    rilanciare: l'upload sovrascrive (`--clobber`).
 4. AUR, dalla tua macchina:
    ```bash
@@ -196,6 +198,16 @@ Nessuna chiave AUR nella CI: fino alla 0.1.19 c'erano il secret
    a quelli dell'albero del tag e che `.SRCINFO` descriva quel PKGBUILD,
    poi pubblica con `tools/publish-aur.sh` e la tua chiave SSH. Si può
    rilanciare: se AUR è già aggiornato non fa nulla.
+
+5. AppImage: scaricala dalla release, verificane firma e checksum
+   (README, «Verifica dei rilasci») e provala su altre distribuzioni:
+   ```bash
+   packaging/appimage/test-distros.sh KlamAV-Py-0.1.21-x86_64.AppImage
+   ```
+   Serve Docker (Fedora, openSUSE, Debian 12, Ubuntu 22.04 e 24.04, Arch):
+   CLI e GUI su X11 con le sole librerie di base di un desktop. Non è
+   nella CI; va lanciata almeno quando cambiano le librerie incluse
+   (`tools/build-appimage.sh`, `packaging/appimage/requirements.txt`).
 
 Una release creata a mano prima del push (per esempio con note in più per
 chi aggiorna) resta com'è: il workflow carica solo i file.
@@ -252,6 +264,8 @@ tools/verify-tag.sh v0.1.15
 tools/check-version.sh v0.1.15
 tools/release-notes.sh 0.1.15
 docker run --rm -v "$PWD":/src -w /src archlinux:base-devel tools/build-arch.sh
+tools/build-appimage.sh        # dist/KlamAV-Py-X.Y.Z-x86_64.AppImage
+packaging/appimage/smoke-test.sh dist/KlamAV-Py-*-x86_64.AppImage
 tools/sign-release.sh dist     # con il portachiavi locale (sottochiave della CI)
 tools/aur-release.sh v0.1.15   # AUR, dopo la release
 ```

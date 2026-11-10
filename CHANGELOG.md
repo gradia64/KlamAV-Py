@@ -5,6 +5,35 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## Non rilasciato
+
+### Aggiunto
+- **KlamAV-Py anche come AppImage** (`KlamAV-Py-<versione>-x86_64.AppImage`),
+  per le distribuzioni senza il `.deb` né AUR. Contiene Python e Qt, non
+  ClamAV: clamd e freshclam vengono dalla distribuzione. La GUI parte con
+  un doppio clic, la CLI con `cli` come primo argomento o da un
+  collegamento chiamato `klamav-py`. Firmata dalla CI e in `SHA256SUMS`
+  come gli altri allegati. Richiede glibc 2.34 (Debian 12, Ubuntu 22.04,
+  Fedora 35 o successive), solo x86_64.
+- Dall'AppImage la scansione programmata di sistema (`klamav-scan.timer`)
+  non c'è, perché le sue unit le installano solo i pacchetti: la pagina
+  Pianificazione lo dice al posto dell'orario e resta la pianificazione
+  interna, che gira con KlamAV-Py aperto. Avvio automatico e menu di
+  Dolphin puntano al file `.AppImage`: dopo averlo spostato vanno salvati
+  di nuovo.
+
+### Rilascio
+- Job `appimage` nel workflow di rilascio: build con ogni download fissato
+  per SHA-256 e dipendenze con `pip --require-hashes`, poi una prova con
+  il Python dell'AppImage, la CLI contro un finto clamd e la GUI su X11.
+  `packaging/appimage/test-distros.sh` la prova a mano su Fedora,
+  openSUSE, Debian, Ubuntu e Arch.
+- Test: riconoscimento dell'AppImage (marcatore, variabili ereditate,
+  AppImage estratta), comando dei file `.desktop` con le virgolette della
+  specifica, nessun drop-in né `systemctl --user` dall'AppImage, job e
+  download fissati.
+
+---
 ## 0.1.20 — 2026-11-10
 
 ### Sicurezza
