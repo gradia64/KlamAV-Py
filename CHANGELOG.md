@@ -5,7 +5,7 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
-## Non rilasciato
+## 0.1.21 — 2026-11-10
 
 ### Aggiunto
 - **KlamAV-Py anche come AppImage** (`KlamAV-Py-<versione>-x86_64.AppImage`),
@@ -31,7 +31,7 @@ sono in `docs/CHANGELOG-archive.md`.
 - Test: riconoscimento dell'AppImage (marcatore, variabili ereditate,
   AppImage estratta), comando dei file `.desktop` con le virgolette della
   specifica, nessun drop-in né `systemctl --user` dall'AppImage, job e
-  download fissati.
+  download fissati. Totale: 1212 test.
 
 ---
 ## 0.1.20 — 2026-11-10
