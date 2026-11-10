@@ -385,14 +385,14 @@ lock file
 .IR acknowledged.json.lock .
 An invalid register is renamed to
 .I acknowledged.json.corrupt-*
-and never deleted, with a warning (on standard error, or in the Reports
+and never deleted, with a warning (on standard error, or in the Findings
 page of the GUI): the previous acknowledgements remain in that file, and
 the matching detections are reported as new again.
 Entries not found by any scan for 90 days are removed.
 .TP
 .I \%~/.local/share/klamav-py/pending-reports.json
 Detections still to be evaluated (0600): every scan writes each new
-detection that is only reported, as soon as it finds it, and the Reports
+detection that is only reported, as soon as it finds it, and the Findings
 page of the GUI lists them, also those of the scheduled system scan.
 An entry leaves the file when the detection is deleted or acknowledged,
 when its file is no longer there, or after 90 days without being found
@@ -410,7 +410,7 @@ exit with a code (best effort: a failure here does not change the scan
 outcome).
 If the end is missing, the scan was interrupted by a signal, for example
 by switching the computer off: the GUI shows it at the next startup, once
-per interruption, pointing to the Reports and Quarantine pages.
+per interruption, pointing to the Findings and Quarantine pages.
 The file holds no user data: an implausible one is ignored, and the next
 scan rewrites it.
 .
