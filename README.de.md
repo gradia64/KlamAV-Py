@@ -31,7 +31,7 @@ Minimalistische Python-Neuimplementierung der Idee hinter KlamAV 0.22 (Frontend 
 - Rekursives Real-Time-Monitoring der konfigurierten Ordner (QFileSystemWatcher, mit Erweiterung der Unterverzeichnisse, periodischer Reconcile verlorener Watches und konfigurierbarem Deckel, um fs.inotify.max_user_watches nicht zu erschöpfen).
 - Pause/Fortsetzen von Scans, Guard „ein Scan zur Zeit".
 - Größen-Vorprüfung: Dateien über StreamMaxLength werden als „nicht geprüft" gemeldet, ohne die clamd-Session zu verschwenden.
-- Kenntnisnahme von Meldungen, die nicht verschoben wurden (heuristische Signaturen, Mailarchive): nach der Prüfung werden sie nicht mehr zu den Infizierten gezählt, solange der Inhalt nicht ändert.
+- Kenntnisnahme von Meldungen, die nicht verschoben wurden (heuristische Signaturen, Mailarchive): nach der Prüfung werden sie nicht mehr zu den Infizierten gezählt, solange sich der Inhalt nicht ändert.
 - Integration ins Kontextmenü von Dolphin, Autostart, System Tray, Single-Instance mit IPC.
 - Update-Kontrolle der Anwendung über GitHub Releases, manuell oder beim Start.
 
@@ -160,7 +160,7 @@ Berechtigungsfehler, während des Scans verschwundene Dateien, zu große Dateien
 
 ## Meldungen, die nicht verschoben werden, und Kenntnisnahme
 
-Heuristische Signaturen (`Heuristics.*`) und Dateien in Mailarchiven werden nur gemeldet, nie automatisch verschoben: ein Nachricht verschieben zerstört das Archiv des Mailclients. Eine solche Meldung wiederholte sich jedoch bei jedem Scan, und mit dem System-Timer kam jede Nacht dieselbe Benachrichtigung, bis man aufhörte hinzusehen.
+Heuristische Signaturen (`Heuristics.*`) und Dateien in Mailarchiven werden nur gemeldet, nie automatisch verschoben: Eine Nachricht zu verschieben zerstört das Archiv des Mailclients. Eine solche Meldung wiederholte sich jedoch bei jedem Scan, und mit dem System-Timer kam jede Nacht dieselbe Benachrichtigung, bis man aufhörte hinzusehen.
 
 Nach der Prüfung der Datei lösche sie oder registriere die Kenntnisnahme:
 
@@ -201,7 +201,7 @@ Am Ende des Scans druckt die CLI eine Zusammenfassung der Fehler gruppiert nach 
 
 ## GUI: Übersicht der Oberfläche
 
-PySide6-Anwendung mit einem Fenster, Seitenleiste und Stil inspiriert von KDE Plasma (verwendet immer die Farben der Systempalette, nie hartkodierte Farben, außer für semantische Zustände wie „infiziert"). Acht Abschnitte:
+PySide6-Anwendung mit einem Fenster, Seitenleiste und Stil inspiriert von KDE Plasma (verwendet immer die Farben der Systempalette, nie hartkodierte Farben, außer für semantische Zustände wie „infiziert"). Acht Abschnitte. Die Oberfläche gibt es derzeit nur auf Italienisch: die unten genannten Namen und Beschriftungen sind hier zur Lesbarkeit übersetzt und erscheinen in der Anwendung auf Italienisch.
 
 - **Scan** — manueller Scan auf einem frei wählbaren Pfad, in einem separaten QThread (ScanWorker): das Fenster bleibt auch bei großen Verzeichnissen reaktionsfähig, und die Statusleiste zeigt die Datei in Bearbeitung in Echtzeit (mit Textelision, damit das Layout bei langen Pfaden nicht wächst). Die Zähler unterscheiden gescannt / infiziert / Fehler / nicht geprüft (zu groß), und nur Infizierte/Fehler/nicht-geprüfte erzeugen Zeilen in der Liste.
 - **Suspendieren / Fortsetzen.** Die Pause hat Granularität einer ganzen Datei: die im Streaming befindliche Datei wird abgeschlossen, dann hält der Worker an (die Schaltfläche folgt den Signalen des Workers, nicht dem Klick, daher ist der angezeigte Zustand immer der tatsächliche). „Abbrechen" bleibt auch in der Pause aktiv. Nach einer Pause länger als ~25s (nahe am IdleTimeout von clamd, standardmäßig 30s) wird die Session beim Fortsetzen proaktiv neu erstellt, um einen falschen Fehler auf der ersten Datei zu vermeiden. Mit dem Fenster minimiert in der Tray zeigt das Tooltip des Symbols die Zähler des laufenden Scans und den Pausenzustand.
@@ -248,7 +248,7 @@ Die App bleibt in der System Tray aktiv, auch wenn das Fenster geschlossen wird 
 
 Außerdem Single-Instance: startest du die GUI, während eine andere Instanz bereits aktiv ist, sendet die zweite ihren `--scan-target` (falls vorhanden) an die erste und beendet sich sofort, statt ein zweites Fenster zu öffnen. Das ist der Mechanismus, der die Dolphin-Integration sinnvoll macht: beim Klick auf „Mit KlamAV-Py scannen" auf mehreren Dateien/Ordnern landen alle Anfragen im selben bereits geöffneten Fenster.
 
-Der IPC-Socket liegt in der Runtime-Verzeichnis des Benutzers (`$XDG_RUNTIME_DIR/klamav-py-ipc`, typischerweise `/run/user/<uid>/`), nicht in `/tmp`, und bevor irgendwelche Daten gesendet werden, verifiziert die zweite Instanz mit `SO_PEERCRED`, dass der lauschende Prozess demselben Benutzer gehört. Wenn keine sichere Runtime-Verzeichnis existiert (ohne `XDG_RUNTIME_DIR` würde Qt auf einen Ordner mit vorhersehbarem Namen unter `/tmp` ausweichen, den ein anderer lokaler Benutzer zuerst anlegen könnte) oder der IPC-Server nicht starten kann, läuft die GUI trotzdem ohne Single-Instance und meldet das: ein zweiter Start würde eine weitere Kopie öffnen.
+Der IPC-Socket liegt im Runtime-Verzeichnis des Benutzers (`$XDG_RUNTIME_DIR/klamav-py-ipc`, typischerweise `/run/user/<uid>/`), nicht in `/tmp`, und bevor irgendwelche Daten gesendet werden, verifiziert die zweite Instanz mit `SO_PEERCRED`, dass der lauschende Prozess demselben Benutzer gehört. Wenn kein sicheres Runtime-Verzeichnis existiert (ohne `XDG_RUNTIME_DIR` würde Qt auf einen Ordner mit vorhersehbarem Namen unter `/tmp` ausweichen, den ein anderer lokaler Benutzer zuerst anlegen könnte) oder der IPC-Server nicht starten kann, läuft die GUI trotzdem ohne Single-Instance und meldet das: ein zweiter Start würde eine weitere Kopie öffnen.
 
 Beim Update von 0.1.6 oder älter verwendet eine noch offene alte Instanz den alten Socket und wird von der neuen nicht erkannt: schließe sie aus der Tray, bevor du die Anwendung neu startest.
 
@@ -284,7 +284,7 @@ Bei einem home-weiten Scan einer echten Entwicklermaschine (330k+ Dateien) sind 
 - **„Unterbrochene Pipe" bei großen Dateien** — clamd hat den Stream wegen StreamMaxLength (Standard 25MB in clamd.conf) abgelehnt und die Verbindung zur Hälfte des Sendens geschlossen. Mit aktiver Größen-Vorprüfung ist das fast verschwunden: Dateien über der Schwelle verlassen als „nicht geprüft", ohne die Session zu berühren. Um das Limit zu erhöhen:
   `StreamMaxLength 100M` in clamd.conf und Neustart von clamd — mit dem Trade-off, dass ein höheres Limit es einfacher macht, clamd mit riesigen Streams zu verstopfen.
 
-  Ehrlichkeitsnotiz: auch Dateien innerhalb des Stream-Limits bleiben MaxScanSize/MaxFileSize/MaxRecursion von clamd unterworfen (ungefähre Standards 100M/25M/16): ein umfangreiches Archiv kann „OK" mit teilweiser Scan ergeben — Grenze von clamd selbst, nicht von diesem Projekt erkennbar.
+  Ehrlichkeitsnotiz: auch Dateien innerhalb des Stream-Limits bleiben MaxScanSize/MaxFileSize/MaxRecursion von clamd unterworfen (ungefähre Standards 100M/25M/16): ein umfangreiches Archiv kann „OK" mit teilweisem Scan ergeben — Grenze von clamd selbst, nicht von diesem Projekt erkennbar.
 
 - **Errno 13 „Zugriff verweigert"** — echte Dateisystem-Berechtigungen (z. B. von Docker-Containern in der Home gehaltene Dateien). Ist kein Problem des Projekts.
 
@@ -322,7 +322,7 @@ Aus einem Penetrationstest von 0.1.19.
 
 Diese Version löst eine Reihe von Sicherheitsproblemen, die aus einem Code-Audit hervorgingen. Das Referenz-Bedrohungsmodell ist ein Multi-User-System und, für die Quarantäne, die infizierte Datei selbst als potenziell feindlicher Inhalt (nicht ein externer Angreifer).
 
-- **TOCTOU in Quarantäne und Wiederherstellung.** `quarantine_file()` öffnet die Datei mit O_NOFOLLOW und prüft die Inode-Identität (dev+ino) nach dem Verschieben, statt einem separaten is_file()-Check vor der Move-Operation zu vertrauen: eine infizierte Datei könnte versuchen, das Isolation durch Austausch mit einem Symlink in dem Fenster zwischen Prüfung und Verschieben zu umgehen. Symlinks (und spezielle Dateien wie FIFOs) werden jetzt explizit abgelehnt. `restore()` beansprucht das Ziel atomar mit O_CREAT|O_EXCL statt exists() gefolgt von move(), wodurch das Fenster entfällt, in dem ein anderer Prozess die Zieldatei in der Mitte erstellen könnte.
+- **TOCTOU in Quarantäne und Wiederherstellung.** `quarantine_file()` öffnet die Datei mit O_NOFOLLOW und prüft die Inode-Identität (dev+ino) nach dem Verschieben, statt einem separaten is_file()-Check vor der Move-Operation zu vertrauen: eine infizierte Datei könnte versuchen, die Isolation durch Austausch mit einem Symlink in dem Fenster zwischen Prüfung und Verschieben zu umgehen. Symlinks (und spezielle Dateien wie FIFOs) werden jetzt explizit abgelehnt. `restore()` beansprucht das Ziel atomar mit O_CREAT|O_EXCL statt exists() gefolgt von move(), wodurch das Fenster entfällt, in dem ein anderer Prozess die Zieldatei in der Mitte erstellen könnte.
 - **IPC-Socket der Single-Instance eingeschränkt und validiert.** Der QLocalServer verwendet UserAccessOption: ohne ihn hängen die Socket-Berechtigungen unter Linux vom umask des Prozesses ab und könnten für andere Benutzer des Systems zugänglich sein. Der vom Socket empfangene Pfad ist jetzt in der Größe begrenzt (vermeidet riesige Payloads als DoS) und robust dekodiert (ein fehlerhaftes UTF-8-Payload wird ignoriert, nicht als Ausnahme weitergegeben). Seit 0.1.7 liegt der Socket nicht mehr in `/tmp`: siehe vorherigen Abschnitt.
 - **Datenbank-Update an den Systemdienst delegiert.** Die Schaltfläche „Datenbank aktualisieren" führt nur `pkexec /usr/bin/systemctl restart clamav-freshclam.service` aus, mit festem argv und verifizierten root-owned Binaries: freshclam lädt die Signaturen als Benutzer `clamav`, mit dem Sandboxing der Distributionseinheit, statt als root zu laufen. Das Ergebnis wird anhand der von clamd gemeldeten DB-Version geprüft; beim Start startet das Update nur, wenn die Signaturen älter als 36 Stunden sind.
 - **Neugenerierung des KDE-Service-Caches ohne Shell.** `os.system()` wurde durch `subprocess.run()` mit explizitem argv ersetzt (keine Shell).
@@ -427,7 +427,7 @@ Die `--tag`-Variante ist die vor der Veröffentlichung auf AUR zu verwendende: s
 Seit 0.1.10 sind die Release-Tags mit dem Projektschlüssel signiert:
 
     gradia (KlamAV-Py release signing) <gradia@disroot.org>
-    Impronta: EBEE 3E80 EFA3 8B42 B147  F1B9 9D7A A4F1 971F EAA9
+    Fingerabdruck: EBEE 3E80 EFA3 8B42 B147  F1B9 9D7A A4F1 971F EAA9
 
 ```bash
 gpg --keyserver hkps://keys.openpgp.org --recv-keys EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
@@ -446,7 +446,7 @@ gpg --fingerprint EBEE3E80EFA38B42B147F1B99D7AA4F1971FEAA9
 
 In jedem Fall prüfe, dass der von `gpg` angegebene Fingerabdruck mit dem
 oben angegebenen übereinstimmt: der Keyserver (oder die Datei im Repository)
-garantiert nur, eine Schlüssel zu liefern, nicht dass es der richtige ist.
+garantiert nur, einen Schlüssel zu liefern, nicht dass es der richtige ist.
 Gib den Keyserver immer mit `--keyserver` an: ohne verwendet `gpg` den
 konfigurierten, der den Schlüssel möglicherweise nicht hat. Tags vor 0.1.10
 sind nicht signiert.
