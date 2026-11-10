@@ -62,6 +62,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from .. import appimage
+from ..appimage import desktop_exec_arg
 from ..acknowledged import (
     HASH_PREFIX_LEN,
     AckRegistry,
@@ -459,6 +461,15 @@ def _migrate_legacy_settings() -> None:
     new.sync()
 
 
+def system_timer_available() -> bool:
+    """
+    False dall'AppImage, che non installa le unit di klamav-scan.timer
+    (appimage.py): la GUI non le interroga e non scrive drop-in. Un punto
+    solo, perché i test possano simulare l'AppImage.
+    """
+    return not appimage.is_appimage()
+
+
 def _gui_relaunch_command() -> str:
     """
     Comando da usare in un file .desktop (autostart, integrazione
@@ -470,11 +481,23 @@ def _gui_relaunch_command() -> str:
     Ricade su "sys.executable -m klamav_py.gui.app" solo per lo
     sviluppo locale da checkout git con venv attivo, dove lo script
     entry-point non è nel PATH ma il modulo è comunque importabile.
+
+    Da un'AppImage, prima di tutto il resto, il file .AppImage
+    (appimage.launcher): sys.executable è il Python del mount temporaneo
+    /tmp/.mount_*, che sparisce alla chiusura, e un klamav-py-gui nel PATH
+    sarebbe quello di un'altra installazione. Ogni argomento passa da
+    desktop_exec_arg, perché il percorso dell'AppImage lo sceglie l'utente
+    (spazi compresi).
     """
+    image = appimage.launcher()
+    if image:
+        return desktop_exec_arg(image)
     installed = shutil.which("klamav-py-gui")
     if installed:
-        return installed
-    return f"{sys.executable} -m klamav_py.gui.app"
+        return desktop_exec_arg(installed)
+    return " ".join(
+        desktop_exec_arg(a) for a in (sys.executable, "-m", "klamav_py.gui.app")
+    )
 
 
 KDE_STYLESHEET = """
@@ -2708,6 +2731,9 @@ class SchedulerPage(PlainDialogs, QWidget):
         self._timer_refresh_running = False
         self._timer_refresh_again = False
         self.timer_state: bool | None = None
+        # Dall'AppImage le unit del timer non esistono (appimage.py):
+        # niente systemctl --user, drop-in né orario del timer.
+        self.system_timer_available = system_timer_available()
 
         # Scroll area come in SettingsPage: con il gruppo delle cartelle
         # escluse l'altezza minima supera quella della finestra predefinita
@@ -2790,6 +2816,14 @@ class SchedulerPage(PlainDialogs, QWidget):
         timer_desc.setStyleSheet("font-size: 12px; color: palette(mid);")
         sys_layout.addWidget(timer_desc)
         layout.addWidget(system_group)
+        # Dall'AppImage il gruppo non c'è e al suo posto si dice perché,
+        # nel punto dove si configura (come le altre label di avviso).
+        self.no_system_timer_label = QLabel(appimage.SYSTEM_TIMER_NOTE)
+        self.no_system_timer_label.setWordWrap(True)
+        self.no_system_timer_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
+        layout.addWidget(self.no_system_timer_label)
+        system_group.setVisible(self.system_timer_available)
+        self.no_system_timer_label.setVisible(not self.system_timer_available)
 
         schedule_group = QGroupBox("Pianificazione Automatica")
         s_layout = QVBoxLayout(schedule_group)
@@ -2840,6 +2874,9 @@ class SchedulerPage(PlainDialogs, QWidget):
         excl_desc = QLabel(
             "Non vengono controllate né da questa pianificazione né dal timer di "
             "sistema (klamav-scan.timer). La cartella di quarantena è sempre esclusa."
+            if self.system_timer_available else
+            "Non vengono controllate da questa pianificazione. La cartella di "
+            "quarantena è sempre esclusa."
         )
         excl_desc.setWordWrap(True)
         excl_desc.setStyleSheet("font-size: 12px; color: palette(mid);")
@@ -2933,7 +2970,10 @@ class SchedulerPage(PlainDialogs, QWidget):
         """Aggiorna la label sul timer di sistema. systemctl --user (fino a
         10 s di timeout) e la lettura degli override girano fuori dal thread
         della GUI; lo stato arriva in self.timer_state (None: sconosciuto,
-        per esempio senza manager systemd utente)."""
+        per esempio senza manager systemd utente). Dall'AppImage nulla: il
+        timer non è installato, e timer_state resta None."""
+        if not self.system_timer_available:
+            return
         if self._timer_refresh_running:
             self._timer_refresh_again = True
             return
@@ -3233,7 +3273,7 @@ class SchedulerPage(PlainDialogs, QWidget):
         def check():
             # Lo stato del timer serve solo se si attiva la pianificazione
             # interna: systemctl --user può impiegare fino a 10 s.
-            state = timer_enabled() if form.enabled else None
+            state = timer_enabled() if form.enabled and self.system_timer_available else None
             return validate_schedule(raws, roots, form.target, quarantine_raw, form.enabled), state
 
         run_off_gui_thread(check, lambda result: self._save_validated(result, form))
@@ -3308,14 +3348,16 @@ class SchedulerPage(PlainDialogs, QWidget):
         # Il timer di sistema usa la stessa lista di esclusioni e lo stesso
         # orario: drop-in prima di QSettings, e se non si può scrivere non si
         # salva NULLA (GUI e timer userebbero configurazioni diverse senza
-        # che nessuno lo sappia).
-        synced = self._sync_system_dropin(
-            excludes, form.timer_time, timer_disabled=timer_disabled
-        )
-        if synced is None:
-            self._save_end()
-            return
-        changed, tcp = synced
+        # che nessuno lo sappia). Dall'AppImage non c'è un timer da
+        # allineare: niente drop-in, niente systemctl --user.
+        if self.system_timer_available:
+            synced = self._sync_system_dropin(
+                excludes, form.timer_time, timer_disabled=timer_disabled
+            )
+            if synced is None:
+                self._save_end()
+                return
+            changed, tcp = synced
 
         # Le caselle mostrano ciò che è stato salvato, anche se nel frattempo
         # l'utente le aveva cambiate.
@@ -3329,6 +3371,9 @@ class SchedulerPage(PlainDialogs, QWidget):
 
         # Il daemon-reload fallito e gli override estranei sono solo avvisi,
         # come nelle Impostazioni: le impostazioni sono già salvate.
+        if not self.system_timer_available:
+            self._save_done((None, []))
+            return
         run_off_gui_thread(lambda: dropin_followup(changed, tcp), self._save_done)
 
     def _save_done(self, result) -> None:
@@ -3773,6 +3818,11 @@ class SettingsPage(PlainDialogs, QWidget):
             QMessageBox.warning(self, title, f"Impossibile preparare «{path}»:\n{exc}")
             return None
 
+        if not system_timer_available():
+            # AppImage: nessun timer di sistema da allineare.
+            self._dropin_changed = False
+            self.quar_edit.setText(str(path))
+            return path
         try:
             # Stato completo: anche le cartelle escluse della Pianificazione,
             # altrimenti questo salvataggio le toglierebbe dal timer.
@@ -3827,6 +3877,9 @@ class SettingsPage(PlainDialogs, QWidget):
         self._save_running = True
         self.save_btn.setEnabled(False)
         changed, tcp = self._dropin_changed, endpoint.is_tcp
+        if not system_timer_available():
+            self._save_settings_done((None, []))
+            return
         run_off_gui_thread(lambda: dropin_followup(changed, tcp), self._save_settings_done)
 
     def _save_settings_done(self, result) -> None:
@@ -4248,6 +4301,14 @@ class MainWindow(PlainDialogs, QMainWindow):
         if scan_target:
             self.scan_page.start_external_scan(scan_target)
 
+        self._system_timer_at_startup()
+
+    def _system_timer_at_startup(self) -> None:
+        """Controlli del timer di sistema all'avvio: drop-in da rigenerare e
+        scansione del timer interrotta. Dall'AppImage nessuno dei due: le
+        unit non sono installate (appimage.py)."""
+        if not system_timer_available():
+            return
         self._refresh_system_dropin()
         self._check_interrupted_timer_scan()
 
@@ -4671,7 +4732,9 @@ X-GNOME-Autostart-enabled=true
         # abilitato da terminale dopo quella interna): una volta per
         # sessione, senza bloccare nulla.
         # systemctl --user fuori dal thread della GUI (timeout 10 s).
-        if not self._double_schedule_noted and not self._double_schedule_checking:
+        # Dall'AppImage il timer non esiste: nessuna doppia pianificazione.
+        if (system_timer_available() and not self._double_schedule_noted
+                and not self._double_schedule_checking):
             self._double_schedule_checking = True
             run_off_gui_thread(timer_enabled, self._double_schedule_checked)
 

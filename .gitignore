@@ -37,3 +37,4 @@ debian/*.debhelper.log
 debian/*.substvars
 debian/debhelper-build-stamp
 debian/tmp/
+klamav_py/_packaging
