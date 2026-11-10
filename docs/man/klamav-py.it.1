@@ -6,7 +6,7 @@
 .\" Coerenza con build_parser() e con la pagina inglese verificata da
 .\" tests/test_manpage.py.
 .\"
-.TH KLAMAV-PY 1 "2026-10-30" "KlamAV-Py 0.1.19" "Comandi utente"
+.TH KLAMAV-PY 1 "2026-11-10" "KlamAV-Py 0.1.20" "Comandi utente"
 .\" Sillabazione disattivata: i pattern italiani non sono garantiti ovunque
 .nh
 .
@@ -474,6 +474,10 @@ sono segnalati come gli altri.
 aggiunge altre directory a questa regola,
 .B \-\-quarantine\-all
 la disattiva.
+.PP
+Un file con più di un collegamento fisico è sempre solo segnalato, anche con
+.BR \-\-quarantine\-all :
+spostarne un nome lascerebbe il contenuto raggiungibile dagli altri.
 .PP
 Dopo averne verificato uno, eliminalo o registra la presa visione con
 .BR \-\-acknowledge :

@@ -5,7 +5,7 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
-## Non rilasciato
+## 0.1.20 — 2026-11-10
 
 ### Sicurezza
 Dal penetration test della 0.1.19.
@@ -38,6 +38,15 @@ Dal penetration test della 0.1.19.
 ### Corretto
 - Senza il manager systemd utente (sessione SSH) il controllo dei drop-in
   estranei dell'orario del timer falliva con un `AttributeError`.
+- Il controllo aggiornamenti riconosce il limite di richieste anonime
+  dell'API di GitHub (60 all'ora per indirizzo IP, condiviso con altri
+  programmi e con chi sta dietro lo stesso NAT) e dice a che ora
+  riprovare, invece di un generico errore HTTP 403 o 429.
+
+### Modificato
+- Il README principale è in inglese; la versione italiana è in
+  `README.it.md`, e il selettore della lingua in cima collega tutte le
+  traduzioni.
 
 ### Rilascio
 - **AUR non si pubblica più dalla CI.** La chiave SSH di AUR vale per tutto
@@ -50,7 +59,8 @@ Dal penetration test della 0.1.19.
   primaria, compresa quella della CI che firma gli allegati.
 - Test: regressioni per ogni segnalazione del penetration test
   (`tests/test_pentest_0_1_19.py`), `tools/aur-release.sh` e `prepare()`
-  con tag firmati da ciascuna sottochiave.
+  con tag firmati da ciascuna sottochiave; limite di richieste di GitHub
+  nel controllo aggiornamenti. Totale: 1183 test.
 
 ---
 ## 0.1.19 — 2026-10-30

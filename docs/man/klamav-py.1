@@ -6,7 +6,7 @@
 .\" Consistency with build_parser() and with the Italian page is checked
 .\" by tests/test_manpage.py.
 .\"
-.TH KLAMAV-PY 1 "2026-10-30" "KlamAV-Py 0.1.19" "User Commands"
+.TH KLAMAV-PY 1 "2026-11-10" "KlamAV-Py 0.1.20" "User Commands"
 .
 .SH NAME
 klamav-py \- command-line virus scanning through the ClamAV daemon
@@ -466,6 +466,11 @@ they are reported like the others.
 extends this rule to other directories,
 .B \-\-quarantine\-all
 disables it.
+.PP
+A file with more than one hard link is always only reported, even with
+.BR \-\-quarantine\-all :
+moving one of its names would leave the content reachable through the
+others.
 .PP
 After checking one, delete it or record the acknowledgement with
 .BR \-\-acknowledge :
