@@ -1,0 +1,79 @@
+# Le varianti del README devono restare allineate al sorgente italiano.
+#
+# Due controlli distinti, perché vedono cose diverse:
+#
+# - switcher e struttura (heading, fence): costo zero, colgono una variante
+#   aggiunta o un titolo mancante;
+# - contenuto per sezione (identificatori di file/script, voci di elenco,
+#   linguaggio dei blocchi): è quello che coglie una sezione riscritta con una
+#   procedura vecchia, che i soli conteggi lasciano passare.
+#
+# Lo script del secondo controllo è `.github/readme-i18n-content.py`: la
+# configurazione (varianti, eccezioni) sta in cima al file e si può lanciare
+# anche a mano.
+name: README i18n check
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: readme-i18n-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: README multilingue (switcher + struttura + contenuto)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Verifica varianti e switcher
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          files = ["README.md", "README.it.md", "README.fr.md", "README.de.md", "README.es.md"]
+          missing = [f for f in files if not os.path.exists(f)]
+          if missing:
+              print("MANCANO:", missing)
+              sys.exit(1)
+
+          stats = {}
+          for f in files:
+              text = open(f, encoding="utf-8").read()
+              split_key = "# KlamAV-Py" if "# KlamAV-Py" in text else "# "
+              head = text.split(split_key, 1)[0] if split_key in text else text[:500]
+              links = set(re.findall(r'href="(README[^"]*\.md)"', head)) | set(re.findall(r'\]\((README[^)]*\.md)\)', head))
+              expected = {x for x in files if x != f}
+              if links != expected:
+                  print(f"{f}: switcher incoerente -> attesi {expected}, trovati {links}")
+                  sys.exit(1)
+              stats[f] = {
+                  "h2": len(re.findall(r'^## ', text, re.M)),
+                  "h3": len(re.findall(r'^### ', text, re.M)),
+                  "fences": len(re.findall(r'^```', text, re.M)),
+              }
+
+          base = stats["README.md"]
+          misaligned = [f for f in files[1:] if stats[f] != base]
+          for f in misaligned:
+              print(f"{f}: struttura non allineata -> {stats[f]} vs {base}")
+          if misaligned:
+              sys.exit(1)
+
+          print("OK: 5 varianti presenti, switcher coerenti, struttura allineata")
+          for f in files:
+              print(f"  {f}: {stats[f]}")
+          PY
+
+      - name: Contenuto delle varianti (identificatori, voci, blocchi)
+        run: python3 .github/readme-i18n-content.py
