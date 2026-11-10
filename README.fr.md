@@ -248,7 +248,7 @@ L'app reste active dans la system tray même en fermant la fenêtre (la X la cac
 
 Elle est aussi single-instance : si tu lances la GUI alors qu'une autre instance est déjà active, la seconde envoie son `--scan-target` (s'il est présent) à la première et se termine tout de suite, au lieu d'ouvrir une seconde fenêtre. C'est le mécanisme qui rend sensée l'intégration Dolphin : en cliquant « Scanner avec KlamAV-Py » sur plusieurs fichiers/dossiers, toutes les requêtes finissent dans la même fenêtre déjà ouverte.
 
-Le socket IPC est dans le répertoire runtime de l'utilisateur (`$XDG_RUNTIME_DIR/klamav-py-ipc`, typiquement `/run/user/<uid>/`), et non dans `/tmp`, et avant d'envoyer quoi que ce soit la seconde instance vérifie avec `SO_PEERCRED` que le processus à l'écoute appartient au même utilisateur. S'il n'existe pas de répertoire runtime sûr, ou si le serveur IPC ne parvient pas à démarrer, la GUI démarre quand même sans single-instance et le signale : un second démarrage ouvrirait une autre copie.
+Le socket IPC est dans le répertoire runtime de l'utilisateur (`$XDG_RUNTIME_DIR/klamav-py-ipc`, typiquement `/run/user/<uid>/`), et non dans `/tmp`, et avant d'envoyer quoi que ce soit la seconde instance vérifie avec `SO_PEERCRED` que le processus à l'écoute appartient au même utilisateur. S'il n'existe pas de répertoire runtime sûr (sans `XDG_RUNTIME_DIR` Qt se replierait sur un dossier au nom prévisible sous `/tmp`, qu'un autre utilisateur local pourrait créer en premier), ou si le serveur IPC ne parvient pas à démarrer, la GUI démarre quand même sans single-instance et le signale : un second démarrage ouvrirait une autre copie.
 
 En mettant à jour depuis la 0.1.6 ou antérieures, une ancienne instance encore ouverte utilise l'ancien socket et n'est pas reconnue par la nouvelle : ferme-la depuis le tray avant de redémarrer l'application.
 
@@ -296,6 +296,16 @@ Sur une numérisation home-wide d'une machine de développement réelle (330k+ f
 
 - **Erreurs en rafale d'un seul type (milliers)** — presque certainement clamd mort ou redémarré à mi-numérisation :
   `journalctl -u clamav-daemon.service` dans l'intervalle de la numérisation, et `dmesg | grep -i oom` pour le cas OOM. Le résumé par type de la CLI (ou le journal persistant de la planifiée) rend ce cas immédiatement distinguable du bruit physiologique.
+
+## Correctifs de sécurité après la 0.1.19
+
+Issus d'un test d'intrusion de la 0.1.19 ; ils sortiront avec la prochaine version.
+
+- **Mise en quarantaine d'un fichier choisi par clamd.** Le chemin d'un résultat `FOUND` était pris dans la réponse de clamd : un clamd joint en TCP en clair, ou compromis, pouvait désigner un autre fichier de l'utilisateur et le faire mettre en quarantaine, en laissant en place le fichier analysé. Le résultat se rapporte désormais toujours au fichier envoyé par ce processus.
+- **Les liens physiques échappaient à la quarantaine.** Déplacer l'un des noms d'un fichier ayant plusieurs liens physiques laissait le contenu accessible par les autres, alors que la quarantaine était signalée comme réussie. Ces fichiers sont maintenant refusés par la quarantaine et listés dans Signalements comme simple signalement.
+- **Noms de fichiers et de dossiers interprétés comme du balisage.** Étiquettes, boîtes de message et infobulles interprétaient les noms ressemblant à du HTML : un nom forgé pouvait réduire ou masquer le reste d'un avertissement de sécurité. Ils sont maintenant affichés en texte brut.
+- **Single-instance sans `XDG_RUNTIME_DIR`.** Qt se replie alors sur un dossier au nom prévisible sous `/tmp`, qu'un autre utilisateur local pouvait créer en premier pour désactiver le single-instance à chaque démarrage. Sans `XDG_RUNTIME_DIR`, la GUI démarre maintenant sans single-instance et le signale.
+- **Fichiers de données malformés.** Un index de quarantaine, un registre ou l'état du minuteur remplacés par un répertoire, imbriqués sur des dizaines de milliers de niveaux ou contenant des nombres hors limites levaient des erreurs inattendues (quarantaine inutilisable, un descripteur perdu à chaque tentative, contrôle de la base arrêté pour la session) au lieu d'être mis de côté comme corrompus. De même pour une date hors limites dans la réponse `VERSION` de clamd.
 
 ## Correctifs de sécurité dans la 0.1.8
 
@@ -457,3 +467,5 @@ maintainer avec `FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 FD2E`.
 ne reconnaît pas la signature d'une pièce jointe, ta copie de la clé est
 antérieure à la sous-clé de la CI : retélécharge-la depuis le keyserver ou le
 dépôt comme ci-dessus.
+
+Après la 0.1.19, le PKGBUILD d'AUR vérifie aussi, dans `prepare()`, que le tag a été signé par la sous-clé des tags : `makepkg` seul accepte n'importe quelle sous-clé de la clé primaire, y compris celle de la CI. Le PKGBUILD est publié sur AUR par le mainteneur depuis sa propre machine : aucune clé AUR n'est stockée dans la CI.

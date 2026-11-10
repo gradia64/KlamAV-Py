@@ -122,18 +122,32 @@ def _read_raw(path: Path) -> dict | None:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return None
+    # Il tipo prima di fdopen(), che su una directory solleva.
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_STATE_BYTES:
+        os.close(fd)
+        return None
     with os.fdopen(fd, "rb") as fh:
-        st = os.fstat(fh.fileno())
-        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_STATE_BYTES:
-            return None
         data = fh.read(MAX_STATE_BYTES + 1)
     if len(data) > MAX_STATE_BYTES:
         return None
     try:
         raw = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    # RecursionError: 64 KiB di «[» bastano, e il file va ignorato come
+    # promette read_state (penetration test della 0.1.19).
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     return raw if isinstance(raw, dict) else None
+
+
+#: Oltre questa data un istante non viene da un orologio vero: 1e300 è un
+#: numero finito, ma time.localtime() solleva OverflowError e l'avviso di
+#: scansione interrotta, formattato in uno slot Qt, spariva in silenzio.
+_LATEST_PLAUSIBLE = 253402300799  # 9999-12-31 23:59:59 UTC
+
+
+def _plausible_time(value) -> bool:
+    return is_time(value) and value <= _LATEST_PLAUSIBLE
 
 
 def _from_raw(raw: dict) -> TimerScanState | None:
@@ -142,9 +156,10 @@ def _from_raw(raw: dict) -> TimerScanState | None:
     started_at = raw.get("started_at")
     target = raw.get("target")
     finished_at = raw.get("finished_at")
-    if not is_time(started_at) or not is_text(target):
+    if not _plausible_time(started_at) or not is_text(target):
         return None
-    if finished_at is not None and (not is_time(finished_at) or finished_at < started_at):
+    if finished_at is not None and (
+            not _plausible_time(finished_at) or finished_at < started_at):
         return None
     return TimerScanState(started_at, target, finished_at)
 

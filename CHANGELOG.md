@@ -5,6 +5,54 @@ distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
 sono in `docs/CHANGELOG-archive.md`.
 
 ---
+## Non rilasciato
+
+### Sicurezza
+Dal penetration test della 0.1.19.
+- **La quarantena sposta sempre il file inviato a clamd, mai quello scritto
+  nella risposta.** Il percorso di un risultato `FOUND` veniva preso dalla
+  riga di clamd: un clamd raggiunto in TCP in chiaro, o uno compromesso,
+  poteva indicare un altro file dell'utente e farlo spostare in
+  quarantena, lasciando al suo posto quello scansionato.
+- **I file con più collegamenti fisici non vanno in quarantena.**
+  Spostarne un nome lasciava il contenuto raggiungibile dagli altri, mentre
+  la quarantena risultava riuscita. Ora la quarantena li rifiuta e la
+  scansione li mette in Segnalazioni come solo segnalazione.
+- **Nomi di file e cartelle sempre come testo.** Etichette, finestre di
+  messaggio e tooltip interpretavano come HTML un nome che gli somigliava:
+  poteva rimpicciolire o nascondere il resto di un avviso («Quarantena
+  fallita», «le sottocartelle oltre questo limite NON sono protette»).
+- **Niente single-instance senza `XDG_RUNTIME_DIR`.** Qt ripiegava su
+  `/tmp/runtime-<utente>`, che un altro utente locale poteva creare per
+  primo e tenere così spento il single-instance a ogni avvio. Ora la GUI
+  parte senza single-instance e lo segnala, come già quando la runtime
+  directory non è sicura.
+- **File di dati malformati messi da parte invece di bloccare.** Indice
+  della quarantena, registri e stato del timer sostituiti da una
+  directory, annidati per decine di migliaia di livelli o con numeri fuori
+  misura sollevavano errori inattesi: quarantena inservibile, un
+  descrittore perso a ogni tentativo, il controllo del database fermo per
+  tutta la sessione. Lo stesso per una data fuori misura nella risposta
+  `VERSION` di clamd.
+
+### Corretto
+- Senza il manager systemd utente (sessione SSH) il controllo dei drop-in
+  estranei dell'orario del timer falliva con un `AttributeError`.
+
+### Rilascio
+- **AUR non si pubblica più dalla CI.** La chiave SSH di AUR vale per tutto
+  l'account, quindi non sta più nei secret: il maintainer pubblica dalla
+  sua macchina con `tools/aur-release.sh`, che verifica il tag, controlla
+  che PKGBUILD e `klamav-py.install` costruiti dalla CI siano quelli del
+  tag e che `.SRCINFO` li descriva.
+- **Il PKGBUILD accetta solo tag firmati dalla sottochiave dei tag**
+  (`prepare()`): `makepkg` da solo accetta qualunque sottochiave della
+  primaria, compresa quella della CI che firma gli allegati.
+- Test: regressioni per ogni segnalazione del penetration test
+  (`tests/test_pentest_0_1_19.py`), `tools/aur-release.sh` e `prepare()`
+  con tag firmati da ciascuna sottochiave.
+
+---
 ## 0.1.19 — 2026-10-30
 
 ### Aggiunto

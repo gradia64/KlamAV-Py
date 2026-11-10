@@ -26,7 +26,12 @@ Due difese indipendenti:
    restituisce una stringa vuota: comportamento verificato con due utenti
    reali, directory pre-creata da un altro utente, symlink e
    XDG_RUNTIME_DIR puntata a una directory altrui. Nessun altro utente
-   (root escluso) può creare o occupare file lì dentro.
+   (root escluso) può creare o occupare file lì dentro. Senza
+   XDG_RUNTIME_DIR, però, Qt ripiega su <tmp>/runtime-<utente>: un nome
+   prevedibile in una directory condivisa, che un altro utente può
+   occupare per primo e tenere così spento il single-instance a ogni avvio
+   (penetration test della 0.1.19). Si usa quindi la runtime location solo
+   se è proprio $XDG_RUNTIME_DIR; altrimenti niente IPC, con l'avviso.
 
 2. Il client verifica con SO_PEERCRED che il processo in ascolto sia
    dello stesso utente PRIMA di scrivere qualunque cosa. Con la difesa 1
@@ -89,8 +94,11 @@ def ipc_socket_path() -> str | None:
     modulo). None significa "niente single-instance": il chiamante deve
     proseguire senza IPC e avvisare l'utente, non ripiegare su /tmp.
     """
+    xdg = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not xdg or not os.path.isabs(xdg):
+        return None
     base = QStandardPaths.writableLocation(QStandardPaths.RuntimeLocation)
-    if not base:
+    if not base or os.path.realpath(base) != os.path.realpath(xdg):
         return None
     return os.path.join(base, IPC_SOCKET_NAME)
 

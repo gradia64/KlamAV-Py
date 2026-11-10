@@ -17,9 +17,13 @@ def probe_db_info(endpoint: ClamdEndpoint, timeout: float = PROBE_TIMEOUT) -> Db
     """VERSION su clamd; None per qualunque errore di connessione o protocollo."""
     try:
         reply = endpoint.new_client(timeout=timeout).version()
-    except (OSError, ClamdError, ValueError):
+        return parse_version_reply(reply)
+    # Qualunque errore è «stato sconosciuto», come promette il docstring:
+    # un'eccezione inattesa usciva da run() senza emettere result_ready, il
+    # worker non veniva mai rilasciato e ogni controllo successivo della
+    # sessione era saltato (penetration test della 0.1.19).
+    except Exception:  # noqa: BLE001
         return None
-    return parse_version_reply(reply)
 
 
 class DbInfoWorker(QThread):

@@ -157,19 +157,30 @@ def _parse_index_file(index_path: Path) -> List[QuarantineEntry]:
         raise
     except OSError as exc:
         raise _CorruptIndex(f"indice non apribile: {exc}") from exc
-    with os.fdopen(fd, "rb") as fh:
-        st = os.fstat(fh.fileno())
+    # Il tipo prima di fdopen(): su una directory fdopen() solleva
+    # IsADirectoryError, che non è _CorruptIndex, quindi la messa da parte
+    # non scattava, la quarantena restava inservibile e il descrittore
+    # restava aperto a ogni tentativo (penetration test della 0.1.19).
+    try:
+        st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise _CorruptIndex("l'indice non è un file regolare")
         if st.st_size > MAX_INDEX_BYTES:
             raise _CorruptIndex(f"indice di dimensione anomala ({st.st_size} byte)")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as fh:
         data = fh.read(MAX_INDEX_BYTES + 1)
     if len(data) > MAX_INDEX_BYTES:
         raise _CorruptIndex("indice cresciuto durante la lettura")
 
     try:
         raw = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    # RecursionError: un documento annidato in profondità, ben sotto
+    # MAX_INDEX_BYTES (bastano 64 KiB di «[»), è contenuto non plausibile
+    # come un JSON malformato.
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise _CorruptIndex(f"JSON non valido: {exc}") from exc
     if not isinstance(raw, list):
         raise _CorruptIndex("la radice dell'indice non è una lista")
@@ -473,6 +484,9 @@ class Quarantine:
         da parte invece di usarne i campi (vedi docstring del modulo)."""
         try:
             record = json.loads(raw.decode("utf-8"))
+        except RecursionError as exc:
+            # Completo ma non plausibile: va messo da parte, non ignorato.
+            raise _InvalidIntent("JSON annidato oltre misura") from exc
         except (UnicodeDecodeError, ValueError):
             # Intento scritto a metà: il crash è avvenuto prima del fsync,
             # quindi prima di toccare il file.
@@ -672,6 +686,18 @@ class Quarantine:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
                 raise QuarantineError(f"{path} non è un file regolare")
+
+            # Un file con più nomi (hardlink) non si neutralizza spostandone
+            # uno: il contenuto resta leggibile da tutti gli altri, e la
+            # quarantena direbbe il contrario (penetration test della
+            # 0.1.19). Gli altri nomi non si conoscono, solo quanti sono:
+            # si rifiuta senza toccare nulla, come per un symlink.
+            if st.st_nlink > 1:
+                raise QuarantineError(
+                    f"{path} ha altri {st.st_nlink - 1} nomi sullo stesso contenuto "
+                    "(collegamenti fisici): spostarne uno lo lascerebbe agli altri, "
+                    "rifiuto di quarantenarlo"
+                )
 
             # Rifiuto esplicito di ri-quarantenare un file già gestito (una
             # scansione che copre la quarantena lo ri-rileverebbe a ogni

@@ -248,7 +248,7 @@ The app stays active in the system tray even when closing the window (the X hide
 
 It is also single-instance: if you launch the GUI while another instance is already active, the second sends its own `--scan-target` (if present) to the first and exits immediately, instead of opening a second window. This is the mechanism that makes the Dolphin integration sensible: clicking "Scan with KlamAV-Py" on several files/folders, all requests end up in the already-open window.
 
-The IPC socket is in the user's runtime directory (`$XDG_RUNTIME_DIR/klamav-py-ipc`, typically `/run/user/<uid>/`), not in `/tmp`, and before sending any data the second instance verifies with `SO_PEERCRED` that the listening process belongs to the same user. If no safe runtime directory exists, or the IPC server fails to start, the GUI starts anyway without single-instance and reports it: a second launch would open another copy.
+The IPC socket is in the user's runtime directory (`$XDG_RUNTIME_DIR/klamav-py-ipc`, typically `/run/user/<uid>/`), not in `/tmp`, and before sending any data the second instance verifies with `SO_PEERCRED` that the listening process belongs to the same user. If no safe runtime directory exists (without `XDG_RUNTIME_DIR` Qt would fall back to a predictable folder under `/tmp`, which another local user could create first), or the IPC server fails to start, the GUI starts anyway without single-instance and reports it: a second launch would open another copy.
 
 Upgrading from 0.1.6 or earlier, an old instance still open uses the old socket and is not recognized by the new one: close it from the tray before restarting the application.
 
@@ -296,6 +296,16 @@ On a home-wide scan of a real development machine (330k+ files) the residual err
 
 - **Bursts of errors of a single type (thousands)** — almost certainly clamd dead or restarted mid-scan:
   `journalctl -u clamav-daemon.service` over the scan interval, and `dmesg | grep -i oom` for the OOM case. The CLI's per-type summary (or the persistent log of the scheduled scan) makes this case immediately distinguishable from physiological noise.
+
+## Security fixes after 0.1.19
+
+From a penetration test of 0.1.19; they will ship in the next release.
+
+- **Quarantine of a file chosen by clamd.** The path of a `FOUND` result was taken from clamd's reply: a clamd reached over plain TCP, or a compromised one, could name another file of the user and have it moved to quarantine, leaving the scanned one in place. The result now always refers to the file this process sent.
+- **Hardlinks escaped quarantine.** Moving one name of a file with several hardlinks left the content reachable through the others, while the quarantine reported success. Such files are now refused by the quarantine and listed in Reports as report-only.
+- **File and folder names rendered as markup.** Labels, message boxes and tooltips interpreted names that looked like HTML: a crafted file name could shrink or hide the rest of a security warning. They are now shown as plain text.
+- **Single-instance without `XDG_RUNTIME_DIR`.** Qt then falls back to a predictable folder under `/tmp`, which another local user could create first to keep single-instance off at every launch. Without `XDG_RUNTIME_DIR` the GUI now starts without single-instance and says so.
+- **Malformed data files.** A quarantine index, registry or timer-state file replaced by a directory, nested tens of thousands of levels deep, or holding out-of-range numbers raised unexpected errors (quarantine unusable, a file descriptor leaked at every attempt, the database check stopped for the session) instead of being set aside as corrupt. The same held for an out-of-range date in clamd's `VERSION` reply.
 
 ## Security fixes in 0.1.8
 
@@ -453,3 +463,5 @@ gpg --verify klamav-py_0.1.15-1_all.deb.sig klamav-py_0.1.15-1_all.deb
 ```
 
 The attachments are signed by CI with a dedicated subkey, `F9F4 2835 8660 2F8D D724  C467 0888 61B0 4D8D 328D`; tags are signed by the maintainer with `FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 FD2E`. `gpg` attributes both to the primary key shown above. If `gpg` does not recognize an attachment's signature, your copy of the key predates the CI subkey: re-download it from the keyserver or the repository as above.
+
+After 0.1.19 the AUR PKGBUILD also checks, in `prepare()`, that the tag was signed by the tags subkey: `makepkg` alone accepts any subkey of the primary key, the CI one included. The PKGBUILD is published to AUR by the maintainer from their own machine; no AUR key is stored in CI.

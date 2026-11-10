@@ -23,6 +23,7 @@ regola riguarda solo la decisione automatica.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
@@ -41,6 +42,8 @@ DEFAULT_REPORT_ONLY_DIRS: tuple[str, ...] = (
 
 REASON_HEURISTIC = "firma euristica: solo segnalazione"
 REASON_MAIL_STORE = "archivio di posta o dati di un'applicazione: solo segnalazione"
+REASON_HARDLINKS = ("il file ha altri nomi (collegamenti fisici): spostarne uno "
+                    "lascerebbe il contenuto agli altri, solo segnalazione")
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,14 @@ class QuarantinePolicy:
         return list(self._dirs)
 
     def decide(self, path: Path, signature: Optional[str]) -> QuarantineDecision:
+        # Prima di enabled: non è una preferenza, è una quarantena che non
+        # può riuscire (vedi Quarantine.quarantine_file, che la rifiuta).
+        # Un file sparito nel frattempo segue la decisione ordinaria.
+        try:
+            if os.lstat(path).st_nlink > 1:
+                return QuarantineDecision(False, REASON_HARDLINKS)
+        except OSError:
+            pass
         if not self.enabled:
             return QuarantineDecision(True)
         if signature and signature.startswith(self._prefixes):

@@ -82,18 +82,24 @@ class JsonRegistry(Generic[T]):
             raise
         except OSError as exc:
             raise CorruptRegistry(f"registro non apribile: {exc}") from exc
-        with os.fdopen(fd, "rb") as fh:
-            st = os.fstat(fh.fileno())
+        # Il tipo prima di fdopen(): vedi quarantine._parse_index_file.
+        try:
+            st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
                 raise CorruptRegistry("il registro non è un file regolare")
             if st.st_size > self.max_bytes:
                 raise CorruptRegistry(f"registro di dimensione anomala ({st.st_size} byte)")
+        except BaseException:
+            os.close(fd)
+            raise
+        with os.fdopen(fd, "rb") as fh:
             data = fh.read(self.max_bytes + 1)
         if len(data) > self.max_bytes:
             raise CorruptRegistry("registro cresciuto durante la lettura")
         try:
             raw = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as exc:
+        # RecursionError: JSON annidato in profondità, vedi quarantine.py.
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             raise CorruptRegistry(f"JSON non valido: {exc}") from exc
         if not isinstance(raw, dict) or not isinstance(raw.get("entries"), list):
             raise CorruptRegistry("struttura non valida")

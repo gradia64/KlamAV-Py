@@ -101,6 +101,7 @@ from .off_thread import run_off_gui_thread
 from .freshclam_restart_worker import FreshclamRestartWorker
 from .db_info_worker import DbInfoWorker, probe_db_info
 from .ping_worker import PingWorker
+from .plain_text import PlainDialogs, plain_labels, plain_tooltip
 from .single_instance import IPC_MAX_PAYLOAD_BYTES, IPC_SEPARATOR
 from .update_check_worker import UpdateCheckWorker, UpdateInfo
 from .quarantine_action import ActionResult, QuarantineActionWorker, QuarantineRequest
@@ -1002,7 +1003,7 @@ class HistoryManager:
             pass
 
 
-class ScanPage(QWidget):
+class ScanPage(PlainDialogs, QWidget):
     def __init__(self, endpoint: ClamdEndpoint, quarantine_dir: Path, history: HistoryManager, parent=None) -> None:
         super().__init__(parent)
         self.endpoint = endpoint
@@ -1304,7 +1305,7 @@ class ScanPage(QWidget):
         elided = metrics.elidedText(text, Qt.ElideMiddle, self._status_max_width)
         self.status_label.setText(elided)
         if elided != text:
-            self.status_label.setToolTip(text)
+            self.status_label.setToolTip(plain_tooltip(text))
         else:
             self.status_label.setToolTip("")
 
@@ -1716,7 +1717,7 @@ def quarantine_unavailable_message(status: QuarantineStatus | None) -> tuple[str
     )
 
 
-class QuarantinePage(QWidget):
+class QuarantinePage(PlainDialogs, QWidget):
     """
     Elenco della quarantena. Creazione dell'oggetto Quarantine (con il
     recupero delle operazioni interrotte), lettura dell'indice e
@@ -1982,7 +1983,7 @@ class QuarantinePage(QWidget):
             QMessageBox.information(self, "Ripristinato", f"File ripristinato in {result.target}")
 
 
-class ReportsPage(QWidget):
+class ReportsPage(PlainDialogs, QWidget):
     """
     Segnalazioni non spostate (firme euristiche, archivi di posta: vedi
     quarantine_policy) e prese visione (acknowledged.py).
@@ -2207,7 +2208,7 @@ class ReportsPage(QWidget):
                 item.setToolTip("Il file non si è potuto rileggere dopo il rilevamento: "
                                 "nessuna azione possibile da qui.")
             else:
-                item.setToolTip(f"{report.path}\n{report.reason}")
+                item.setToolTip(plain_tooltip(f"{report.path}\n{report.reason}"))
             self.pending_table.setItem(row, 0, item)
             self.pending_table.setItem(row, 1, QTableWidgetItem(report.signature))
             self.pending_table.setItem(row, 2, QTableWidgetItem(when))
@@ -2314,7 +2315,7 @@ class ReportsPage(QWidget):
             for col, value in enumerate(values):
                 self.ack_table.setItem(row, col, QTableWidgetItem(value))
             self.ack_table.item(row, 0).setToolTip(e.sha256)
-            self.ack_table.item(row, 2).setToolTip(e.first_path)
+            self.ack_table.item(row, 2).setToolTip(plain_tooltip(e.first_path))
 
     def _revoke_selected(self) -> None:
         rows = sorted({i.row() for i in self.ack_table.selectedIndexes()})
@@ -2329,7 +2330,7 @@ class ReportsPage(QWidget):
         self.refresh_acknowledged()
 
 
-class UpdatePage(QWidget):
+class UpdatePage(PlainDialogs, QWidget):
     """
     Aggiornamento delle firme delegato all'unità systemd pacchettizzata di
     freshclam (vedi freshclam_service): nessuno script passa per pkexec e
@@ -2475,7 +2476,7 @@ class UpdatePage(QWidget):
         self.refresh_availability()
 
 
-class RealTimePage(QWidget):
+class RealTimePage(PlainDialogs, QWidget):
     def set_clamd_down(self, down: bool, pending: int = 0) -> None:
         if not down:
             self.clamd_banner.setVisible(False)
@@ -2575,7 +2576,7 @@ class RealTimePage(QWidget):
             self.log_list.takeItem(self.log_list.count() - 1)
 
 
-class HistoryPage(QWidget):
+class HistoryPage(PlainDialogs, QWidget):
     def __init__(self, history: HistoryManager, parent=None) -> None:
         super().__init__(parent)
         self.history = history
@@ -2660,17 +2661,17 @@ class HistoryPage(QWidget):
             # anche nel tooltip del tipo, perché la colonna è l'ultima.
             reason = HistoryManager.entry_reason(entry)
             reason_item = QTableWidgetItem(reason)
-            reason_item.setToolTip(reason)
+            reason_item.setToolTip(plain_tooltip(reason))
             self.table.setItem(row, 10, reason_item)
             if reason:
-                self.table.item(row, 1).setToolTip(reason)
+                self.table.item(row, 1).setToolTip(plain_tooltip(reason))
 
             # Il log dettagliato (se esiste) è raggiungibile dal tooltip
             # sulla riga: senza questo, il riferimento nel JSON sarebbe
             # conoscibile solo a mano.
             log_file = entry.get("log_file")
             if log_file:
-                self.table.item(row, 0).setToolTip(f"Log dettagliato: {log_file}")
+                self.table.item(row, 0).setToolTip(plain_tooltip(f"Log dettagliato: {log_file}"))
 
     def _clear_history(self) -> None:
         confirm = QMessageBox.question(self, "Conferma", "Cancellare tutta la cronologia delle scansioni?")
@@ -2689,7 +2690,7 @@ class _ScheduleForm:
     timer_time: str  # "HH:MM" del timer di sistema, scritto al clic come gli altri
 
 
-class SchedulerPage(QWidget):
+class SchedulerPage(PlainDialogs, QWidget):
     schedule_saved = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -3017,10 +3018,10 @@ class SchedulerPage(QWidget):
         una voce valida con la cartella di prima può non esserlo più."""
         if decision.error:
             item.setIcon(self._excl_icons["error"])
-            item.setToolTip(decision.error)
+            item.setToolTip(plain_tooltip(decision.error))
         elif decision.warnings:
             item.setIcon(self._excl_icons["warning"])
-            item.setToolTip("\n".join(decision.warnings))
+            item.setToolTip(plain_tooltip("\n".join(decision.warnings)))
         else:
             item.setIcon(self._excl_icons["ok"])
             item.setToolTip("")
@@ -3355,7 +3356,7 @@ class SchedulerPage(QWidget):
             )
 
 
-class SettingsPage(QWidget):
+class SettingsPage(PlainDialogs, QWidget):
     settings_saved = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -4026,7 +4027,7 @@ Exec={exec_cmd} --scan-target %F
             QMessageBox.critical(self, "Errore Rimozione", f"Si è verificato un errore:\n{str(e)}")
 
 
-class MainWindow(QMainWindow):
+class MainWindow(PlainDialogs, QMainWindow):
     def __init__(self, endpoint: ClamdEndpoint | None = None, quarantine_dir: Path = DEFAULT_QUARANTINE_DIR, scan_target: Path = None) -> None:
         super().__init__()
 
@@ -4141,6 +4142,11 @@ class MainWindow(QMainWindow):
         splitter.setSizes([220, 680])
 
         self.setCentralWidget(splitter)
+        # Ogni etichetta delle pagine in testo semplice: lo stato della
+        # scansione e del Real-Time mostrano nomi di file e cartelle, che
+        # in AutoText diventavano markup (vedi gui/plain_text.py). Chi vuole
+        # il rich text lo imposta esplicitamente (update_status_label).
+        plain_labels(self)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Non più un timer a intervallo: un controllo ogni minuto della

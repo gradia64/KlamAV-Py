@@ -1,6 +1,9 @@
 # Rilascio al push di un tag v*: verifica del tag, test, .deb costruito su
 # Debian sid, pacchetto Arch dal tag firmato, firma GPG degli artefatti,
-# release GitHub con le note da CHANGELOG.md e PKGBUILD pubblicato su AUR.
+# release GitHub con le note da CHANGELOG.md. Il PKGBUILD costruito qui
+# (artefatto «aur») lo pubblica su AUR il maintainer, dalla sua macchina,
+# con tools/aur-release.sh: la chiave SSH di AUR vale per tutto l'account e
+# non sta nella CI.
 #
 # Due sottochiavi di firma con ruoli separati (tools/release-keys.sh,
 # modello di fiducia in docs/RILASCIO.md): il tag lo firma il maintainer
@@ -11,7 +14,6 @@
 # Secret, solo nell'environment «release» (limitato ai tag v*, con
 # approvazione del maintainer): nessun altro job o workflow li vede.
 #   GPG_PRIVATE_KEY, GPG_PASSPHRASE   sottochiave della CI (obbligatori)
-#   AUR_SSH_PRIVATE_KEY               push su AUR (se manca, passo saltato)
 #
 # Le action sono fissate per SHA (commento = versione).
 name: Release
@@ -116,7 +118,7 @@ jobs:
     needs: [deb, arch]
     runs-on: ubuntu-26.04
     # Unico job con i secret, e solo dopo l'approvazione del maintainer:
-    # l'ultimo punto di controllo prima della release e di AUR.
+    # l'ultimo punto di controllo prima della release.
     environment: release
     permissions:
       contents: write   # creare la release e caricare i file
@@ -166,13 +168,3 @@ jobs:
             gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
               --title "KlamAV-Py $version" --notes-file "$RUNNER_TEMP/note.md"
           fi
-
-      - name: Pubblica su AUR
-        env:
-          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-        run: |
-          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
-            echo "::notice::secret AUR_SSH_PRIVATE_KEY assente: pubblicazione su AUR saltata"
-            exit 0
-          fi
-          tools/publish-aur.sh

@@ -66,7 +66,9 @@ def parse_version_reply(reply: str) -> DbInfo | None:
     try:
         hour, minute, second = (int(x) for x in hms.split(":"))
         built = datetime(int(year), month, int(day), hour, minute, second)
-    except ValueError:
+    # OverflowError: un anno o un giorno di venti cifre non entra in un long
+    # C, e non è ValueError (penetration test della 0.1.19).
+    except (ValueError, OverflowError):
         return None
     return DbInfo(engine.removeprefix("ClamAV ").strip(), version, built)
 

@@ -2,17 +2,19 @@
 # Pubblica PKGBUILD, klamav-py.install e .SRCINFO (da build/aur/, vedi
 # tools/build-arch.sh) nel repository AUR del pacchetto «klamav-py».
 #
-# Chiave SSH dell'account AUR:
-#   AUR_SSH_PRIVATE_KEY   chiave privata (secret della CI), scritta in un file
-#                         temporaneo 0600 e cancellata alla fine
-#   altrimenti            la configurazione SSH dell'utente (uso locale)
+# Si lancia dalla macchina del maintainer, attraverso tools/aur-release.sh
+# che prima verifica tag, PKGBUILD e .SRCINFO: la chiave SSH è quella
+# dell'utente (~/.ssh/config, Host aur.archlinux.org). Fino alla 0.1.19 la
+# usava la CI da un secret, ma una chiave AUR vale per tutti i pacchetti
+# dell'account: ora non lascia più la macchina del maintainer.
 #
 # La chiave host di aur.archlinux.org è fissata qui sotto: niente fiducia
 # al primo contatto. Impronta verificata il 2026-10-02 contro quella
 # pubblicata su https://aur.archlinux.org (ED25519
 # SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4).
 #
-# Uso: tools/publish-aur.sh [cartella]   (default build/aur)
+# Uso: tools/publish-aur.sh [cartella]   (default build/aur; di solito la
+# chiama tools/aur-release.sh)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -34,10 +36,6 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 printf '%s\n' "$AUR_HOSTKEY" > "$TMP/known_hosts"
 SSH_CMD="ssh -o UserKnownHostsFile=$TMP/known_hosts -o StrictHostKeyChecking=yes"
-if [ -n "${AUR_SSH_PRIVATE_KEY:-}" ]; then
-    (umask 077 && printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$TMP/id_aur")
-    SSH_CMD="$SSH_CMD -i $TMP/id_aur -o IdentitiesOnly=yes"
-fi
 export GIT_SSH_COMMAND="$SSH_CMD"
 
 git clone --quiet "$AUR_REMOTE" "$TMP/repo"

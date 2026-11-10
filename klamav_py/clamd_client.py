@@ -1059,16 +1059,20 @@ class ClamdClient:
         #   "/percorso: <messaggio errore> ERROR"
         #   "stream: OK" / "stream: <firma> FOUND"  (con INSTREAM: clamd non
         #   conosce il path reale, letteralmente risponde con la parola
-        #   "stream" — qui usiamo sempre fallback_path in quel caso, dato
-        #   che noi il path reale lo conosciamo sempre)
+        #   "stream")
+        # Il percorso del risultato è SEMPRE fallback_path, il file che
+        # questo processo ha inviato: quello scritto nella risposta lo
+        # sceglie il peer. Un clamd raggiunto in TCP (in chiaro), o uno
+        # compromesso, poteva rispondere «/altro/file: X FOUND» e far
+        # spostare in quarantena un file qualsiasi dell'utente, lasciando
+        # dov'era quello scansionato (penetration test della 0.1.19).
         if raw.endswith("OK"):
-            path = raw[: -len(" OK")].rstrip(": ")
-            return ScanResult(path=path if path and path != "stream" else fallback_path, status="OK")
+            return ScanResult(path=fallback_path, status="OK")
         if raw.endswith("FOUND"):
             body = raw[: -len(" FOUND")]
-            path, _, signature = body.rpartition(": ")
+            _path, _, signature = body.rpartition(": ")
             return ScanResult(
-                path=path if path and path != "stream" else fallback_path,
+                path=fallback_path,
                 status="FOUND",
                 signature=signature.strip(),
             )

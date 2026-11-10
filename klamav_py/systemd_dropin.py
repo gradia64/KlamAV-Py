@@ -709,7 +709,9 @@ def foreign_timer_overrides(
     if paths is None:
         paths = dropin_paths(TIMER_NAME)
     if paths is None:
-        paths = _scan_dropin_dirs(TIMER_NAME)
+        # Per nome: in posizione TIMER_NAME finiva in dirs, e la stringa
+        # veniva percorsa carattere per carattere (AttributeError).
+        paths = _scan_dropin_dirs(unit=TIMER_NAME)
 
     ours_active = is_ours(ours)
     found = []

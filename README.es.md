@@ -248,7 +248,7 @@ La app permanece activa en la bandeja del sistema incluso cerrando la ventana (l
 
 Es además single-instance: si lanzas la GUI mientras otra instancia ya está activa, la segunda envía su propio `--scan-target` (si lo tiene) a la primera y termina enseguida, en lugar de abrir una segunda ventana. Es el mecanismo que hace sensata la integración con Dolphin: al hacer clic en "Escanea con KlamAV-Py" sobre varios archivos/carpetas, todas las peticiones acaban en la misma ventana ya abierta.
 
-El socket IPC está en el directorio runtime del usuario (`$XDG_RUNTIME_DIR/klamav-py-ipc`, típicamente `/run/user/<uid>/`), no en `/tmp`, y antes de enviar cualquier dato la segunda instancia verifica con `SO_PEERCRED` que el proceso en escucha pertenezca al mismo usuario. Si no existe un directorio runtime seguro, o el servidor IPC no logra arrancar, la GUI arranca aun así sin single-instance y lo señala: un segundo arranque abriría otra copia.
+El socket IPC está en el directorio runtime del usuario (`$XDG_RUNTIME_DIR/klamav-py-ipc`, típicamente `/run/user/<uid>/`), no en `/tmp`, y antes de enviar cualquier dato la segunda instancia verifica con `SO_PEERCRED` que el proceso en escucha pertenezca al mismo usuario. Si no existe un directorio runtime seguro (sin `XDG_RUNTIME_DIR` Qt recurriría a una carpeta de nombre previsible bajo `/tmp`, que otro usuario local podría crear antes), o el servidor IPC no logra arrancar, la GUI arranca aun así sin single-instance y lo señala: un segundo arranque abriría otra copia.
 
 Actualizando desde la 0.1.6 o anteriores, una instancia vieja aún abierta usa el viejo socket y no es reconocida por la nueva: ciérrala desde la bandeja antes de reiniciar la aplicación.
 
@@ -296,6 +296,16 @@ En un escaneo de toda la home de una máquina de desarrollo real (330k+ archivos
 
 - **Errores en avalancha de un solo tipo (miles)** — casi con seguridad clamd muerto o reiniciado a mitad del escaneo:
   `journalctl -u clamav-daemon.service` en el intervalo del escaneo, y `dmesg | grep -i oom` para el caso OOM. El resumen por tipo de la CLI (o el log persistente del programado) hace este caso inmediatamente distinguible del ruido fisiológico.
+
+## Fix de seguridad después de la 0.1.19
+
+De una prueba de penetración de la 0.1.19; saldrán con la próxima versión.
+
+- **Cuarentena de un archivo elegido por clamd.** La ruta de un resultado `FOUND` se tomaba de la respuesta de clamd: un clamd alcanzado por TCP sin cifrar, o uno comprometido, podía indicar otro archivo del usuario y hacerlo mover a cuarentena, dejando en su sitio el archivo escaneado. Ahora el resultado se refiere siempre al archivo enviado por este proceso.
+- **Los enlaces duros escapaban a la cuarentena.** Mover uno de los nombres de un archivo con varios enlaces duros dejaba el contenido accesible desde los demás, mientras la cuarentena constaba como realizada. Estos archivos ahora la cuarentena los rechaza y aparecen en Señalizaciones como solo señalización.
+- **Nombres de archivos y carpetas interpretados como marcado.** Etiquetas, ventanas de mensaje y tooltips interpretaban los nombres que parecían HTML: un nombre preparado podía reducir u ocultar el resto de un aviso de seguridad. Ahora se muestran como texto plano.
+- **Single-instance sin `XDG_RUNTIME_DIR`.** Qt recurre entonces a una carpeta de nombre previsible bajo `/tmp`, que otro usuario local podía crear antes para mantener apagado el single-instance en cada arranque. Sin `XDG_RUNTIME_DIR` la GUI arranca ahora sin single-instance y lo señala.
+- **Archivos de datos malformados.** Un índice de la cuarentena, un registro o el estado del temporizador sustituidos por un directorio, anidados decenas de miles de niveles o con números fuera de rango lanzaban errores inesperados (cuarentena inutilizable, un descriptor perdido en cada intento, la comprobación de la base detenida toda la sesión) en lugar de apartarse como corruptos. Lo mismo para una fecha fuera de rango en la respuesta `VERSION` de clamd.
 
 ## Fix de seguridad en la 0.1.8
 
@@ -464,3 +474,6 @@ maintainer con `FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 FD2E`.
 no reconoce la firma de un adjunto, tu copia de la clave es
 anterior a la subclave de la CI: vuelve a descargarla del keyserver o del
 repositorio como arriba.
+
+
+Después de la 0.1.19 el PKGBUILD de AUR comprueba además, en `prepare()`, que el tag esté firmado por la subclave de los tags: `makepkg` por sí solo acepta cualquier subclave de la clave primaria, incluida la de la CI. El PKGBUILD lo publica en AUR el mantenedor desde su propia máquina: ninguna clave de AUR está en la CI.

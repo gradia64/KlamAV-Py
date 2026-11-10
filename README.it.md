@@ -248,7 +248,7 @@ L'app resta attiva nella system tray anche chiudendo la finestra (la X la nascon
 
 È inoltre single-instance: se lanci la GUI mentre un'altra istanza è già attiva, la seconda invia il proprio `--scan-target` (se presente) alla prima e termina subito, invece di aprire una seconda finestra. È il meccanismo che rende sensata l'integrazione Dolphin: cliccando "Scansiona con KlamAV-Py" su più file/cartelle, tutte le richieste finiscono nella stessa finestra già aperta.
 
-Il socket IPC sta nella runtime directory dell'utente (`$XDG_RUNTIME_DIR/klamav-py-ipc`, tipicamente `/run/user/<uid>/`), non in `/tmp`, e prima di inviare qualunque dato la seconda istanza verifica con `SO_PEERCRED` che il processo in ascolto appartenga allo stesso utente. Se non esiste una runtime directory sicura, o il server IPC non riesce a partire, la GUI parte comunque senza single-instance e lo segnala: un secondo avvio aprirebbe un'altra copia.
+Il socket IPC sta nella runtime directory dell'utente (`$XDG_RUNTIME_DIR/klamav-py-ipc`, tipicamente `/run/user/<uid>/`), non in `/tmp`, e prima di inviare qualunque dato la seconda istanza verifica con `SO_PEERCRED` che il processo in ascolto appartenga allo stesso utente. Se non esiste una runtime directory sicura (senza `XDG_RUNTIME_DIR` Qt ripiegherebbe su una cartella dal nome prevedibile sotto `/tmp`, che un altro utente locale potrebbe creare per primo), o il server IPC non riesce a partire, la GUI parte comunque senza single-instance e lo segnala: un secondo avvio aprirebbe un'altra copia.
 
 Aggiornando dalla 0.1.6 o precedenti, un'istanza vecchia ancora aperta usa il vecchio socket e non viene riconosciuta dalla nuova: chiudila dalla tray prima di riavviare l'applicazione.
 
@@ -296,6 +296,16 @@ Su una scansione home-wide di una macchina di sviluppo reale (330k+ file) gli er
 
 - **Errori a raffica di un solo tipo (migliaia)** — quasi certamente clamd morto o riavviato a metà scansione:
   `journalctl -u clamav-daemon.service` nell'intervallo della scansione, e `dmesg | grep -i oom` per il caso OOM. Il riepilogo per tipo della CLI (o il log persistente della programmata) rende questo caso immediatamente distinguibile dal rumore fisiologico.
+
+## Fix di sicurezza dopo la 0.1.19
+
+Da un penetration test della 0.1.19; usciranno con la prossima versione.
+
+- **Quarantena di un file scelto da clamd.** Il percorso di un risultato `FOUND` veniva preso dalla risposta di clamd: un clamd raggiunto in TCP in chiaro, o uno compromesso, poteva indicare un altro file dell'utente e farlo spostare in quarantena, lasciando al suo posto quello scansionato. Ora il risultato si riferisce sempre al file inviato da questo processo.
+- **Gli hardlink sfuggivano alla quarantena.** Spostare uno dei nomi di un file con più collegamenti fisici lasciava il contenuto raggiungibile dagli altri, mentre la quarantena risultava riuscita. Questi file ora vengono rifiutati dalla quarantena ed elencati in Segnalazioni come solo segnalazione.
+- **Nomi di file e cartelle interpretati come markup.** Etichette, finestre di messaggio e tooltip interpretavano i nomi che somigliavano a HTML: un nome costruito ad arte poteva rimpicciolire o nascondere il resto di un avviso di sicurezza. Ora sono mostrati come testo semplice.
+- **Single-instance senza `XDG_RUNTIME_DIR`.** Qt ripiega allora su una cartella dal nome prevedibile sotto `/tmp`, che un altro utente locale poteva creare per primo e tenere così spento il single-instance a ogni avvio. Senza `XDG_RUNTIME_DIR` la GUI ora parte senza single-instance e lo segnala.
+- **File di dati malformati.** Un indice della quarantena, un registro o lo stato del timer sostituiti da una directory, annidati per decine di migliaia di livelli o con numeri fuori misura sollevavano errori inattesi (quarantena inservibile, un descrittore perso a ogni tentativo, il controllo del database fermo per tutta la sessione) invece di essere messi da parte come corrotti. Lo stesso per una data fuori misura nella risposta `VERSION` di clamd.
 
 ## Fix di sicurezza nella 0.1.8
 
@@ -465,3 +475,5 @@ maintainer con `FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 FD2E`.
 non riconosce la firma di un allegato, la tua copia della chiave è
 precedente alla sottochiave della CI: riscaricala dal keyserver o dal
 repository come sopra.
+
+Dopo la 0.1.19 il PKGBUILD di AUR controlla anche, in `prepare()`, che il tag sia firmato dalla sottochiave dei tag: `makepkg` da solo accetta qualunque sottochiave della primaria, compresa quella della CI. Il PKGBUILD lo pubblica su AUR il maintainer dalla sua macchina: nessuna chiave AUR sta nella CI.

@@ -127,8 +127,28 @@ class _FakePaths:
 
 
 def test_percorso_nella_runtime_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(single_instance, "QStandardPaths", _FakePaths(str(tmp_path)))
     assert ipc_socket_path() == os.path.join(str(tmp_path), single_instance.IPC_SOCKET_NAME)
+
+
+@pytest.mark.parametrize("xdg", [None, "", "relativa"])
+def test_senza_xdg_runtime_dir_niente_ripiego_di_qt(monkeypatch, tmp_path, xdg):
+    # Senza XDG_RUNTIME_DIR Qt propone <tmp>/runtime-<utente>, un nome che
+    # un altro utente può occupare per primo: non è una runtime directory.
+    if xdg is None:
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    else:
+        monkeypatch.setenv("XDG_RUNTIME_DIR", xdg)
+    fallback = tmp_path / "runtime-utente"
+    monkeypatch.setattr(single_instance, "QStandardPaths", _FakePaths(str(fallback)))
+    assert ipc_socket_path() is None
+
+
+def test_runtime_location_diversa_da_xdg_rifiutata(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg"))
+    monkeypatch.setattr(single_instance, "QStandardPaths", _FakePaths(str(tmp_path / "altro")))
+    assert ipc_socket_path() is None
 
 
 def test_runtime_directory_rifiutata_niente_ripiego_su_tmp(monkeypatch):

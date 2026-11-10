@@ -248,7 +248,7 @@ Die App bleibt in der System Tray aktiv, auch wenn das Fenster geschlossen wird 
 
 Außerdem Single-Instance: startest du die GUI, während eine andere Instanz bereits aktiv ist, sendet die zweite ihren `--scan-target` (falls vorhanden) an die erste und beendet sich sofort, statt ein zweites Fenster zu öffnen. Das ist der Mechanismus, der die Dolphin-Integration sinnvoll macht: beim Klick auf „Mit KlamAV-Py scannen" auf mehreren Dateien/Ordnern landen alle Anfragen im selben bereits geöffneten Fenster.
 
-Der IPC-Socket liegt in der Runtime-Verzeichnis des Benutzers (`$XDG_RUNTIME_DIR/klamav-py-ipc`, typischerweise `/run/user/<uid>/`), nicht in `/tmp`, und bevor irgendwelche Daten gesendet werden, verifiziert die zweite Instanz mit `SO_PEERCRED`, dass der lauschende Prozess demselben Benutzer gehört. Wenn keine sichere Runtime-Verzeichnis existiert oder der IPC-Server nicht starten kann, läuft die GUI trotzdem ohne Single-Instance und meldet das: ein zweiter Start würde eine weitere Kopie öffnen.
+Der IPC-Socket liegt in der Runtime-Verzeichnis des Benutzers (`$XDG_RUNTIME_DIR/klamav-py-ipc`, typischerweise `/run/user/<uid>/`), nicht in `/tmp`, und bevor irgendwelche Daten gesendet werden, verifiziert die zweite Instanz mit `SO_PEERCRED`, dass der lauschende Prozess demselben Benutzer gehört. Wenn keine sichere Runtime-Verzeichnis existiert (ohne `XDG_RUNTIME_DIR` würde Qt auf einen Ordner mit vorhersehbarem Namen unter `/tmp` ausweichen, den ein anderer lokaler Benutzer zuerst anlegen könnte) oder der IPC-Server nicht starten kann, läuft die GUI trotzdem ohne Single-Instance und meldet das: ein zweiter Start würde eine weitere Kopie öffnen.
 
 Beim Update von 0.1.6 oder älter verwendet eine noch offene alte Instanz den alten Socket und wird von der neuen nicht erkannt: schließe sie aus der Tray, bevor du die Anwendung neu startest.
 
@@ -296,6 +296,16 @@ Bei einem home-weiten Scan einer echten Entwicklermaschine (330k+ Dateien) sind 
 
 - **Fehler in Massen eines einzelnen Typs (Tausende)** — fast sicher clamd tot oder mitten im Scan neu gestartet:
   `journalctl -u clamav-daemon.service` im Zeitraum des Scans, und `dmesg | grep -i oom` für den OOM-Fall. Die CLI-Zusammenfassung nach Typ (oder das persistente Log der Planung) macht diesen Fall sofort vom physiologischen Rauschen unterscheidbar.
+
+## Sicherheits-Fixes nach 0.1.19
+
+Aus einem Penetrationstest von 0.1.19; sie erscheinen mit der nächsten Version.
+
+- **Quarantäne einer von clamd gewählten Datei.** Der Pfad eines `FOUND`-Ergebnisses wurde aus der Antwort von clamd übernommen: ein per unverschlüsseltem TCP erreichter oder kompromittierter clamd konnte eine andere Datei des Benutzers nennen und in die Quarantäne verschieben lassen, während die gescannte Datei an ihrem Platz blieb. Das Ergebnis bezieht sich jetzt immer auf die Datei, die dieser Prozess gesendet hat.
+- **Hardlinks entgingen der Quarantäne.** Das Verschieben eines Namens einer Datei mit mehreren Hardlinks ließ den Inhalt über die anderen erreichbar, während die Quarantäne als erfolgreich galt. Solche Dateien werden jetzt von der Quarantäne abgelehnt und unter Meldungen als reine Meldung geführt.
+- **Datei- und Ordnernamen als Markup interpretiert.** Beschriftungen, Meldungsfenster und Tooltips interpretierten Namen, die wie HTML aussahen: ein präparierter Dateiname konnte den Rest einer Sicherheitswarnung verkleinern oder verbergen. Sie werden jetzt als reiner Text angezeigt.
+- **Single-Instance ohne `XDG_RUNTIME_DIR`.** Qt weicht dann auf einen Ordner mit vorhersehbarem Namen unter `/tmp` aus, den ein anderer lokaler Benutzer zuerst anlegen konnte, um die Single-Instance bei jedem Start auszuschalten. Ohne `XDG_RUNTIME_DIR` startet die GUI jetzt ohne Single-Instance und meldet das.
+- **Fehlerhafte Datendateien.** Ein Quarantäne-Index, ein Register oder der Timer-Status, die durch ein Verzeichnis ersetzt, zehntausende Ebenen tief verschachtelt waren oder Zahlen außerhalb des gültigen Bereichs enthielten, lösten unerwartete Fehler aus (Quarantäne unbrauchbar, bei jedem Versuch ein verlorener Dateideskriptor, Datenbankprüfung für die ganze Sitzung gestoppt), statt als beschädigt beiseitegelegt zu werden. Ebenso ein Datum außerhalb des Bereichs in der `VERSION`-Antwort von clamd.
 
 ## Sicherheits-Fixes in 0.1.8
 
@@ -458,5 +468,5 @@ Tags signiert der Maintainer mit `FDC2 2208 6F32 BADB 0403  4BAF 707F 1CD9 C887 
 die Signatur eines Anhangs nicht erkennt, ist deine Kopie des Schlüssels
 älter als der CI-Unterschlüssel: lade sie wie oben vom Keyserver oder aus
 dem Repository neu herunter.
-", "path">
-/home/gradia/Progetti/klamav-py/README.de.md
+
+Nach 0.1.19 prüft das AUR-PKGBUILD außerdem in `prepare()`, dass der Tag vom Tag-Unterschlüssel signiert wurde: `makepkg` allein akzeptiert jeden Unterschlüssel des Primärschlüssels, auch den der CI. Das PKGBUILD veröffentlicht der Maintainer von seinem eigenen Rechner auf AUR; in der CI liegt kein AUR-Schlüssel.
