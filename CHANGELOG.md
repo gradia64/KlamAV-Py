@@ -22,6 +22,13 @@ sono in `docs/CHANGELOG-archive.md`.
   Dolphin puntano al file `.AppImage`: dopo averlo spostato vanno salvati
   di nuovo.
 
+### Modificato
+- Traduzioni del README (inglese, tedesco, spagnolo, francese) allineate
+  a quella italiana. Le etichette dell'interfaccia, che per ora è solo in
+  italiano, compaiono con il nome italiano accanto alla traduzione, come
+  nelle pagine man. La pagina Segnalazioni si chiama «Findings» anche
+  nelle pagine man inglesi.
+
 ### Rilascio
 - Job `appimage` nel workflow di rilascio: build con ogni download fissato
   per SHA-256 e dipendenze con `pip --require-hashes`, poi una prova con
@@ -32,6 +39,9 @@ sono in `docs/CHANGELOG-archive.md`.
   AppImage estratta), comando dei file `.desktop` con le virgolette della
   specifica, nessun drop-in né `systemctl --user` dall'AppImage, job e
   download fissati. Totale: 1212 test.
+- Controllo delle traduzioni del README nella CI
+  (`.github/workflows/readme-i18n.yml`): selettore della lingua,
+  struttura e contenuto di ogni sezione rispetto alla versione italiana.
 
 ---
 ## 0.1.20 — 2026-11-10
