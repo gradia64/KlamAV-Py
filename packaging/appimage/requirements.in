@@ -1,0 +1,12 @@
+# Dipendenze dell'AppImage (tools/build-appimage.sh). Versioni fissate a
+# mano, con almeno due settimane di vita; requirements.txt con gli hash si
+# rigenera con: tools/build-appimage.sh --lock. Controllare nel diff le
+# dipendenze indirette scelte da pip prima del commit.
+#
+# Solo PySide6-Essentials: il pacchetto PySide6 completo porta anche gli
+# Addons (WebEngine, 3D, Multimedia…), centinaia di MB che KlamAV-Py non
+# usa. 6.11.x come OllaDesk: le wheel della 6.12 sono compilate con gli
+# header di Python 3.12 (PYSIDE-3474), che è il Python dell'AppImage, ma
+# restare sulla stessa versione di OllaDesk vuol dire una sola combinazione
+# collaudata. Le wheel richiedono glibc >= 2.34 (manylinux_2_34).
+PySide6-Essentials==6.11.2

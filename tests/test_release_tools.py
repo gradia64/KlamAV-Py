@@ -528,6 +528,56 @@ def test_workflow_verifica_il_tag_e_isola_i_secret():
     assert unpinned_actions(workflows) == []
 
 
+def test_appimage_costruita_provata_e_firmata():
+    """L'AppImage: job proprio dopo i test, senza secret (lo controlla
+    secret_readers), build e prova con gli script del repository, e il file
+    nella cartella che publish firma e mette in SHA256SUMS."""
+    jobs = _jobs(_workflows()["release.yml"])
+    job = jobs.get("appimage")
+    assert job is not None, "nessun job appimage in release.yml"
+    assert "needs: tests" in job
+    assert "tools/build-appimage.sh" in job
+    assert "packaging/appimage/smoke-test.sh" in job
+    assert "name: appimage" in job and "secrets" not in _without_comments(job)
+    publish = jobs["publish"]
+    needs = re.search(r"needs: \[([^\]]*)\]", publish)
+    assert needs and "appimage" in [n.strip() for n in needs.group(1).split(",")]
+    download = re.search(r"name: appimage\n\s+path: (\S+)", publish)
+    assert download and download.group(1) == "dist/", "l'AppImage deve finire in dist/"
+    assert publish.index("name: appimage") < publish.index("tools/sign-release.sh dist")
+
+
+def test_nome_dell_appimage_coerente():
+    """Il nome che la build produce è quello che la prova cerca e che le
+    istruzioni dei README indicano (decisione 5 della roadmap)."""
+    script = TOOLS / "build-appimage.sh"
+    assert script.is_file(), "tools/build-appimage.sh assente"
+    build = script.read_text(encoding="utf-8")
+    assert 'OUT="$ROOT/dist/KlamAV-Py-${VERSION}-${ARCH}.AppImage"' in build
+    assert 'ARCH="x86_64"' in build
+    job = _jobs(_workflows()["release.yml"])["appimage"]
+    assert "dist/KlamAV-Py-${GITHUB_REF_NAME#v}-x86_64.AppImage" in job
+
+
+def test_download_dell_appimage_fissati():
+    """Ogni download della build ha uno SHA-256 e le dipendenze Python
+    passano da --require-hashes."""
+    script = TOOLS / "build-appimage.sh"
+    assert script.is_file(), "tools/build-appimage.sh assente"
+    build = script.read_text(encoding="utf-8")
+    urls = re.findall(r'^(\w+)_URL=', build, re.M)
+    assert urls, "nessun download nella build?"
+    for name in urls:
+        assert re.search(rf'^{name}_SHA256="[0-9a-f]{{64}}"$', build, re.M), name
+    assert "--require-hashes" in build
+    req_path = ROOT / "packaging/appimage/requirements.txt"
+    assert req_path.is_file()
+    req = req_path.read_text(encoding="utf-8")
+    pins = re.findall(r"^\S+==\S+ \\\n\s+--hash=sha256:[0-9a-f]{64}$", req, re.M)
+    lines = [l for l in req.splitlines() if l and not l.startswith("#") and "==" in l]
+    assert lines and len(pins) == len(lines), req
+
+
 @pytest.mark.parametrize("workflows", [
     # Un altro job di release.yml.
     {"release.yml": "jobs:\n  build:\n    steps:\n      - run: echo ${{ secrets.GPG_PASSPHRASE }}\n"},
