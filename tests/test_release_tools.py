@@ -382,6 +382,30 @@ def test_note_della_release_dal_changelog(tmp_path):
     assert missing.returncode != 0
 
 
+def test_note_della_release_in_inglese(tmp_path):
+    """
+    Le note della release GitHub sono in inglese dalla 0.1.21: la 0.1.21 è
+    uscita con la voce italiana del CHANGELOG, poi corretta a mano. Una
+    sezione con un titolo non inglese ferma release-notes.sh, quindi il job
+    verify del rilascio prima del tag pubblicato.
+    """
+    notes = _run([str(TOOLS / "release-notes.sh"), __version__], tmp_path).stdout
+    titles = re.findall(r"^### (.*)$", notes, re.M)
+    assert titles, "nessuna sezione nella voce della versione corrente"
+    assert set(titles) <= {"Security", "Fixed", "Added", "Changed", "Removed", "Release"}
+
+    # Su una copia: la stessa voce con un titolo italiano è rifiutata.
+    (tmp_path / "tools").mkdir()
+    script = tmp_path / "tools" / "release-notes.sh"
+    shutil.copy2(TOOLS / "release-notes.sh", script)
+    entry = "## 9.9.9 — 2026-01-01\n\n### {}\n- Something.\n\n---\n"
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n---\n" + entry.format("Fixed"), encoding="utf-8")
+    assert _run([str(script), "9.9.9"], tmp_path).stdout.startswith("### Fixed")
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n---\n" + entry.format("Corretto"), encoding="utf-8")
+    bad = _run([str(script), "9.9.9"], tmp_path, check=False)
+    assert bad.returncode != 0 and "### Corretto" in bad.stderr
+
+
 # -- il workflow usa questi script e non firma i tag ---------------------------
 
 def _jobs(text: str) -> dict:

@@ -1,47 +1,50 @@
 # Changelog
 
-Cronologia delle versioni per gli utenti, indipendente dalla
-distribuzione. Il dettaglio esteso fino alla 0.1.3 e le tornate di audit
-sono in `docs/CHANGELOG-archive.md`.
+User-facing version history, independent of the distribution. Entries
+are in English from 0.1.21, in Italian up to 0.1.20: each entry becomes
+the description of its GitHub release. The extended detail up to 0.1.3
+and the audit rounds are in `docs/CHANGELOG-archive.md` (Italian).
 
 ---
 ## 0.1.21 — 2026-11-10
 
-### Aggiunto
-- **KlamAV-Py anche come AppImage** (`KlamAV-Py-<versione>-x86_64.AppImage`),
-  per le distribuzioni senza il `.deb` né AUR. Contiene Python e Qt, non
-  ClamAV: clamd e freshclam vengono dalla distribuzione. La GUI parte con
-  un doppio clic, la CLI con `cli` come primo argomento o da un
-  collegamento chiamato `klamav-py`. Firmata dalla CI e in `SHA256SUMS`
-  come gli altri allegati. Richiede glibc 2.34 (Debian 12, Ubuntu 22.04,
-  Fedora 35 o successive), solo x86_64.
-- Dall'AppImage la scansione programmata di sistema (`klamav-scan.timer`)
-  non c'è, perché le sue unit le installano solo i pacchetti: la pagina
-  Pianificazione lo dice al posto dell'orario e resta la pianificazione
-  interna, che gira con KlamAV-Py aperto. Avvio automatico e menu di
-  Dolphin puntano al file `.AppImage`: dopo averlo spostato vanno salvati
-  di nuovo.
+### Added
+- **KlamAV-Py is also available as an AppImage**
+  (`KlamAV-Py-<version>-x86_64.AppImage`), for distributions without the
+  `.deb` or AUR. It bundles Python and Qt, not ClamAV: clamd and freshclam
+  come from your distribution. The GUI starts with a double click; the CLI
+  runs with `cli` as the first argument, or from a symbolic link named
+  `klamav-py`. Signed by the CI and listed in `SHA256SUMS` like the other
+  assets. Requires glibc 2.34 (Debian 12, Ubuntu 22.04, Fedora 35 or
+  later), x86_64 only.
+- From the AppImage the scheduled system scan (`klamav-scan.timer`) is
+  not available, because its units are installed only by the packages:
+  the Scheduling (Pianificazione) page says so in place of the time
+  setting, and the internal schedule remains, which runs while KlamAV-Py
+  is open. Autostart and the Dolphin menu point to the `.AppImage` file:
+  after moving it, save them again.
 
-### Modificato
-- Traduzioni del README (inglese, tedesco, spagnolo, francese) allineate
-  a quella italiana. Le etichette dell'interfaccia, che per ora è solo in
-  italiano, compaiono con il nome italiano accanto alla traduzione, come
-  nelle pagine man. La pagina Segnalazioni si chiama «Findings» anche
-  nelle pagine man inglesi.
+### Changed
+- README translations (English, German, Spanish, French) aligned with the
+  Italian one. Interface labels, since the interface is Italian-only for
+  now, show the Italian name next to the translation, as in the man
+  pages. The Segnalazioni page is called "Findings" in the English man
+  pages too.
 
-### Rilascio
-- Job `appimage` nel workflow di rilascio: build con ogni download fissato
-  per SHA-256 e dipendenze con `pip --require-hashes`, poi una prova con
-  il Python dell'AppImage, la CLI contro un finto clamd e la GUI su X11.
-  `packaging/appimage/test-distros.sh` la prova a mano su Fedora,
-  openSUSE, Debian, Ubuntu e Arch.
-- Test: riconoscimento dell'AppImage (marcatore, variabili ereditate,
-  AppImage estratta), comando dei file `.desktop` con le virgolette della
-  specifica, nessun drop-in né `systemctl --user` dall'AppImage, job e
-  download fissati. Totale: 1212 test.
-- Controllo delle traduzioni del README nella CI
-  (`.github/workflows/readme-i18n.yml`): selettore della lingua,
-  struttura e contenuto di ogni sezione rispetto alla versione italiana.
+### Release
+- `appimage` job in the release workflow: a build with every download
+  pinned by SHA-256 and dependencies installed with
+  `pip --require-hashes`, then a test with the AppImage's own Python, the
+  CLI against a fake clamd, and the GUI on X11.
+  `packaging/appimage/test-distros.sh` tests it by hand on Fedora,
+  openSUSE, Debian, Ubuntu and Arch.
+- Tests: AppImage detection (marker, inherited variables, extracted
+  AppImage), the `.desktop` command quoted as the specification requires,
+  no drop-ins and no `systemctl --user` from the AppImage, pinned job and
+  downloads. Total: 1212 tests.
+- README translation check in the CI
+  (`.github/workflows/readme-i18n.yml`): language switcher, structure and
+  content of each section against the Italian version.
 
 ---
 ## 0.1.20 — 2026-11-10

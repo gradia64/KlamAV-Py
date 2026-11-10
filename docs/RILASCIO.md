@@ -177,7 +177,9 @@ Nessuna chiave AUR nella CI: fino alla 0.1.19 c'erano il secret
    tools/check-version.sh v0.1.15
    ```
    Il workflow la pubblica così com'è: correggerla dopo vuol dire
-   modificare la release a mano.
+   modificare la release a mano. La voce è **in inglese** (dalla 0.1.21),
+   con le sezioni Security, Fixed, Added, Changed, Removed, Release:
+   `release-notes.sh` rifiuta un titolo diverso, e con lui il job `verify`.
 2. Tag firmato con la sottochiave dei tag (sezione 3) e push:
    ```bash
    git tag -s v0.1.15 -m "KlamAV-Py 0.1.15"

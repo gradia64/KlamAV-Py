@@ -73,7 +73,7 @@ for riga in sys.stdin.read().splitlines():
 
 STUB="## $TITOLO — $DATA_ISO
 
-### Corretto
+### Fixed
 $CORPO
 "
 
@@ -91,4 +91,5 @@ awk -v stub="$STUB" '
 mv "$TMP" "$CHANGELOG_MD"
 
 echo "Bozza per $TITOLO inserita in $CHANGELOG_MD."
-echo "Ora accorciala e ridistribuisci le voci fra Sicurezza / Corretto / Aggiunto / Modificato."
+echo "Ora accorciala, traducila in inglese (è la descrizione della release GitHub)"
+echo "e ridistribuisci le voci fra Security / Fixed / Added / Changed / Removed / Release."
