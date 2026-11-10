@@ -44,7 +44,7 @@ paths to the running instance and exits immediately.
 Detections that are reported but not moved (heuristic signatures and
 mail archives, see
 .BR klamav-py (1))
-are listed in the Reports page
+are listed in the Findings page
 .RI ( Segnalazioni ),
 whichever scan found them: the scans of the window (manual, internal
 schedule, Real-Time), the scheduled system scan and the
@@ -75,7 +75,7 @@ At startup the application checks the last scheduled system scan: if it
 turns out to have started and never finished (for example the computer
 was switched off during the scan), it says so with a notification, once
 per interruption, and in the Scheduling page, with the start time and a
-pointer to the Reports and Quarantine pages for whatever was found up to
+pointer to the Findings and Quarantine pages for whatever was found up to
 there; the details remain in the journal
 .RB ( journalctl\ \-\-user\ \-u\ klamav\-scan.service ).
 Exits with a code do not warn: the unit already notifies those with
@@ -251,7 +251,7 @@ Register of acknowledged detections, shared with
 .TP
 .I \%~/.local/share/klamav-py/pending-reports.json
 Detections still to be evaluated, written by every scan and read by the
-Reports page; see
+Findings page; see
 .BR klamav-py (1).
 .TP
 .I \%~/.local/share/klamav-py/timer-scan.json
