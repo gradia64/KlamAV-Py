@@ -20,10 +20,10 @@ import time
 import json
 import html
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Callable
 
-from PySide6.QtCore import Qt, QSize, QSettings, QTime, Signal, QTimer, QFileSystemWatcher, QThread
+from PySide6.QtCore import Qt, QSize, QSettings, Signal, QTimer, QFileSystemWatcher, QThread
 from PySide6.QtGui import QIcon, QColor, QAction, QFont, QPalette, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
@@ -56,7 +56,6 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
-    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -79,17 +78,11 @@ from ..clamd_client import (
 from ..pending_reports import PendingStore, location
 from ..pending_reports import recovery_notice as pending_recovery_notice
 from ..quarantine import Quarantine, describe_recovery, peek_entries
-from ..quarantine_policy import REASON_MAIL_STORE
+from ..quarantine_policy import KIND_HEURISTIC, REASON_MAIL_STORE, detection_kind
 from ..quarantine_location import decide as decide_quarantine_dir, default_quarantine_dir, root_inside
 from ..scan_exclusions import decide as decide_exclusion
 from ..scan_totals import ScanTotals, io_fault_note, scan_outcome
-from ..systemd_dropin import (
-    DropinConflict, daemon_reload, disable_timer, dropin_conflict, dropin_path,
-    foreign_overrides, foreign_timer_overrides, generation as dropin_generation,
-    normalize_timer_time, refresh_outdated, render_dropin, render_timer_dropin,
-    service_active, sync_dropin, timer_dropin_path, timer_enabled,
-)
-from ..timer_scan_state import TimerScanState, interrupted_notice, read_state
+from .. import legacy_timer
 from ..private_files import (
     ensure_private_dir, ensure_private_file, open_private_for_write, write_private_text,
 )
@@ -106,11 +99,11 @@ from .ping_worker import PingWorker
 from .plain_text import PlainDialogs, plain_labels, plain_tooltip
 from .single_instance import IPC_MAX_PAYLOAD_BYTES, IPC_SEPARATOR
 from .update_check_worker import UpdateCheckWorker, UpdateInfo
+from .info_page import InfoPage
 from .quarantine_action import ActionResult, QuarantineActionWorker, QuarantineRequest
 from .quarantine_loader import QuarantineLoadWorker, QuarantineSnapshot
 
-# Fonte unica in quarantine_location: lo stesso percorso è nell'ExecStart
-# di klamav-scan.service, e la coerenza è verificata dai test.
+# Fonte unica in quarantine_location, condivisa con la CLI.
 DEFAULT_QUARANTINE_DIR = default_quarantine_dir()
 DEFAULT_HISTORY_FILE = Path.home() / ".local/share/klamav-py/history.json"
 DEFAULT_LOGS_DIR = Path.home() / ".local/share/klamav-py/logs"
@@ -359,7 +352,7 @@ UNREADABLE_DIRS_HINT = (
 
 REPORTS_HINT = (
     "Alcuni file sono stati solo segnalati e lasciati al loro posto: dopo averli "
-    "verificati, puoi eliminarli o registrarne la presa visione dalla pagina Segnalazioni."
+    "verificati, puoi eliminarli o registrarne la presa visione dalla pagina Segnalazioni Euristiche."
 )
 
 
@@ -459,15 +452,6 @@ def _migrate_legacy_settings() -> None:
     for key in old.allKeys():
         new.setValue(key, old.value(key))
     new.sync()
-
-
-def system_timer_available() -> bool:
-    """
-    False dall'AppImage, che non installa le unit di klamav-scan.timer
-    (appimage.py): la GUI non le interroga e non scrive drop-in. Un punto
-    solo, perché i test possano simulare l'AppImage.
-    """
-    return not appimage.is_appimage()
 
 
 def _gui_relaunch_command() -> str:
@@ -643,8 +627,7 @@ def load_schedule_excludes(settings: QSettings) -> list[str]:
     """
     Cartelle escluse dalle scansioni programmate, nella forma salvata
     (scan_exclusions: expanduser, assoluta, NON risolta): UNICO punto di
-    lettura della chiave. Una lista sola per pianificazione interna e
-    timer di sistema. type=list normalizza i casi di QSettings: chiave
+    lettura della chiave. type=list normalizza i casi di QSettings: chiave
     assente, lista vuota e lista di un solo elemento letta come stringa.
     """
     value = settings.value(SCHEDULE_EXCLUDES_KEY, [], type=list)
@@ -653,230 +636,19 @@ def load_schedule_excludes(settings: QSettings) -> list[str]:
 
 def schedule_roots(target: str, home: Path | None = None) -> dict[str, Path]:
     """
-    Radici con cui confrontare le esclusioni: la home per il timer di
-    sistema (ExecStart: scan %h) e la cartella della pianificazione
-    interna. Una cartella interna vuota o relativa non è una radice: il
-    salvataggio della pianificazione non la valida, e la scansione la
-    segnala come inesistente.
+    Radici con cui confrontare le esclusioni: la cartella della
+    pianificazione interna. Una cartella vuota o relativa non è una
+    radice: il salvataggio della pianificazione non la valida, e la
+    scansione la segnala come inesistente. (`home` resta per
+    compatibilità della firma: il timer di sistema, che scansionava la
+    home, non c'è più.)
     """
-    roots = {"timer di sistema": home or Path.home()}
+    roots: dict[str, Path] = {}
     if target and target.strip():
         path = Path(target).expanduser()
         if path.is_absolute():
             roots["pianificazione interna"] = path
     return roots
-
-
-class DropinSettingsError(ValueError):
-    """Le impostazioni salvate non formano un drop-in valido (file
-    modificato a mano: porta TCP non numerica, carattere di controllo in
-    un percorso): il drop-in non è stato né letto né scritto, e il rimedio
-    è nelle Impostazioni. Separata da OSError e dagli altri errori, che
-    riguardano il drop-in stesso (dropin_refresh_notice)."""
-
-
-@dataclass(frozen=True)
-class DropinState:
-    """
-    Stato completo da cui nasce il drop-in di klamav-scan.service
-    (quarantena, endpoint, esclusioni; vedi render_dropin): UNICO punto in
-    cui le Impostazioni diventano il testo del drop-in, per i salvataggi
-    di Impostazioni e Pianificazione e per la rigenerazione all'avvio.
-    Con tre copie, una versione nuova di EXEC_TEMPLATE o un campo nuovo
-    potevano arrivare a un percorso e non agli altri.
-
-    from_settings legge le QSettings (thread della GUI); i valori passati
-    sostituiscono quelli salvati, perché un salvataggio genera il drop-in
-    prima di scrivere le QSettings. render() fa resolve() e può girare
-    fuori dal thread della GUI.
-    """
-
-    quarantine: Path
-    endpoint: ClamdEndpoint
-    excludes: tuple[str, ...]
-
-    @classmethod
-    def from_settings(
-        cls,
-        settings: QSettings,
-        *,
-        quarantine: Path | None = None,
-        endpoint: ClamdEndpoint | None = None,
-        excludes: list[str] | None = None,
-    ) -> "DropinState":
-        """DropinSettingsError se l'endpoint salvato non è valido
-        (load_endpoint)."""
-        try:
-            if endpoint is None:
-                endpoint = load_endpoint(settings)
-        except ValueError as exc:
-            raise DropinSettingsError(str(exc)) from exc
-        if quarantine is None:
-            quarantine = Path(settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR)))
-        if excludes is None:
-            excludes = load_schedule_excludes(settings)
-        return cls(quarantine.expanduser(), endpoint, tuple(excludes))
-
-    def render(self) -> str | None:
-        """DropinSettingsError se i valori non entrano in un drop-in
-        (render_dropin: caratteri di controllo, specificatori)."""
-        try:
-            return render_dropin(
-                self.quarantine.resolve(), home=Path.home(), endpoint=self.endpoint,
-                excludes=self.excludes,
-            )
-        except ValueError as exc:
-            raise DropinSettingsError(str(exc)) from exc
-
-
-# Cambiamento del drop-in fatto da refresh_dropin_at_startup.
-DROPIN_REWRITTEN = "riscritto"
-DROPIN_REMOVED = "rimosso"
-
-
-def refresh_dropin_at_startup(
-    state: DropinState, since: int, timer_time: str = "00:00"
-) -> tuple[str | None, str | None, str | None]:
-    """
-    Rigenerazione all'avvio della GUI (refresh_outdated, `since` letto con
-    lo stato) di ENTRAMBI i drop-in: quello del service (quarantena,
-    endpoint, esclusioni) e quello del timer (orario della scansione,
-    0.1.19), con daemon-reload se qualcosa è cambiato. Tocca il filesystem
-    e chiama systemctl --user: la GUI la esegue con run_off_gui_thread.
-
-    Ritorna (esito del drop-in del service, esito del drop-in del timer,
-    motivo del reload fallito o None): ciascun esito è DROPIN_REWRITTEN,
-    DROPIN_REMOVED o None se quel file non è cambiato. OSError e
-    DropinSettingsError arrivano al chiamante. render() precede ogni
-    lettura dei file: con impostazioni non valide non si tocca nulla, e il
-    testo None (tutto predefinito) vale rimozione per entrambi.
-    """
-    text = state.render()
-    timer_text = render_timer_dropin(timer_time)
-    service_changed = refresh_outdated(text, since)
-    timer_changed = refresh_outdated(timer_text, since, path=timer_dropin_path())
-    if not service_changed and not timer_changed:
-        return None, None, None
-    problem = daemon_reload()
-    return (
-        None if not service_changed else (DROPIN_REMOVED if text is None else DROPIN_REWRITTEN),
-        None if not timer_changed else (
-            DROPIN_REMOVED if timer_text is None else DROPIN_REWRITTEN
-        ),
-        problem,
-    )
-
-
-def dropin_refresh_notice(result) -> str | None:
-    """Avviso della rigenerazione all'avvio, dal risultato di
-    refresh_dropin_at_startup (o dall'eccezione); None se non è cambiato
-    nulla. Stesso testo nella pagina Pianificazione e su stderr.
-
-    Con impostazioni non valide (DropinSettingsError) i drop-in non sono
-    stati letti: l'avviso nomina solo le impostazioni, perché possono
-    essere già aggiornati o non esistere."""
-    if isinstance(result, DropinSettingsError):
-        return (
-            f"Le impostazioni salvate non sono valide: {result}. Correggile nelle "
-            "Impostazioni e salva: il salvataggio aggiorna anche la scansione "
-            "programmata di sistema."
-        )
-    if isinstance(result, Exception):
-        path = dropin_path()
-        return (
-            f"I drop-in della scansione programmata di sistema («{path}» e "
-            f"«{timer_dropin_path()}») sono stati scritti da una versione precedente "
-            f"e non è stato possibile aggiornarli: {result}. Il timer di sistema usa "
-            "ancora la configurazione vecchia; salva le Impostazioni per riprovare."
-        )
-    service_change, timer_change, problem = result
-    notices = []
-    if service_change is not None:
-        path = dropin_path()
-        if service_change == DROPIN_REMOVED:
-            notices.append(
-                f"Il drop-in della scansione programmata di sistema («{path}») è stato "
-                "rimosso: le impostazioni salvate sono quelle predefinite, che il timer "
-                "usa già senza drop-in."
-            )
-        else:
-            notices.append(
-                f"Il drop-in della scansione programmata di sistema («{path}») è stato "
-                f"aggiornato alla versione {__version__}, con le impostazioni salvate."
-            )
-    if timer_change is not None:
-        path = timer_dropin_path()
-        if timer_change == DROPIN_REMOVED:
-            notices.append(
-                f"Il drop-in dell'orario del timer («{path}») è stato rimosso: "
-                "l'orario salvato è di nuovo quello predefinito (mezzanotte), "
-                "che la unit usa già senza drop-in."
-            )
-        else:
-            notices.append(
-                f"Il drop-in dell'orario del timer («{path}») è stato aggiornato "
-                f"alla versione {__version__}, con l'orario salvato nella pagina "
-                "Pianificazione."
-            )
-    if not notices:
-        return None
-    text = "\n".join(notices)
-    if problem:
-        text += (
-            " Il timer userà i drop-in aggiornati dal prossimo avvio della sessione "
-            f"(systemctl --user daemon-reload non riuscito: {problem})."
-        )
-    return text
-
-
-def dropin_followup(changed: bool, tcp: bool) -> tuple[str | None, list]:
-    """
-    Dopo la scrittura dei drop-in (service e orario del timer):
-    daemon-reload se è cambiato qualcosa e override estranei delle due
-    unit. Chiama systemctl --user (timeout 10 s): la GUI la esegue con
-    run_off_gui_thread. Ritorna (motivo del reload fallito o None,
-    override estranei).
-    """
-    problem = daemon_reload() if changed else None
-    return problem, foreign_overrides(tcp=tcp) + foreign_timer_overrides()
-
-
-def dropin_notes(problem: str | None, overrides: list, *, what: str) -> list[str]:
-    """Avvisi non bloccanti del salvataggio, dal risultato di dropin_followup.
-    Un override.conf (systemctl --user edit) che ridefinisce ExecStart viene
-    dopo il nostro drop-in e vince: solo avviso, il file è dell'utente."""
-    notes = []
-    if problem:
-        notes.append(
-            f"La scansione programmata di sistema userà {what} "
-            "dal prossimo avvio della sessione "
-            f"(systemctl --user daemon-reload non riuscito: {problem})."
-        )
-    notes.extend(o.describe() for o in overrides)
-    return notes
-
-
-def check_interrupted_timer_scan() -> TimerScanState | None:
-    """
-    Lo stato di una scansione del timer interrotta, da cercare all'avvio
-    (MainWindow._check_interrupted_timer_scan) e a ogni apertura della
-    pagina Pianificazione (refresh_system_timer). Legge il marcatore di
-    timer_scan_state e chiama systemctl --user: la GUI la esegue con
-    run_off_gui_thread.
-
-    None se non c'è niente da avvisare: marcatore assente o chiuso (la
-    scansione è arrivata alla fine). Se una scansione sta girando in
-    questo momento (Persistent=true può rimetterla in moto al login) il
-    buco lo copre lei: anche qui None. Con systemctl non disponibile si
-    avvisa lo stesso: senza manager utente il timer non può girare, e il
-    marcatore aperto viene da un'esecuzione vera.
-    """
-    state = read_state()
-    if state is None or state.finished_at is not None:
-        return None
-    if service_active() is True:
-        return None
-    return state
 
 
 def validate_schedule(
@@ -2012,8 +1784,8 @@ class ReportsPage(PlainDialogs, QWidget):
     quarantine_policy) e prese visione (acknowledged.py).
 
     Le segnalazioni arrivano dal registro delle segnalazioni da valutare
-    (pending_reports.py), scritto da ogni scansione, anche dal timer di
-    sistema, e in diretta dalle scansioni di questa sessione (manuale,
+    (pending_reports.py), scritto da ogni scansione, anche dalla CLI, e
+    in diretta dalle scansioni di questa sessione (manuale,
     programmata interna, Real-Time). Due azioni: la presa visione, che
     registra il contenuto riletto subito dopo il rilevamento (non quello
     del file al momento del clic), e l'eliminazione, solo se il percorso è
@@ -2042,15 +1814,19 @@ class ReportsPage(PlainDialogs, QWidget):
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(15)
 
-        title = QLabel("Segnalazioni")
+        title = QLabel("Segnalazioni Euristiche")
         title.setStyleSheet("font-size: 22px; font-weight: bold;")
         layout.addWidget(title)
 
         desc = QLabel(
-            "File rilevati ma lasciati al loro posto (firme euristiche e archivi di posta). "
-            "Dopo averli verificati puoi eliminarli, oppure registrare la presa visione: le "
-            "scansioni successive, anche quella di sistema, non li contano più fra gli infetti "
-            f"finché il contenuto non cambia. {SCOPE_NOTE}"
+            "File rilevati ma lasciati al loro posto. Quasi sempre sono rilevamenti euristici: "
+            "ClamAV non ha trovato un malware noto, ma il file ha qualcosa di sospetto (per "
+            "esempio un'email con link che portano a un dominio diverso da quello mostrato), "
+            "e spesso è un falso allarme. Qui finisce però anche un malware riconosciuto in un "
+            "archivio di posta, che spostato romperebbe il programma di posta: la colonna Tipo "
+            "lo distingue in rosso. Dopo averli verificati puoi eliminarli, oppure registrare la "
+            "presa visione: le scansioni successive non li contano più fra gli infetti finché il "
+            f"contenuto non cambia. {SCOPE_NOTE}"
         )
         desc.setStyleSheet("font-size: 14px; color: palette(mid);")
         desc.setWordWrap(True)
@@ -2060,9 +1836,9 @@ class ReportsPage(PlainDialogs, QWidget):
         # della notte che sparisce dopo uno spostamento in KMail sembra
         # persa.
         session = QLabel(
-            "Qui compaiono le segnalazioni di tutte le scansioni, anche della scansione "
-            "programmata di sistema, finché non le elimini, non ne registri la presa visione "
-            "o il file non c'è più. Dalla riga di comando: «klamav-py --acknowledge PERCORSO»."
+            "Qui compaiono le segnalazioni di tutte le scansioni (manuali, pianificate, "
+            "Real-Time e da riga di comando) finché non le elimini, non ne registri la presa "
+            "visione o il file non c'è più. Dalla riga di comando: «klamav-py --acknowledge PERCORSO»."
         )
         session.setStyleSheet("font-size: 12px; color: palette(mid);")
         session.setWordWrap(True)
@@ -2079,10 +1855,15 @@ class ReportsPage(PlainDialogs, QWidget):
         self.recovery_label.setVisible(False)
         layout.addWidget(self.recovery_label)
 
-        self.pending_table = QTableWidget(0, 3)
-        self.pending_table.setHorizontalHeaderLabels(["File", "Firma", "Rilevato"])
+        # Colonna Tipo: la pagina porta il nome dei rilevamenti euristici,
+        # ma un malware riconosciuto in un archivio di posta finisce qui
+        # anche lui, e non deve sembrare un semplice sospetto.
+        self.pending_table = QTableWidget(0, 4)
+        self.pending_table.setHorizontalHeaderLabels(["File", "Firma", "Tipo", "Rilevato"])
         self.pending_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.pending_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.pending_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.pending_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.pending_table.setTextElideMode(Qt.ElideMiddle)
         self.pending_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.pending_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -2148,8 +1929,8 @@ class ReportsPage(PlainDialogs, QWidget):
         self.reload_pending()
 
     def showEvent(self, event) -> None:
-        # La pagina si apre dopo una scansione del timer di sistema, che la
-        # GUI non vede: si rilegge il registro a ogni apertura.
+        # La pagina si apre dopo una scansione della CLI, che la GUI non
+        # vede: si rilegge il registro a ogni apertura.
         super().showEvent(event)
         self.reload_pending()
 
@@ -2234,7 +2015,15 @@ class ReportsPage(PlainDialogs, QWidget):
                 item.setToolTip(plain_tooltip(f"{report.path}\n{report.reason}"))
             self.pending_table.setItem(row, 0, item)
             self.pending_table.setItem(row, 1, QTableWidgetItem(report.signature))
-            self.pending_table.setItem(row, 2, QTableWidgetItem(when))
+            kind = detection_kind(report.signature, report.reason)
+            kind_item = QTableWidgetItem(kind)
+            if kind != KIND_HEURISTIC:
+                kind_item.setForeground(QColor("#d32f2f"))
+                font = kind_item.font()
+                font.setBold(True)
+                kind_item.setFont(font)
+            self.pending_table.setItem(row, 2, kind_item)
+            self.pending_table.setItem(row, 3, QTableWidgetItem(when))
 
     def _selected_reports(self) -> list[PendingReport]:
         rows = sorted({i.row() for i in self.pending_table.selectedIndexes()})
@@ -2353,6 +2142,148 @@ class ReportsPage(PlainDialogs, QWidget):
         self.refresh_acknowledged()
 
 
+class AppUpdateGroup(QGroupBox):
+    """
+    Controllo di una nuova versione di KlamAV-Py sulle release GitHub
+    (UpdateCheckWorker). Sta nella pagina Aggiornamenti accanto al database
+    dei virus; la preferenza "Controlla aggiornamenti all'avvio" resta nelle
+    Impostazioni, e all'avvio MainWindow chiama _check_updates_automatico.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__("Aggiornamento del programma", parent)
+        # QSettings sempre con org/app ESPLICITI (vedi SchedulerPage).
+        self.settings = QSettings(APP_NAME, APP_NAME)
+        # Worker del controllo aggiornamenti: None quando nessun controllo
+        # è in corso. Vedi _check_updates / _release_update_check_worker.
+        self._update_check_worker: UpdateCheckWorker | None = None
+
+        layout = QVBoxLayout(self)
+        self.version_label = QLabel(f"Versione corrente: {__version__}")
+        self.version_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+        layout.addWidget(self.version_label)
+
+        self.update_status_label = QLabel("")
+        self.update_status_label.setTextFormat(Qt.PlainText)
+        self.update_status_label.setWordWrap(True)
+        self.update_status_label.setStyleSheet("font-size: 12px;")
+        layout.addWidget(self.update_status_label)
+
+        self.check_update_btn = QPushButton("Controlla aggiornamenti")
+        self.check_update_btn.setFixedHeight(36)
+        self.check_update_btn.setIcon(QIcon.fromTheme("system-software-update"))
+        self.check_update_btn.clicked.connect(self._check_updates)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.check_update_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+    def _check_updates_automatico(self) -> None:
+        """
+        Controllo all'avvio: salta se ne è stato fatto uno da poco (vedi
+        _UPDATE_CHECK_MIN_INTERVAL_SECONDS). Punto di ingresso separato
+        dal pulsante proprio perché il limite non deve valere per quello.
+        """
+        ultimo = self.settings.value(_LAST_UPDATE_CHECK_KEY, 0.0, type=float)
+        if not _controllo_aggiornamenti_dovuto(ultimo, time.time()):
+            return
+        self._check_updates()
+
+    def _check_updates(self) -> None:
+        # Due punti di ingresso (pulsante + QTimer all'avvio): senza questa
+        # guardia un secondo worker sovrascriverebbe il riferimento al primo
+        # ancora in esecuzione.
+        if self._update_check_worker is not None and self._update_check_worker.isRunning():
+            return
+
+        self.check_update_btn.setEnabled(False)
+        self.check_update_btn.setText("Controllo in corso…")
+        self.update_status_label.setText("")
+        self.update_status_label.setToolTip("")
+        self.update_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+
+        # Niente parent Qt: il rilascio passa da _retire_qthread come per
+        # tutti gli altri worker, così alla distruzione della pagina Qt non
+        # distrugge un QThread ancora in esecuzione (timeout di rete 15 s).
+        worker = UpdateCheckWorker(__version__)
+        self._update_check_worker = worker
+        worker.check_finished.connect(self._on_update_check_finished)
+        worker.error.connect(self._on_update_check_error)
+        worker.start()
+
+    def _release_update_check_worker(self) -> None:
+        worker, self._update_check_worker = self._update_check_worker, None
+        if worker is not None:
+            _retire_qthread(worker)
+
+    def _on_update_check_finished(self, info: UpdateInfo) -> None:
+        self._release_update_check_worker()
+        # Registrato solo sul buon esito: un controllo fallito (rete
+        # assente) non deve consumare la finestra delle sei ore.
+        self.settings.setValue(_LAST_UPDATE_CHECK_KEY, time.time())
+        self.check_update_btn.setEnabled(True)
+        self.check_update_btn.setText("Controlla aggiornamenti")
+
+        if info.has_update:
+            self.version_label.setText(
+                f"Versione corrente: {info.current_version}  →  Disponibile: {info.latest_version}"
+            )
+            self.version_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #d32f2f;")
+
+            # I dati arrivano dalla rete: escape sempre, e link cliccabile
+            # solo se punta davvero alle release del repository.
+            version_html = html.escape(info.latest_version)
+            date_suffix = f" rilasciata il {info.published_at}" if info.published_at else ""
+            date_html = html.escape(date_suffix)
+            if info.release_url_trusted:
+                self.update_status_label.setTextFormat(Qt.RichText)
+                self.update_status_label.setOpenExternalLinks(True)
+                self.update_status_label.setText(
+                    f"Nuova versione <a href='{html.escape(info.release_url, quote=True)}'>"
+                    f"{version_html}</a>{date_html}."
+                )
+            else:
+                self.update_status_label.setTextFormat(Qt.PlainText)
+                self.update_status_label.setOpenExternalLinks(False)
+                self.update_status_label.setText(
+                    f"Nuova versione {info.latest_version}{date_suffix}."
+                )
+            self.update_status_label.setStyleSheet("font-size: 12px; color: #d32f2f;")
+
+            notes = info.release_notes
+            notes_preview = notes[:300] + ("…" if len(notes) > 300 else "")
+            # I tooltip Qt diventano rich text se il contenuto "sembra" HTML:
+            # escape + <pre> per mostrarlo sempre come testo.
+            self.update_status_label.setToolTip(
+                f"<b>Note di rilascio:</b><pre>{html.escape(notes_preview)}</pre>"
+            )
+
+            main_window = self.window()
+            if hasattr(main_window, "tray_icon") and main_window.tray_icon.isVisible():
+                main_window.tray_icon.showMessage(
+                    APP_NAME,
+                    f"È disponibile la versione {info.latest_version}.",
+                    _icon("system-software-update"),
+                    5000,
+                )
+        else:
+            self.version_label.setText(f"Versione corrente: {info.current_version} (aggiornata)")
+            self.version_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+            self.update_status_label.setTextFormat(Qt.PlainText)
+            self.update_status_label.setText("Hai già l'ultima versione.")
+            self.update_status_label.setToolTip("")
+            self.update_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
+
+    def _on_update_check_error(self, message: str) -> None:
+        self._release_update_check_worker()
+        self.check_update_btn.setEnabled(True)
+        self.check_update_btn.setText("Controlla aggiornamenti")
+        self.update_status_label.setTextFormat(Qt.PlainText)
+        self.update_status_label.setText(f"Errore: {message}")
+        self.update_status_label.setToolTip("")
+        self.update_status_label.setStyleSheet("font-size: 12px; color: #d32f2f;")
+
+
 class UpdatePage(PlainDialogs, QWidget):
     """
     Aggiornamento delle firme delegato all'unità systemd pacchettizzata di
@@ -2371,13 +2302,22 @@ class UpdatePage(PlainDialogs, QWidget):
         # (db_update_policy). None finché il probe non risponde.
         self._db_info: DbInfo | None = None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(15)
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(30, 30, 30, 30)
+        page_layout.setSpacing(15)
 
-        title = QLabel("Aggiornamento Database Virus")
+        title = QLabel("Aggiornamenti")
         title.setStyleSheet("font-size: 22px; font-weight: bold;")
-        layout.addWidget(title)
+        page_layout.addWidget(title)
+
+        # Due riquadri: la versione del programma e il database dei virus.
+        self.app_update = AppUpdateGroup()
+        page_layout.addWidget(self.app_update)
+
+        db_group = QGroupBox("Aggiornamento database virus")
+        layout = QVBoxLayout(db_group)
+        layout.setSpacing(12)
+        page_layout.addWidget(db_group, 1)
 
         desc = QLabel(
             "Aggiorna le definizioni dei virus riavviando il servizio di sistema "
@@ -2392,7 +2332,6 @@ class UpdatePage(PlainDialogs, QWidget):
         self.db_status_label.setTextFormat(Qt.PlainText)
         self.db_status_label.setWordWrap(True)
         layout.addWidget(self.db_status_label)
-        layout.addSpacing(10)
 
         self.update_button = QPushButton("Aggiorna Database")
         self.update_button.setObjectName("PrimaryButton")
@@ -2710,7 +2649,6 @@ class _ScheduleForm:
     interval: int
     unit: str
     target: str
-    timer_time: str  # "HH:MM" del timer di sistema, scritto al clic come gli altri
 
 
 class SchedulerPage(PlainDialogs, QWidget):
@@ -2728,12 +2666,6 @@ class SchedulerPage(PlainDialogs, QWidget):
         self._refresh_again = False
         self._put_running = False
         self._save_running = False
-        self._timer_refresh_running = False
-        self._timer_refresh_again = False
-        self.timer_state: bool | None = None
-        # Dall'AppImage le unit del timer non esistono (appimage.py):
-        # niente systemctl --user, drop-in né orario del timer.
-        self.system_timer_available = system_timer_available()
 
         # Scroll area come in SettingsPage: con il gruppo delle cartelle
         # escluse l'altezza minima supera quella della finestra predefinita
@@ -2761,69 +2693,15 @@ class SchedulerPage(PlainDialogs, QWidget):
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        # Il timer systemd (klamav-scan.timer) e questa pianificazione sono
-        # alternativi: con entrambi attivi la home verrebbe scansionata due
-        # volte, con due quarantene se le impostazioni divergono. La label
-        # dice lo stato reale del timer nel punto dove si configura, come
-        # "Real-Time parziale".
-        self.system_timer_label = QLabel("")
-        self.system_timer_label.setWordWrap(True)
-        self.system_timer_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
-        self.system_timer_label.setVisible(False)
-        layout.addWidget(self.system_timer_label)
-        # Esito della rigenerazione del drop-in all'avvio
-        # (MainWindow._refresh_system_dropin): visibile per la sessione,
-        # finché un salvataggio non riscrive comunque il drop-in.
-        self.dropin_notice_label = QLabel("")
-        self.dropin_notice_label.setWordWrap(True)
-        self.dropin_notice_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
-        self.dropin_notice_label.setVisible(False)
-        layout.addWidget(self.dropin_notice_label)
-        # Avviso di scansione del timer interrotta (MainWindow, all'avvio, e
-        # refresh_system_timer a ogni apertura della pagina): resta finché
-        # una scansione del timer non arriva alla fine.
-        self.timer_scan_label = QLabel("")
-        self.timer_scan_label.setWordWrap(True)
-        self.timer_scan_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
-        self.timer_scan_label.setVisible(False)
-        layout.addWidget(self.timer_scan_label)
+        # Resti del timer di sistema tolti all'avvio (legacy_timer,
+        # MainWindow._cleanup_legacy_timer): visibile per la sessione.
+        self.legacy_timer_label = QLabel("")
+        self.legacy_timer_label.setTextFormat(Qt.PlainText)
+        self.legacy_timer_label.setWordWrap(True)
+        self.legacy_timer_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
+        self.legacy_timer_label.setVisible(False)
+        layout.addWidget(self.legacy_timer_label)
         layout.addSpacing(10)
-
-        # Orario del timer di sistema: è della unit klamav-scan.timer, non
-        # della pianificazione interna qui sotto (le due sono alternative).
-        # La unit spedita ha OnCalendar=daily, cioè mezzanotte: finora
-        # cambiare orario voleva dire scrivere a mano il drop-in del timer.
-        system_group = QGroupBox("Scansione di sistema (klamav-scan.timer)")
-        sys_layout = QVBoxLayout(system_group)
-        time_row = QHBoxLayout()
-        time_row.addWidget(QLabel("Ogni giorno alle:"))
-        self.timer_time_edit = QTimeEdit(QTime(0, 0))
-        self.timer_time_edit.setDisplayFormat("HH:mm")
-        self.timer_time_edit.setTimeRange(QTime(0, 0), QTime(23, 59))
-        self.timer_time_edit.setFixedHeight(36)
-        time_row.addWidget(self.timer_time_edit)
-        time_row.addStretch()
-        sys_layout.addLayout(time_row)
-        timer_desc = QLabel(
-            "Con un ritardo casuale fino a 30 minuti (RandomizedDelaySec). La "
-            "scansione di sistema vale anche con KlamAV-Py chiuso; a mezzanotte è "
-            "quella predefinita della unit, senza drop-in da gestire. Se l'orario "
-            "scelto per oggi è già passato e da allora la scansione non è partita, "
-            "parte subito dopo il salvataggio: systemd recupera quella persa "
-            "(Persistent=true), come all'accensione dopo un orario a PC spento."
-        )
-        timer_desc.setWordWrap(True)
-        timer_desc.setStyleSheet("font-size: 12px; color: palette(mid);")
-        sys_layout.addWidget(timer_desc)
-        layout.addWidget(system_group)
-        # Dall'AppImage il gruppo non c'è e al suo posto si dice perché,
-        # nel punto dove si configura (come le altre label di avviso).
-        self.no_system_timer_label = QLabel(appimage.SYSTEM_TIMER_NOTE)
-        self.no_system_timer_label.setWordWrap(True)
-        self.no_system_timer_label.setStyleSheet("font-size: 13px; color: palette(highlight);")
-        layout.addWidget(self.no_system_timer_label)
-        system_group.setVisible(self.system_timer_available)
-        self.no_system_timer_label.setVisible(not self.system_timer_available)
 
         schedule_group = QGroupBox("Pianificazione Automatica")
         s_layout = QVBoxLayout(schedule_group)
@@ -2865,16 +2743,12 @@ class SchedulerPage(PlainDialogs, QWidget):
 
         layout.addWidget(schedule_group)
 
-        # Esclusioni: una lista sola per questa pianificazione e per il
-        # timer di sistema (scan_exclusions). Validate contro entrambe le
-        # radici; l'esito di ogni voce (icona e tooltip) è ricalcolato
+        # Esclusioni (scan_exclusions), validate contro la cartella da
+        # scansionare; l'esito di ogni voce (icona e tooltip) è ricalcolato
         # quando cambia la cartella da scansionare.
         excl_group = QGroupBox("Cartelle escluse")
         e_layout = QVBoxLayout(excl_group)
         excl_desc = QLabel(
-            "Non vengono controllate né da questa pianificazione né dal timer di "
-            "sistema (klamav-scan.timer). La cartella di quarantena è sempre esclusa."
-            if self.system_timer_available else
             "Non vengono controllate da questa pianificazione. La cartella di "
             "quarantena è sempre esclusa."
         )
@@ -2962,75 +2836,12 @@ class SchedulerPage(PlainDialogs, QWidget):
     def update_progress(self, text: str) -> None:
         self.execution_status_label.setText(text)
 
-    def showEvent(self, event) -> None:  # noqa: N802 - API Qt
-        super().showEvent(event)
-        self.refresh_system_timer()
-
-    def refresh_system_timer(self) -> None:
-        """Aggiorna la label sul timer di sistema. systemctl --user (fino a
-        10 s di timeout) e la lettura degli override girano fuori dal thread
-        della GUI; lo stato arriva in self.timer_state (None: sconosciuto,
-        per esempio senza manager systemd utente). Dall'AppImage nulla: il
-        timer non è installato, e timer_state resta None."""
-        if not self.system_timer_available:
-            return
-        if self._timer_refresh_running:
-            self._timer_refresh_again = True
-            return
-        self._timer_refresh_running = True
-        self._timer_refresh_again = False
-        try:
-            tcp = load_endpoint(self.settings).is_tcp
-        except ValueError:
-            tcp = False
-
-        def check():
-            state = timer_enabled()
-            if state is True:
-                # Anche gli override estranei del timer: un drop-in scritto
-                # a mano che imposta OnCalendar renderebbe l'orario scelto
-                # qui privo di effetto, e la pagina deve dirlo.
-                overrides = foreign_overrides(tcp=tcp) + foreign_timer_overrides()
-            else:
-                overrides = []
-            return state, overrides, check_interrupted_timer_scan()
-
-        run_off_gui_thread(check, self._timer_state_done)
-
-    def _timer_state_done(self, result) -> None:
-        self._timer_refresh_running = False
-        if self._timer_refresh_again:
-            self.refresh_system_timer()
-            return
-        state, overrides, interrotta = (None, [], None) if isinstance(result, Exception) else result
-        self.timer_state = state
-        # L'avviso della scansione interrotta si aggiorna qui, non solo
-        # all'avvio: una scansione finita mentre la GUI era aperta lo fa
-        # sparire alla prossima apertura della pagina.
-        self.set_timer_scan_notice("" if interrotta is None else interrupted_notice(interrotta))
-        if state is True:
-            text = (
-                "La scansione programmata di sistema (klamav-scan.timer) è attiva: "
-                "controlla ogni giorno l'intera home, anche con KlamAV-Py chiuso. "
-                "È alternativa a questa pianificazione."
-            )
-            if self.settings.value("schedule_enabled", False, type=bool):
-                text += " Al momento sono attive entrambe: la home viene scansionata due volte."
-            if overrides:
-                text += "\n\nAttenzione: " + " ".join(o.describe() for o in overrides)
-            self.system_timer_label.setText(text)
-        self.system_timer_label.setVisible(state is True)
-
     def set_next_run(self, text: str) -> None:
         self.next_run_label.setText(text)
 
-    def set_dropin_notice(self, text: str) -> None:
-        self.dropin_notice_label.setText(text)
-        self.dropin_notice_label.setVisible(bool(text))
-
-    def set_timer_scan_notice(self, text: str) -> None:
-        self.timer_scan_label.setText(text)
-        self.timer_scan_label.setVisible(bool(text))
+    def set_legacy_timer_notice(self, text: str) -> None:
+        self.legacy_timer_label.setText(text)
+        self.legacy_timer_label.setVisible(bool(text))
 
     def _browse_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Seleziona cartella da scansionare", self.target_edit.text())
@@ -3170,55 +2981,6 @@ class SchedulerPage(PlainDialogs, QWidget):
             self.excl_list.takeItem(self.excl_list.row(item))
         self._update_exclusion_buttons()
 
-    def _sync_system_dropin(
-        self, excludes: list[str], timer_time: str, timer_disabled: bool = False
-    ) -> tuple[bool, bool] | None:
-        """
-        Rigenera i drop-in di klamav-scan.service (con le nuove esclusioni e
-        con quarantena ed endpoint già salvati nelle Impostazioni: stato
-        completo, vedi render_dropin) e di klamav-scan.timer (l'orario).
-        None, con un avviso, se il salvataggio va annullato; altrimenti
-        (drop-in cambiato — service o timer —, endpoint TCP), per il
-        daemon-reload e il controllo degli override estranei che _save_write
-        esegue fuori dal thread della GUI.
-        """
-        title = "Pianificazione Scansioni"
-        try:
-            state = DropinState.from_settings(self.settings, excludes=excludes)
-        except ValueError as exc:
-            QMessageBox.warning(
-                self, title,
-                f"Impostazioni di connessione a clamd non valide ({exc}): correggile "
-                "nelle Impostazioni.\n\nLa pianificazione non è stata salvata.",
-            )
-            return None
-        try:
-            # Conflitti su TUTTI e due i file prima di scriverne uno:
-            # scoprirlo sul secondo lascerebbe il primo scritto con valori
-            # che le impostazioni non hanno salvato (tutto o nulla).
-            for path in (dropin_path(), timer_dropin_path()):
-                conflict = dropin_conflict(path)
-                if conflict is not None:
-                    raise conflict
-            # Nessuna `or` fra le due chiamate: cortocircuiterebbe la
-            # seconda quando la prima ha già cambiato qualcosa.
-            service_changed = sync_dropin(state.render())
-            timer_changed = sync_dropin(
-                render_timer_dropin(timer_time), path=timer_dropin_path()
-            )
-            changed = service_changed or timer_changed
-        except (DropinConflict, OSError) as exc:
-            reason = str(exc) if isinstance(exc, DropinConflict) else (
-                f"Impossibile aggiornare la scansione programmata di sistema:\n{exc}"
-            )
-            tail = "La pianificazione non è stata salvata."
-            if timer_disabled:
-                tail += " Il timer di sistema era già stato disattivato."
-            QMessageBox.warning(self, title, f"{reason}\n\n{tail}")
-            return None
-        return changed, state.endpoint.is_tcp
-
-
     def _load_settings(self) -> None:
         self.enable_check.setChecked(self.settings.value("schedule_enabled", False, type=bool))
         self.interval_spin.setValue(self.settings.value("schedule_interval", 24, type=int))
@@ -3229,9 +2991,6 @@ class SchedulerPage(PlainDialogs, QWidget):
             self.unit_combo.setCurrentIndex(idx)
 
         self.target_edit.setText(self.settings.value("schedule_target", str(Path.home())))
-
-        hh, mm = normalize_timer_time(self.settings.value("timer_time", "00:00")).split(":")
-        self.timer_time_edit.setTime(QTime(int(hh), int(mm)))
 
         self.excl_list.clear()
         for raw in load_schedule_excludes(self.settings):
@@ -3244,16 +3003,13 @@ class SchedulerPage(PlainDialogs, QWidget):
     def _save_schedule(self) -> None:
         """
         Ordine: validazione (esclusioni, quarantena, cartella interna),
-        scelta fra timer e pianificazione interna, drop-in, QSettings.
-        Niente viene salvato se un passo fallisce, così GUI e timer non
-        divergono.
+        poi QSettings. Niente viene salvato se la validazione fallisce.
 
         La validazione tocca il filesystem e gira fuori dal thread della
         GUI; il salvataggio prosegue in _save_validated con i valori letti
         qui (_ScheduleForm), non con quelli che l'utente cambia nel
-        frattempo. Rileggere la casella dopo la validazione salvava la
-        pianificazione interna attiva con una cartella mai validata come
-        tale e senza la domanda sul timer di sistema.
+        frattempo: rileggere la casella dopo la validazione salvava la
+        pianificazione attiva con una cartella mai validata come tale.
         """
         if self._save_running:
             return
@@ -3264,19 +3020,14 @@ class SchedulerPage(PlainDialogs, QWidget):
             interval=self.interval_spin.value(),
             unit=self.unit_combo.currentText(),
             target=self.target_edit.text(),
-            timer_time=self.timer_time_edit.time().toString("HH:mm"),
         )
         raws = self.excluded_dirs()
         roots = schedule_roots(form.target)
         quarantine_raw = self.settings.value("quarantine_dir", str(DEFAULT_QUARANTINE_DIR))
-
-        def check():
-            # Lo stato del timer serve solo se si attiva la pianificazione
-            # interna: systemctl --user può impiegare fino a 10 s.
-            state = timer_enabled() if form.enabled and self.system_timer_available else None
-            return validate_schedule(raws, roots, form.target, quarantine_raw, form.enabled), state
-
-        run_off_gui_thread(check, lambda result: self._save_validated(result, form))
+        run_off_gui_thread(
+            lambda: validate_schedule(raws, roots, form.target, quarantine_raw, form.enabled),
+            lambda result: self._save_validated(result, form),
+        )
 
     def _save_end(self) -> None:
         self._save_running = False
@@ -3284,8 +3035,6 @@ class SchedulerPage(PlainDialogs, QWidget):
 
     def _save_validated(self, result, form: "_ScheduleForm") -> None:
         title = "Pianificazione Scansioni"
-        # Prima della domanda sul timer: un salvataggio che fallirebbe per
-        # la validazione non deve aver già disattivato klamav-scan.timer.
         if isinstance(result, Exception):
             QMessageBox.warning(
                 self, title,
@@ -3294,7 +3043,7 @@ class SchedulerPage(PlainDialogs, QWidget):
             )
             self._save_end()
             return
-        (excludes, problems), timer_state = result
+        excludes, problems = result
         if problems:
             QMessageBox.warning(
                 self, title,
@@ -3302,62 +3051,6 @@ class SchedulerPage(PlainDialogs, QWidget):
             )
             self._save_end()
             return
-
-        if not (form.enabled and timer_state is True):
-            self._save_write(excludes, form, timer_disabled=False)
-            return
-        # Tre esiti, non due: chi apre questa pagina solo per le cartelle
-        # escluse (che valgono anche per il timer) deve poter salvare
-        # senza scegliere la pianificazione interna.
-        answer = QMessageBox.question(
-            self,
-            title,
-            "La scansione programmata di sistema (klamav-scan.timer) è attiva. "
-            "Le due pianificazioni sono alternative: con entrambe la home verrebbe "
-            "scansionata due volte.\n\n"
-            "Sì: disattiva il timer di sistema e usa questa pianificazione.\n"
-            "No: mantieni il timer; questa pianificazione resta disattivata.\n\n"
-            "In entrambi i casi le cartelle escluse vengono salvate e valgono "
-            "per tutte e due.",
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            QMessageBox.Cancel,
-        )
-        if answer == QMessageBox.Yes:
-            run_off_gui_thread(
-                disable_timer,
-                lambda problem: self._save_timer_disabled(problem, excludes, form),
-            )
-        elif answer == QMessageBox.No:
-            self._save_write(excludes, replace(form, enabled=False), timer_disabled=False)
-        else:
-            self._save_end()
-
-    def _save_timer_disabled(self, problem, excludes: list[str], form: "_ScheduleForm") -> None:
-        if problem:
-            QMessageBox.warning(
-                self,
-                "Pianificazione Scansioni",
-                "Non è stato possibile disattivare klamav-scan.timer, quindi la "
-                f"pianificazione non è stata salvata:\n{problem}",
-            )
-            self._save_end()
-            return
-        self._save_write(excludes, form, timer_disabled=True)
-
-    def _save_write(self, excludes: list[str], form: "_ScheduleForm", timer_disabled: bool) -> None:
-        # Il timer di sistema usa la stessa lista di esclusioni e lo stesso
-        # orario: drop-in prima di QSettings, e se non si può scrivere non si
-        # salva NULLA (GUI e timer userebbero configurazioni diverse senza
-        # che nessuno lo sappia). Dall'AppImage non c'è un timer da
-        # allineare: niente drop-in, niente systemctl --user.
-        if self.system_timer_available:
-            synced = self._sync_system_dropin(
-                excludes, form.timer_time, timer_disabled=timer_disabled
-            )
-            if synced is None:
-                self._save_end()
-                return
-            changed, tcp = synced
 
         # Le caselle mostrano ciò che è stato salvato, anche se nel frattempo
         # l'utente le aveva cambiate.
@@ -3367,32 +3060,9 @@ class SchedulerPage(PlainDialogs, QWidget):
         self.settings.setValue("schedule_unit", form.unit)
         self.settings.setValue("schedule_target", form.target)
         self.settings.setValue(SCHEDULE_EXCLUDES_KEY, excludes)
-        self.settings.setValue("timer_time", form.timer_time)
-
-        # Il daemon-reload fallito e gli override estranei sono solo avvisi,
-        # come nelle Impostazioni: le impostazioni sono già salvate.
-        if not self.system_timer_available:
-            self._save_done((None, []))
-            return
-        run_off_gui_thread(lambda: dropin_followup(changed, tcp), self._save_done)
-
-    def _save_done(self, result) -> None:
-        title = "Pianificazione Scansioni"
-        notes = (
-            [f"Impossibile completare l'aggiornamento del timer di sistema: {result}"]
-            if isinstance(result, Exception)
-            else dropin_notes(*result, what="le nuove impostazioni")
-        )
-        if notes:
-            QMessageBox.warning(
-                self, title,
-                "Pianificazione salvata, con queste note:\n\n" + "\n\n".join(notes),
-            )
 
         self._save_end()
-        self.set_dropin_notice("")  # drop-in appena riscritto, vedi sopra
         self.schedule_saved.emit()
-        self.refresh_system_timer()
 
         main_window = self.window()
         if hasattr(main_window, 'tray_icon') and main_window.tray_icon.isVisible():
@@ -3408,15 +3078,9 @@ class SettingsPage(PlainDialogs, QWidget):
         super().__init__(parent)
         # QSettings sempre con org/app ESPLICITI (vedi SchedulerPage).
         self.settings = QSettings(APP_NAME, APP_NAME)
-        # Avvisi non bloccanti dell'ultimo salvataggio (es. daemon-reload non
-        # riuscito): li mostra MainWindow nel messaggio di conferma.
+        # Avvisi non bloccanti dell'ultimo salvataggio: li mostra
+        # MainWindow nel messaggio di conferma.
         self.save_notes: list[str] = []
-        # Worker del controllo aggiornamenti: None quando nessun controllo
-        # è in corso. Vedi _check_updates / _release_update_check_worker.
-        self._update_check_worker: UpdateCheckWorker | None = None
-        # Salvataggio in attesa del daemon-reload (vedi _save_settings).
-        self._save_running = False
-        self._dropin_changed = False
 
         # FIX SOVRAPPOSIZIONE WIDGET: il contenuto della pagina (parecchi
         # widget a dimensione fissa: QLineEdit/QPushButton alti 36px,
@@ -3615,31 +3279,6 @@ class SettingsPage(PlainDialogs, QWidget):
 
         layout.addWidget(dolphin_group)
 
-        about_group = QGroupBox("Informazioni")
-        about_layout = QVBoxLayout(about_group)
-        self.version_label = QLabel(f"Versione corrente: {__version__}")
-        self.version_label.setStyleSheet("font-size: 12px; color: palette(mid);")
-        about_layout.addWidget(self.version_label)
-
-        self.db_status_label = QLabel("Database firme: verifica in corso…")
-        self.db_status_label.setTextFormat(Qt.PlainText)
-        self.db_status_label.setWordWrap(True)
-        self.db_status_label.setStyleSheet("font-size: 12px;")
-        about_layout.addWidget(self.db_status_label)
-
-        self.update_status_label = QLabel("")
-        self.update_status_label.setTextFormat(Qt.PlainText)
-        self.update_status_label.setWordWrap(True)
-        self.update_status_label.setStyleSheet("font-size: 12px;")
-        about_layout.addWidget(self.update_status_label)
-
-        self.check_update_btn = QPushButton("Controlla aggiornamenti")
-        self.check_update_btn.setFixedHeight(36)
-        self.check_update_btn.setIcon(QIcon.fromTheme("system-software-update"))
-        self.check_update_btn.clicked.connect(self._check_updates)
-        about_layout.addWidget(self.check_update_btn)
-        layout.addWidget(about_group)
-
         buttons_row = QHBoxLayout()
         buttons_row.addStretch()
 
@@ -3725,9 +3364,6 @@ class SettingsPage(PlainDialogs, QWidget):
     def _remove_rt_dir(self) -> None:
         for item in self.rt_dirs_list.selectedItems(): self.rt_dirs_list.takeItem(self.rt_dirs_list.row(item))
 
-    def set_db_info(self, info: DbInfo | None) -> None:
-        self.db_status_label.setText(describe(info))
-
     def _load_settings(self) -> None:
         self.autostart_check.setChecked(self.settings.value("autostart_system", False, type=bool))
         self.start_in_tray_check.setChecked(self.settings.value("start_in_tray", False, type=bool))
@@ -3764,19 +3400,13 @@ class SettingsPage(PlainDialogs, QWidget):
             self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         ) == QMessageBox.Yes
 
-    def _prepare_quarantine_dir(self, endpoint: ClamdEndpoint) -> Path | None:
+    def _prepare_quarantine_dir(self) -> Path | None:
         """
-        Valida la directory di quarantena e allinea la scansione programmata
-        di sistema (drop-in di klamav-scan.service) a quarantena ed endpoint
-        di clamd. Ritorna il percorso risolto da salvare, o None se il
-        salvataggio va annullato.
+        Valida la directory di quarantena e la prepara (0700). Ritorna il
+        percorso risolto da salvare, o None se il salvataggio va annullato.
 
-        Ordine voluto: validazione, conferme, directory, drop-in; QSettings
-        solo dopo, nel chiamante. Se il drop-in non si può scrivere le
-        Impostazioni NON vengono salvate: GUI e timer userebbero due
-        quarantene diverse senza che nessuno lo sappia. Il daemon-reload
-        invece è solo un avviso: il suo fallimento è un ritardo, non una
-        divergenza.
+        Ordine voluto: validazione, conferme, directory; QSettings solo
+        dopo, nel chiamante.
         """
         title = "Cartella quarantena"
         # Anche la cartella della pianificazione interna: una quarantena che
@@ -3818,46 +3448,17 @@ class SettingsPage(PlainDialogs, QWidget):
             QMessageBox.warning(self, title, f"Impossibile preparare «{path}»:\n{exc}")
             return None
 
-        if not system_timer_available():
-            # AppImage: nessun timer di sistema da allineare.
-            self._dropin_changed = False
-            self.quar_edit.setText(str(path))
-            return path
-        try:
-            # Stato completo: anche le cartelle escluse della Pianificazione,
-            # altrimenti questo salvataggio le toglierebbe dal timer.
-            changed = sync_dropin(DropinState.from_settings(
-                self.settings, quarantine=path, endpoint=endpoint,
-            ).render())
-        except DropinConflict as exc:
-            QMessageBox.warning(self, title, f"{exc}\n\nLe impostazioni non sono state salvate.")
-            return None
-        except OSError as exc:
-            QMessageBox.warning(
-                self,
-                title,
-                "Impossibile aggiornare la scansione programmata di sistema:\n"
-                f"{exc}\n\nLe impostazioni non sono state salvate.",
-            )
-            return None
-
-        # daemon-reload e override estranei (es. override.conf di
-        # "systemctl --user edit"): solo avvisi, verificati da
-        # _save_settings fuori dal thread della GUI dopo il salvataggio.
-        self._dropin_changed = changed
         self.quar_edit.setText(str(path))
         return path
 
     def _save_settings(self) -> None:
-        if self._save_running:
-            return  # verifiche del salvataggio precedente ancora in corso
         self.save_notes = []
         try:
             endpoint = self._endpoint_from_form()
         except ValueError as exc:
             QMessageBox.warning(self, "Connessione a clamd", f"Impostazione non valida: {exc}")
             return
-        quarantine_dir = self._prepare_quarantine_dir(endpoint)
+        quarantine_dir = self._prepare_quarantine_dir()
         if quarantine_dir is None:
             return
 
@@ -3872,25 +3473,6 @@ class SettingsPage(PlainDialogs, QWidget):
         rt_dirs = [self.rt_dirs_list.item(i).text() for i in range(self.rt_dirs_list.count())]
         self.settings.setValue("realtime_paths", rt_dirs)
 
-        # systemctl --user daemon-reload (timeout 10 s) fuori dal thread della
-        # GUI: le impostazioni sono già salvate, l'esito dà solo avvisi.
-        self._save_running = True
-        self.save_btn.setEnabled(False)
-        changed, tcp = self._dropin_changed, endpoint.is_tcp
-        if not system_timer_available():
-            self._save_settings_done((None, []))
-            return
-        run_off_gui_thread(lambda: dropin_followup(changed, tcp), self._save_settings_done)
-
-    def _save_settings_done(self, result) -> None:
-        self._save_running = False
-        self.save_btn.setEnabled(True)
-        if isinstance(result, Exception):
-            self.save_notes.append(
-                f"Impossibile completare l'aggiornamento del timer di sistema: {result}"
-            )
-        else:
-            self.save_notes.extend(dropin_notes(*result, what="le nuove impostazioni"))
 
         self.settings_saved.emit()
 
@@ -3899,111 +3481,6 @@ class SettingsPage(PlainDialogs, QWidget):
             main_window.tray_icon.showMessage(
                 APP_NAME, "Impostazioni salvate con successo.", _icon("emblem-checked"), 3000
             )
-
-    def _check_updates_automatico(self) -> None:
-        """
-        Controllo all'avvio: salta se ne è stato fatto uno da poco (vedi
-        _UPDATE_CHECK_MIN_INTERVAL_SECONDS). Punto di ingresso separato
-        dal pulsante proprio perché il limite non deve valere per quello.
-        """
-        ultimo = self.settings.value(_LAST_UPDATE_CHECK_KEY, 0.0, type=float)
-        if not _controllo_aggiornamenti_dovuto(ultimo, time.time()):
-            return
-        self._check_updates()
-
-    def _check_updates(self) -> None:
-        # Due punti di ingresso (pulsante + QTimer all'avvio): senza questa
-        # guardia un secondo worker sovrascriverebbe il riferimento al primo
-        # ancora in esecuzione.
-        if self._update_check_worker is not None and self._update_check_worker.isRunning():
-            return
-
-        self.check_update_btn.setEnabled(False)
-        self.check_update_btn.setText("Controllo in corso…")
-        self.update_status_label.setText("")
-        self.update_status_label.setToolTip("")
-        self.update_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
-
-        # Niente parent Qt: il rilascio passa da _retire_qthread come per
-        # tutti gli altri worker, così alla distruzione della pagina Qt non
-        # distrugge un QThread ancora in esecuzione (timeout di rete 15 s).
-        worker = UpdateCheckWorker(__version__)
-        self._update_check_worker = worker
-        worker.check_finished.connect(self._on_update_check_finished)
-        worker.error.connect(self._on_update_check_error)
-        worker.start()
-
-    def _release_update_check_worker(self) -> None:
-        worker, self._update_check_worker = self._update_check_worker, None
-        if worker is not None:
-            _retire_qthread(worker)
-
-    def _on_update_check_finished(self, info: UpdateInfo) -> None:
-        self._release_update_check_worker()
-        # Registrato solo sul buon esito: un controllo fallito (rete
-        # assente) non deve consumare la finestra delle sei ore.
-        self.settings.setValue(_LAST_UPDATE_CHECK_KEY, time.time())
-        self.check_update_btn.setEnabled(True)
-        self.check_update_btn.setText("Controlla aggiornamenti")
-
-        if info.has_update:
-            self.version_label.setText(
-                f"Versione corrente: {info.current_version}  →  Disponibile: {info.latest_version}"
-            )
-            self.version_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #d32f2f;")
-
-            # I dati arrivano dalla rete: escape sempre, e link cliccabile
-            # solo se punta davvero alle release del repository.
-            version_html = html.escape(info.latest_version)
-            date_suffix = f" rilasciata il {info.published_at}" if info.published_at else ""
-            date_html = html.escape(date_suffix)
-            if info.release_url_trusted:
-                self.update_status_label.setTextFormat(Qt.RichText)
-                self.update_status_label.setOpenExternalLinks(True)
-                self.update_status_label.setText(
-                    f"Nuova versione <a href='{html.escape(info.release_url, quote=True)}'>"
-                    f"{version_html}</a>{date_html}."
-                )
-            else:
-                self.update_status_label.setTextFormat(Qt.PlainText)
-                self.update_status_label.setOpenExternalLinks(False)
-                self.update_status_label.setText(
-                    f"Nuova versione {info.latest_version}{date_suffix}."
-                )
-            self.update_status_label.setStyleSheet("font-size: 12px; color: #d32f2f;")
-
-            notes = info.release_notes
-            notes_preview = notes[:300] + ("…" if len(notes) > 300 else "")
-            # I tooltip Qt diventano rich text se il contenuto "sembra" HTML:
-            # escape + <pre> per mostrarlo sempre come testo.
-            self.update_status_label.setToolTip(
-                f"<b>Note di rilascio:</b><pre>{html.escape(notes_preview)}</pre>"
-            )
-
-            main_window = self.window()
-            if hasattr(main_window, "tray_icon") and main_window.tray_icon.isVisible():
-                main_window.tray_icon.showMessage(
-                    APP_NAME,
-                    f"È disponibile la versione {info.latest_version}.",
-                    _icon("system-software-update"),
-                    5000,
-                )
-        else:
-            self.version_label.setText(f"Versione corrente: {info.current_version} (aggiornata)")
-            self.version_label.setStyleSheet("font-size: 12px; color: palette(mid);")
-            self.update_status_label.setTextFormat(Qt.PlainText)
-            self.update_status_label.setText("Hai già l'ultima versione.")
-            self.update_status_label.setToolTip("")
-            self.update_status_label.setStyleSheet("font-size: 12px; color: palette(mid);")
-
-    def _on_update_check_error(self, message: str) -> None:
-        self._release_update_check_worker()
-        self.check_update_btn.setEnabled(True)
-        self.check_update_btn.setText("Controlla aggiornamenti")
-        self.update_status_label.setTextFormat(Qt.PlainText)
-        self.update_status_label.setText(f"Errore: {message}")
-        self.update_status_label.setToolTip("")
-        self.update_status_label.setStyleSheet("font-size: 12px; color: #d32f2f;")
 
     def _install_dolphin(self):
         try:
@@ -4153,11 +3630,12 @@ class MainWindow(PlainDialogs, QMainWindow):
         self._add_sidebar_item("Scansione", "edit-find", "document-search")
         self._add_sidebar_item("Cronologia", "view-history", "document-open-recent")
         self._add_sidebar_item("Quarantena", "emblem-virus", "emblem-lock", "user-trash", "edit-delete")
-        self._add_sidebar_item("Segnalazioni", "dialog-warning", "emblem-important")
+        self._add_sidebar_item("Segnalazioni Euristiche", "dialog-warning", "emblem-important")
         self._add_sidebar_item("Aggiornamenti", "system-software-update", "view-refresh")
         self._add_sidebar_item("Real-Time", "view-history", "chronometer")
         self._add_sidebar_item("Pianificazione", "view-time-schedule", "task-recurring")
         self._add_sidebar_item("Impostazioni", "configure", "preferences-system")
+        self._add_sidebar_item("Info", "help-about", "dialog-information")
 
         self.sidebar.setCurrentRow(0)
         self.sidebar.currentRowChanged.connect(self._change_page)
@@ -4174,6 +3652,7 @@ class MainWindow(PlainDialogs, QMainWindow):
         self.realtime_page = RealTimePage()
         self.scheduler_page = SchedulerPage()
         self.settings_page = SettingsPage()
+        self.info_page = InfoPage()
 
         self.settings_page.settings_saved.connect(self._on_settings_saved)
         self.update_page.db_info_changed.connect(self._apply_db_info)
@@ -4187,6 +3666,7 @@ class MainWindow(PlainDialogs, QMainWindow):
         self.content_stack.addWidget(self.realtime_page)
         self.content_stack.addWidget(self.scheduler_page)
         self.content_stack.addWidget(self.settings_page)
+        self.content_stack.addWidget(self.info_page)
 
         splitter.addWidget(self.sidebar)
         splitter.addWidget(self.content_stack)
@@ -4216,13 +3696,11 @@ class MainWindow(PlainDialogs, QMainWindow):
         self._schedule_aborted_noted = False
         self._bg_aborted: str | None = None
         # Segnalazioni «solo segnalazione» nuove della scansione programmata
-        # in corso: la notifica finale rimanda alla pagina Segnalazioni.
+        # in corso: la notifica finale rimanda alla pagina Segnalazioni Euristiche.
         self._bg_new_reports = 0
         # Messaggi di error della scansione programmata in corso (escluso il
         # motivo di aborted): scritti nel log, contati nella notifica.
         self._bg_errors = 0
-        self._double_schedule_noted = False
-        self._double_schedule_checking = False
         self.bg_worker = None
         # Log della scansione programmata scritto man mano (vedi
         # _bg_log_write): memoria costante e niente log perso se la GUI
@@ -4295,91 +3773,37 @@ class MainWindow(PlainDialogs, QMainWindow):
         self._check_clamd(self._clamd_endpoint())
 
         if self.settings.value("auto_check_updates", False, type=bool):
-            QTimer.singleShot(3000, self.settings_page._check_updates_automatico)
+            QTimer.singleShot(3000, self.update_page.app_update._check_updates_automatico)
 
         # Se avviata con un target (es. da Dolphin in prima istanza), avvia la scansione
         if scan_target:
             self.scan_page.start_external_scan(scan_target)
 
-        self._system_timer_at_startup()
+        self._cleanup_legacy_timer()
 
-    def _system_timer_at_startup(self) -> None:
-        """Controlli del timer di sistema all'avvio: drop-in da rigenerare e
-        scansione del timer interrotta. Dall'AppImage nessuno dei due: le
-        unit non sono installate (appimage.py)."""
-        if not system_timer_available():
-            return
-        self._refresh_system_dropin()
-        self._check_interrupted_timer_scan()
-
-    def _refresh_system_dropin(self) -> None:
+    def _cleanup_legacy_timer(self) -> None:
         """
-        Una volta per avvio: un drop-in nostro scritto da una versione
-        precedente torna al testo che il salvataggio produrrebbe adesso
-        (refresh_outdated), con daemon-reload. Rigenera anche il drop-in
-        dell'orario del timer. Lettura, scrittura e systemctl --user fuori
-        dal thread della GUI; l'esito, se c'è, nella pagina Pianificazione
-        e su stderr. Un fallimento non si ritenta nella stessa sessione: il
-        prossimo salvataggio delle Impostazioni o della Pianificazione
-        riscrive comunque i drop-in.
+        Una volta per avvio: chi aggiorna da una versione con la scansione
+        programmata di sistema si ritrova abilitazione, drop-in e marcatore
+        del timer, che non esiste più (legacy_timer). Si tolgono quelli
+        nostri fuori dal thread della GUI (systemctl --user); l'esito nella
+        pagina Pianificazione, su stderr e, una volta sola, nella tray.
         """
-        since = dropin_generation()
-        timer_time = normalize_timer_time(self.settings.value("timer_time", "00:00"))
-        try:
-            state = DropinState.from_settings(self.settings)
-        except DropinSettingsError as exc:
-            self._dropin_refreshed(exc)
-            return
-        run_off_gui_thread(
-            lambda: refresh_dropin_at_startup(state, since, timer_time),
-            self._dropin_refreshed,
-        )
+        run_off_gui_thread(legacy_timer.cleanup, self._legacy_timer_cleaned)
 
-    def _dropin_refreshed(self, result) -> None:
-        notice = dropin_refresh_notice(result)
+    def _legacy_timer_cleaned(self, result) -> None:
+        if isinstance(result, Exception):
+            print(f"{APP_NAME}: pulizia del timer di sistema non riuscita: {result}",
+                  file=sys.stderr)
+            return
+        notice = None if result is None else result.notice()
         if notice is None:
             return
-        self.scheduler_page.set_dropin_notice(notice)
+        self.scheduler_page.set_legacy_timer_notice(notice)
         print(f"{APP_NAME}: {notice}", file=sys.stderr)
-
-    def _check_interrupted_timer_scan(self) -> None:
-        """
-        Una volta per avvio: una scansione del timer uccisa a metà (per
-        esempio dallo spegnimento del PC) non notifica nulla e Persistent=
-        true non la ripete, quindi resta visibile solo nel marcatore di
-        timer_scan_state. La pagina Pianificazione ripete il controllo a
-        ogni apertura.
-        """
-        run_off_gui_thread(check_interrupted_timer_scan, self._timer_scan_checked)
-
-    def _timer_scan_checked(self, result) -> None:
-        if isinstance(result, Exception):
-            # Non essenziale: si ripete alla prossima apertura della pagina
-            # Pianificazione.
-            print(
-                f"{APP_NAME}: controllo dell'ultima scansione del timer non riuscito: {result}",
-                file=sys.stderr,
-            )
-            return
-        self.scheduler_page.set_timer_scan_notice(
-            "" if result is None else interrupted_notice(result)
-        )
-        if result is None:
-            return
-        print(f"{APP_NAME}: {interrupted_notice(result)}", file=sys.stderr)
-        # Notifica una volta per interruzione: altrimenti chi spegne il PC
-        # ogni sera la vedrebbe a ogni login finché una scansione non
-        # arriva alla fine. La chiave è l'ora di avvio della scansione
-        # interrotta.
-        key = str(result.started_at)
-        if self.settings.value("timer_scan_notified", "") != key:
-            self.settings.setValue("timer_scan_notified", key)
-            self.tray_icon.showMessage(
-                APP_NAME,
-                interrupted_notice(result),
-                _icon("dialog-warning"),
-                7000,
-            )
+        if not self.settings.value("legacy_timer_noted", False, type=bool):
+            self.settings.setValue("legacy_timer_noted", True)
+            self.tray_icon.showMessage(APP_NAME, notice, _icon("dialog-information"), 10000)
 
     def _reset_tray_tooltip(self) -> None:
         """Riporta il tooltip della tray al riposo: chiamato a fine di
@@ -4469,7 +3893,7 @@ class MainWindow(PlainDialogs, QMainWindow):
 
         for w in (
             self.update_page.worker,
-            self.settings_page._update_check_worker,
+            self.update_page.app_update._update_check_worker,
             getattr(self, "_ping_worker", None),
             getattr(self, "_db_info_worker", None),
             self.quarantine_page.worker,
@@ -4587,9 +4011,6 @@ class MainWindow(PlainDialogs, QMainWindow):
             )
 
     def _on_settings_saved(self) -> None:
-        # Il salvataggio ha appena riscritto il drop-in: l'esito della
-        # rigenerazione all'avvio è superato.
-        self.scheduler_page.set_dropin_notice("")
         endpoint = self._clamd_endpoint()
         self.scan_page.endpoint = endpoint
         self._start_ping(endpoint)
@@ -4703,40 +4124,12 @@ X-GNOME-Autostart-enabled=true
         except (TypeError, ValueError):
             return None
 
-    def _double_schedule_checked(self, state) -> None:
-        self._double_schedule_checking = False
-        if state is not True or self._double_schedule_noted:
-            return
-        # Ricontrollato qui: la pianificazione interna può essere stata
-        # disattivata mentre systemctl rispondeva.
-        if not self.settings.value("schedule_enabled", False, type=bool):
-            return
-        self._double_schedule_noted = True
-        self.tray_icon.showMessage(
-            APP_NAME,
-            "Sono attive sia la pianificazione interna sia il timer di sistema "
-            "klamav-scan.timer: la home verrebbe scansionata due volte. "
-            "Vedi la pagina Pianificazione.",
-            _app_icon(),
-            10000,
-        )
-
     def _load_schedule(self) -> None:
         enabled = self.settings.value("schedule_enabled", False, type=bool)
         if not enabled:
             self.schedule_timer.stop()
             self.scheduler_page.set_next_run("")
             return
-
-        # Entrambe le pianificazioni attive (il timer può essere stato
-        # abilitato da terminale dopo quella interna): una volta per
-        # sessione, senza bloccare nulla.
-        # systemctl --user fuori dal thread della GUI (timeout 10 s).
-        # Dall'AppImage il timer non esiste: nessuna doppia pianificazione.
-        if (system_timer_available() and not self._double_schedule_noted
-                and not self._double_schedule_checking):
-            self._double_schedule_checking = True
-            run_off_gui_thread(timer_enabled, self._double_schedule_checked)
 
         # Prima attivazione: si fissa la base a "adesso" invece di
         # scansionare subito (l'utente ha appena scelto un intervallo, non
@@ -4971,7 +4364,7 @@ X-GNOME-Autostart-enabled=true
                 status += (f" {totals.unreadable_dirs} cartelle non leggibili "
                            "(elenco nel log; se sono attese, escludile).")
             if getattr(self, "_bg_new_reports", 0):
-                status += " Alcuni file sono stati solo segnalati: vedi la pagina Segnalazioni."
+                status += " Alcuni file sono stati solo segnalati: vedi la pagina Segnalazioni Euristiche."
             if getattr(self, "_bg_errors", 0):
                 status += (f" {self._bg_errors} problemi durante la scansione "
                            "(dettaglio nel log, vedi Pianificazione).")
@@ -5474,7 +4867,7 @@ X-GNOME-Autostart-enabled=true
             title = f"{APP_NAME} - File sospetto"
             text = (f"{name}: rilevato ma NON messo in quarantena ({detail}). "
                     "Verificalo: puoi eliminarlo o registrarne la presa visione dalla "
-                    "pagina Segnalazioni.")
+                    "pagina Segnalazioni Euristiche.")
             icon = _icon("dialog-warning", "emblem-virus")
         else:
             title = f"{APP_NAME} - MINACCIA RILEVATA!"
@@ -5651,4 +5044,3 @@ X-GNOME-Autostart-enabled=true
 
     def _apply_db_info(self, info: DbInfo | None) -> None:
         self.update_page.set_db_info(info)
-        self.settings_page.set_db_info(info)

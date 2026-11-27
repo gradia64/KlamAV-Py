@@ -219,9 +219,3 @@ def test_worker_della_gui_registra_la_segnalazione(home):
     assert [r.path for r in _store().reports()] == [str(msg)]
 
 
-# -- la notifica del timer rimanda alla GUI ---------------------------------
-
-def test_notifica_del_timer_rimanda_alla_pagina_segnalazioni():
-    unit = (RADICE / "debian/klamav-py.klamav-scan-notify.user.service").read_text()
-    infetti = next(line for line in unit.splitlines() if "exit-code:1)" in line)
-    assert "Segnalazioni" in infetti

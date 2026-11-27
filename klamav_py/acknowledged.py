@@ -59,7 +59,7 @@ Key = Tuple[str, str]  # (sha256, firma)
 
 
 # Ambito di una presa visione, detto all'utente con le stesse parole nella
-# CLI, nella pagina Segnalazioni e nella documentazione. Una copia identica
+# CLI, nella pagina Segnalazioni Euristiche e nella documentazione. Una copia identica
 # altrove ha la stessa chiave: è voluto (vedi sopra), ma va saputo.
 SCOPE_NOTE = (
     "La presa visione vale per il contenuto e la firma, in qualunque percorso: "
@@ -300,7 +300,7 @@ class AckSnapshot:
 
 @dataclass(frozen=True)
 class PendingReport:
-    """Rilevamento «solo segnalazione» nuovo, per la pagina Segnalazioni
+    """Rilevamento «solo segnalazione» nuovo, per la pagina Segnalazioni Euristiche
     della GUI. identity è il contenuto riletto subito dopo il rilevamento:
     la presa visione registra QUELLO, non il contenuto del file al momento
     del clic; None se non si è potuto rileggere (niente azioni)."""
@@ -324,7 +324,7 @@ class ScanAcknowledgements:
 
     Le segnalazioni nuove si scrivono subito nel registro delle segnalazioni
     da valutare (pending_reports.py, `report_new`), da cui le legge la
-    pagina Segnalazioni anche quando le ha trovate il timer di sistema.
+    pagina Segnalazioni Euristiche anche quando le ha trovate la CLI.
     """
 
     def __init__(self, registry: Optional[AckRegistry] = None, pending=None):

@@ -1,7 +1,6 @@
 """
-Cartelle escluse nella pagina Pianificazione: una lista sola per la
-pianificazione interna e per il timer di sistema, validata contro
-entrambe le radici (scan_exclusions).
+Cartelle escluse nella pagina Pianificazione, validate contro la cartella
+della pianificazione interna (scan_exclusions).
 
 Il caso che motiva il salvataggio congiunto: un'esclusione valida con la
 cartella di prima (una sottodirectory della home) diventa non valida se
@@ -19,11 +18,10 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings, Qt, QTime  # noqa: E402
+from PySide6.QtCore import QSettings, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox  # noqa: E402
 
 import klamav_py.gui.main_window as mw  # noqa: E402
-from klamav_py.systemd_dropin import HEADER, dropin_path, render_timer_dropin  # noqa: E402
 from klamav_py.scan_totals import ScanTotals  # noqa: E402
 
 
@@ -57,24 +55,7 @@ def env(app, tmp_path, monkeypatch):
     monkeypatch.setattr(mw, "run_off_gui_thread", _inline)
     monkeypatch.setattr(mw, "DEFAULT_QUARANTINE_DIR", home / ".local/share/klamav-py/quarantine")
 
-    calls = SimpleNamespace(timer=False, disable=0, reload=0, shown=[], answers=[])
-    monkeypatch.setattr(mw, "timer_enabled", lambda: calls.timer)
-
-    def reload():
-        # Mai il vero systemctl --user: i test girano nella sessione di chi
-        # li lancia.
-        calls.reload += 1
-        return None
-
-    monkeypatch.setattr(mw, "daemon_reload", reload)
-    monkeypatch.setattr(mw, "foreign_overrides", lambda **kw: [])
-    monkeypatch.setattr(mw, "foreign_timer_overrides", lambda **kw: [])
-
-    def disable():
-        calls.disable += 1
-        return None
-
-    monkeypatch.setattr(mw, "disable_timer", disable)
+    calls = SimpleNamespace(shown=[], answers=[])
 
     def warning(parent, title, text, *a, **k):
         calls.shown.append(("warning", text))
@@ -88,7 +69,7 @@ def env(app, tmp_path, monkeypatch):
 
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(warning))
     monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
-    return SimpleNamespace(home=home, tmp=tmp_path, calls=calls, dropin=dropin_path())
+    return SimpleNamespace(home=home, tmp=tmp_path, calls=calls)
 
 
 def _settings():
@@ -127,10 +108,11 @@ def test_chiave_assente(env):
 
 
 def test_radici(env):
-    assert mw.schedule_roots("", home=env.home) == {"timer di sistema": env.home}
-    assert mw.schedule_roots("relativa", home=env.home) == {"timer di sistema": env.home}
+    # Solo la cartella della pianificazione interna: il timer di sistema,
+    # che aggiungeva la home, non c'è più.
+    assert mw.schedule_roots("", home=env.home) == {}
+    assert mw.schedule_roots("relativa", home=env.home) == {}
     assert mw.schedule_roots("~/Documenti", home=env.home) == {
-        "timer di sistema": env.home,
         "pianificazione interna": env.home / "Documenti",
     }
 
@@ -204,16 +186,6 @@ def test_cambio_cartella_che_invalida_una_esclusione(env):
     page._save_schedule()
     assert _kinds(env) == ["warning"]
     assert _settings().value("schedule_target") == str(env.home)  # nulla salvato
-
-
-def test_validazione_prima_della_domanda_sul_timer(env):
-    # Con esclusioni non valide il timer non va disattivato: il
-    # salvataggio fallirebbe comunque dopo.
-    env.calls.timer = True
-    page = _page(env, [str(env.home / "Documenti")], target=env.home / "Documenti")
-    page.enable_check.setChecked(True)
-    page._save_schedule()
-    assert _kinds(env) == ["warning"] and env.calls.disable == 0
 
 
 def test_voci_con_errore_segnalate_al_caricamento(env):
@@ -363,123 +335,6 @@ def test_scansione_programmata_non_completata_non_risulta_pulita(env, monkeypatc
     assert fake._schedule_aborted_noted is False
 
 
-# -- drop-in del timer di sistema ----------------------------------------
-
-def test_salvataggio_scrive_le_esclusioni_nel_dropin(env):
-    page = _page(env, [str(env.home / "vm")])
-    page._save_schedule()
-    text = env.dropin.read_text()
-    assert text.startswith(HEADER)
-    assert f'--exclude "{env.home / "vm"}"' in text
-    assert env.calls.reload == 1
-
-
-def test_lista_svuotata_rimuove_il_dropin(env):
-    page = _page(env, [str(env.home / "vm")])
-    page._save_schedule()
-    page.excl_list.setCurrentRow(0)
-    page._remove_exclusion()
-    page._save_schedule()
-    assert not env.dropin.exists()
-    assert env.calls.reload == 2
-
-
-def test_salvataggio_senza_cambi_non_ricarica(env):
-    page = _page(env)
-    page._save_schedule()
-    assert not env.dropin.exists() and env.calls.reload == 0
-
-
-def test_salvataggio_scrive_lorario_nel_dropin_del_timer(env):
-    page = _page(env)
-    page.timer_time_edit.setTime(QTime(9, 0))
-    page._save_schedule()
-    testo = mw.timer_dropin_path().read_text()
-    assert testo == render_timer_dropin("09:00")
-    assert _settings().value("timer_time") == "09:00"
-    # Il campo mostra ciò che è stato salvato.
-    assert page.timer_time_edit.time().toString("HH:mm") == "09:00"
-    assert env.calls.reload == 1
-
-    # Tornando a mezzanotte (il default della unit) il drop-in si toglie.
-    page.timer_time_edit.setTime(QTime(0, 0))
-    page._save_schedule()
-    assert not mw.timer_dropin_path().exists()
-    assert _settings().value("timer_time") == "00:00"
-    assert env.calls.reload == 2
-
-
-def test_orario_ed_esclusioni_insieme(env):
-    """Le due scritture non si cortocircuitano: cambiano il drop-in del
-    service E quello del timer nello stesso salvataggio."""
-    page = _page(env, [str(env.home / "vm")])
-    page.timer_time_edit.setTime(QTime(9, 30))
-    page._save_schedule()
-    assert f'--exclude "{env.home / "vm"}"' in env.dropin.read_text()
-    assert "OnCalendar=*-*-* 09:30:00" in mw.timer_dropin_path().read_text()
-    assert env.calls.reload == 1
-
-
-def test_dropin_del_timer_estraneo_nessun_salvataggio(env):
-    """Conflitto sul file del timer: niente viene scritto, nemmeno il
-    drop-in del service (tutto o nulla)."""
-    timer = mw.timer_dropin_path()
-    timer.parent.mkdir(parents=True)
-    timer.write_text("[Timer]\nOnCalendar=07:00\n")  # scritto a mano
-    page = _page(env, [str(env.home / "vm")])
-    page.timer_time_edit.setTime(QTime(9, 0))
-    page._save_schedule()
-    assert _kinds(env) == ["warning"]
-    assert not env.dropin.exists()
-    assert _settings().value("timer_time") is None
-    assert timer.read_text() == "[Timer]\nOnCalendar=07:00\n"
-
-
-def test_dropin_estraneo_nessun_salvataggio(env):
-    env.dropin.parent.mkdir(parents=True)
-    env.dropin.write_text("[Service]\n# scritto a mano\n")
-    page = _page(env, [str(env.home / "vm")])
-    page.target_edit.setText(str(env.home / "Documenti"))
-    page._save_schedule()
-    assert _kinds(env) == ["warning"]
-    assert _settings().value("schedule_target") == str(env.home)
-    assert env.dropin.read_text() == "[Service]\n# scritto a mano\n"
-
-
-def test_quarantena_salvata_resta_nel_dropin(env):
-    # Stato completo: salvare la Pianificazione non deve perdere la
-    # quarantena scelta nelle Impostazioni.
-    q = env.home / "Quarantena"
-    s = _settings()
-    s.setValue("quarantine_dir", str(q))
-    s.sync()
-    page = _page(env, [str(env.home / "vm")])
-    page._save_schedule()
-    text = env.dropin.read_text()
-    assert f'--quarantine "{q}"' in text and "--exclude" in text
-
-
-def test_impostazioni_conservano_le_esclusioni_nel_dropin(env, monkeypatch):
-    # Il verso opposto: salvare le Impostazioni (quarantena) rigenera il
-    # drop-in con le esclusioni già salvate dalla Pianificazione.
-    from klamav_py.quarantine_location import decide
-
-    monkeypatch.setattr(
-        mw, "decide_quarantine_dir",
-        lambda raw, **kw: decide(raw, unit_hidden=(), mountinfo="22 1 8:1 / / rw - ext4 /dev/sda1 rw\n",
-                                 volatile_roots=(), **kw),
-    )
-    s = _settings()
-    s.setValue(mw.SCHEDULE_EXCLUDES_KEY, [str(env.home / "vm")])
-    s.sync()
-    page = mw.SettingsPage()
-    page.quar_edit.setText(str(env.home / "Quarantena"))
-    page._save_settings()
-    text = env.dropin.read_text()
-    assert f'--exclude "{env.home / "vm"}"' in text
-    assert f'--quarantine "{env.home / "Quarantena"}"' in text
-
-
 # -- aggiunta con percorso scritto ----------------------------------------
 
 def test_aggiunta_percorso_scritto_anche_nascosto(env, monkeypatch):
@@ -497,77 +352,6 @@ def test_aggiunta_percorso_annullata_o_vuota(env, monkeypatch, risposta):
     monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: risposta))
     page._add_typed_exclusion()
     assert page.excluded_dirs() == [] and _kinds(env) == []
-
-
-# -- scelta fra timer e pianificazione interna ------------------------------
-
-def _enabled():
-    return _settings().value("schedule_enabled", False, type=bool)
-
-
-def test_timer_attivo_annulla_non_salva_nulla(env):
-    env.calls.timer = True
-    env.calls.answers = [QMessageBox.Cancel]
-    page = _page(env, [str(env.home / "vm")])
-    page.enable_check.setChecked(True)
-    page._save_schedule()
-    assert _kinds(env) == ["question"]
-    assert not env.dropin.exists() and not _settings().contains("schedule_interval")
-
-
-def test_timer_attivo_no_salva_le_esclusioni_e_tiene_il_timer(env):
-    # Il caso emerso nella prova reale: si apre la pagina solo per le
-    # esclusioni del timer, con la casella della pianificazione spuntata.
-    env.calls.timer = True
-    env.calls.answers = [False]
-    page = _page(env, [str(env.home / "vm")])
-    page.enable_check.setChecked(True)
-    page._save_schedule()
-    assert env.calls.disable == 0 and not _enabled()
-    assert "--exclude" in env.dropin.read_text()
-    assert mw.load_schedule_excludes(_settings()) == [str(env.home / "vm")]
-    assert "valgono per tutte e due" in env.calls.shown[0][1]
-
-
-def test_timer_attivo_si_disattiva_il_timer(env):
-    env.calls.timer = True
-    env.calls.answers = [True]
-    page = _page(env)
-    page.enable_check.setChecked(True)
-    page._save_schedule()
-    assert env.calls.disable == 1 and _enabled()
-
-
-# -- tutto o niente, e avvisi ----------------------------------------------
-
-def test_dropin_non_scrivibile_nessuna_chiave_salvata(env):
-    # Prima di questa correzione intervallo, unità e stato erano scritti
-    # PRIMA del drop-in: un fallimento lasciava un salvataggio a metà.
-    env.dropin.parent.mkdir(parents=True)
-    env.dropin.write_text("[Service]\n# scritto a mano\n")
-    page = _page(env, [str(env.home / "vm")])
-    page.interval_spin.setValue(7)
-    page._save_schedule()
-    s = _settings()
-    assert not s.contains("schedule_interval") and not s.contains("schedule_enabled")
-
-
-def test_override_estraneo_segnalato_al_salvataggio(env, monkeypatch):
-    avviso = "override.conf ridefinisce ExecStart e sostituisce queste impostazioni."
-    monkeypatch.setattr(mw, "foreign_overrides", lambda **kw: [SimpleNamespace(describe=lambda: avviso)])
-    page = _page(env, [str(env.home / "vm")])
-    page._save_schedule()
-    assert _kinds(env) == ["warning"] and avviso in env.calls.shown[0][1]
-    # Solo avviso: il salvataggio è avvenuto.
-    assert mw.load_schedule_excludes(_settings()) == [str(env.home / "vm")]
-
-
-def test_daemon_reload_fallito_e_solo_un_avviso(env, monkeypatch):
-    monkeypatch.setattr(mw, "daemon_reload", lambda: "Access denied")
-    page = _page(env, [str(env.home / "vm")])
-    page._save_schedule()
-    assert _kinds(env) == ["warning"] and "Access denied" in env.calls.shown[0][1]
-    assert mw.load_schedule_excludes(_settings()) == [str(env.home / "vm")]
 
 
 # -- validazioni fuori dal thread della GUI ------------------------------
@@ -642,8 +426,8 @@ def test_cartella_interna_mancante_al_salvataggio(env, abilitata):
         assert _kinds(env) == ["warning"] and "non esiste" in env.calls.shown[0][1]
         assert _settings().value("schedule_target") == str(env.home)
     else:
-        # Pianificazione interna spenta: si salvano le esclusioni per il
-        # timer senza pretendere una cartella che non verrà usata.
+        # Pianificazione interna spenta: si salvano le impostazioni senza
+        # pretendere una cartella che non verrà usata.
         assert _kinds(env) == [] and _settings().value("schedule_target") == str(env.home / "sparita")
 
 
@@ -656,141 +440,6 @@ def test_cartella_interna_file_o_relativa_rifiutata(env):
         page.target_edit.setText(testo)
         page._save_schedule()
         assert _kinds(env) == ["warning"] and atteso in env.calls.shown[0][1]
-
-
-# -- systemctl --user fuori dal thread della GUI -------------------------
-
-def _systemctl_lento(monkeypatch, nome, risposta):
-    """Sostituisce mw.<nome> con una versione che si blocca finché il test
-    non la sblocca, e registra il thread da cui è chiamata."""
-    import threading
-
-    from klamav_py.gui import off_thread
-
-    monkeypatch.setattr(mw, "run_off_gui_thread", off_thread.run_off_gui_thread)
-    sblocca = threading.Event()
-    thread_usati = []
-
-    def lenta(*a, **k):
-        thread_usati.append(threading.current_thread())
-        sblocca.wait(10)
-        return risposta() if callable(risposta) else risposta
-
-    monkeypatch.setattr(mw, nome, lenta)
-    return sblocca, thread_usati
-
-
-def test_salvataggio_con_timer_lento_non_blocca_la_gui(env, monkeypatch):
-    import threading
-    import time as _time
-
-    sblocca, thread_usati = _systemctl_lento(monkeypatch, "timer_enabled", True)
-    env.calls.answers.append(True)  # "Sì": disattiva il timer
-    page = _page(env)
-    page.enable_check.setChecked(True)
-    inizio = _time.monotonic()
-    page._save_schedule()
-    assert _time.monotonic() - inizio < 1
-    assert not page.save_btn.isEnabled() and _kinds(env) == []
-    sblocca.set()
-    _attendi(lambda: page.save_btn.isEnabled())
-    assert thread_usati and all(t is not threading.main_thread() for t in thread_usati)
-    assert _kinds(env) == ["question"] and env.calls.disable == 1
-    assert _settings().value("schedule_enabled", type=bool) is True
-
-
-def test_disattivazione_e_reload_fuori_dal_thread_gui(env, monkeypatch):
-    import threading
-
-    from klamav_py.gui import off_thread
-
-    monkeypatch.setattr(mw, "run_off_gui_thread", off_thread.run_off_gui_thread)
-    env.calls.timer = True
-    env.calls.answers.append(True)
-    thread_usati = []
-    monkeypatch.setattr(mw, "disable_timer", lambda: thread_usati.append(threading.current_thread()))
-    monkeypatch.setattr(mw, "daemon_reload", lambda: thread_usati.append(threading.current_thread()))
-    page = _page(env, [str(env.home / "vm")])
-    page.enable_check.setChecked(True)
-    page._save_schedule()
-    _attendi(lambda: page.save_btn.isEnabled() and len(thread_usati) == 2)
-    assert all(t is not threading.main_thread() for t in thread_usati)
-    assert env.dropin.exists()
-
-
-def test_label_timer_fuori_dal_thread_gui(env, monkeypatch):
-    sblocca, thread_usati = _systemctl_lento(monkeypatch, "timer_enabled", True)
-    page = mw.SchedulerPage()
-    page.refresh_system_timer()
-    page.refresh_system_timer()  # mentre il primo è in corso: accodato
-    assert page.system_timer_label.isHidden() and page._timer_refresh_again
-    sblocca.set()
-    _attendi(lambda: page.timer_state is True and not page._timer_refresh_running)
-    assert not page.system_timer_label.isHidden()
-    assert len(thread_usati) == 2  # il secondo controllo, non due in parallelo
-
-
-def test_impostazioni_reload_fuori_dal_thread_gui(env, monkeypatch):
-    import time as _time
-
-    from klamav_py.quarantine_location import decide
-
-    # tmp_path sta sotto /tmp: radici volatili neutralizzate, come negli
-    # altri test delle Impostazioni.
-    monkeypatch.setattr(
-        mw, "decide_quarantine_dir",
-        lambda raw, **kw: decide(raw, unit_hidden=(), mountinfo="22 1 8:1 / / rw - ext4 /dev/sda1 rw\n",
-                                 volatile_roots=(), **kw),
-    )
-    sblocca, thread_usati = _systemctl_lento(monkeypatch, "daemon_reload", "Access denied")
-    salvate = []
-    page = mw.SettingsPage()
-    page.settings_saved.connect(lambda: salvate.append(list(page.save_notes)))
-    page.quar_edit.setText(str(env.home / "Quarantena"))
-    inizio = _time.monotonic()
-    page._save_settings()
-    assert _time.monotonic() - inizio < 1
-    assert env.calls.shown == []
-    assert salvate == [] and not page.save_btn.isEnabled()
-    page._save_settings()  # doppio clic durante il reload: ignorato
-    sblocca.set()
-    _attendi(lambda: salvate)
-    assert len(thread_usati) == 1 and "Access denied" in salvate[0][0]
-    assert page.save_btn.isEnabled()
-
-
-def test_avviso_doppia_pianificazione_fuori_dal_thread_gui(env, monkeypatch):
-    import threading
-
-    chiamate, messaggi = [], []
-
-    def run(fn, callback):
-        chiamate.append(fn)
-        callback(True)
-
-    monkeypatch.setattr(mw, "run_off_gui_thread", run)
-    monkeypatch.setattr(mw, "timer_enabled", lambda: pytest.fail("chiamata nel thread GUI"))
-    s = _settings()
-    s.setValue("schedule_enabled", True)
-    s.sync()
-    fake = SimpleNamespace(
-        settings=_settings(),
-        tray_icon=SimpleNamespace(showMessage=lambda *a, **k: messaggi.append(a)),
-        _double_schedule_noted=False,
-        _double_schedule_checking=False,
-    )
-    fake._double_schedule_checked = lambda state: mw.MainWindow._double_schedule_checked(fake, state)
-    # Solo la parte dell'avviso di _load_schedule: il resto usa widget veri.
-    monkeypatch.setattr(mw.MainWindow, "_schedule_last_run", lambda self: 0.0)
-    fake._schedule_last_run = lambda: 0.0
-    fake._update_next_run_label = lambda: None
-    fake._check_schedule = lambda: None
-    fake.schedule_timer = SimpleNamespace(isActive=lambda: True)
-    monkeypatch.setattr(mw.QTimer, "singleShot", staticmethod(lambda *a: None))
-    mw.MainWindow._load_schedule(fake)
-    mw.MainWindow._load_schedule(fake)
-    assert chiamate == [mw.timer_enabled] and len(messaggi) == 1
-    assert threading.current_thread() is threading.main_thread()
 
 
 # -- valori letti al clic ------------------------------------------------
@@ -813,16 +462,8 @@ def _trattenuto(monkeypatch):
 def test_casella_spuntata_durante_la_validazione_non_conta(env, monkeypatch):
     # Prima _save_validated rileggeva la casella: si salvava la
     # pianificazione interna attiva con una cartella mai validata
-    # (require_target era falso) e senza la domanda sul timer di sistema,
-    # cioè con la doppia pianificazione.
-    env.calls.timer = True
-    chiamate_timer = []
+    # (require_target era falso).
     esegui = _trattenuto(monkeypatch)
-    # Solo le chiamate dalla validazione del salvataggio: la label dello
-    # stato del timer lo interroga comunque.
-    monkeypatch.setattr(
-        mw, "timer_enabled", lambda: chiamate_timer.append(esegui.corrente) or True
-    )
     page = _page(env)
     page.enable_check.setChecked(False)
     page.interval_spin.setValue(6)
@@ -834,8 +475,7 @@ def test_casella_spuntata_durante_la_validazione_non_conta(env, monkeypatch):
     page.target_edit.setText(str(env.home / "Documenti"))
     esegui()
 
-    assert not [c for c in chiamate_timer if "_save_schedule" in c]
-    assert _kinds(env) == [] and env.calls.disable == 0
+    assert _kinds(env) == []
     s = _settings()
     assert s.value("schedule_enabled", type=bool) is False
     assert s.value("schedule_interval", type=int) == 6

@@ -62,5 +62,5 @@ echo '--- installazione di prova'
 pacman -U --noconfirm "$PKGFILE" >/dev/null
 version="$(sed -n 's/^pkgver=//p' arch/PKGBUILD)"
 test "$(klamav-py --version)" = "klamav-py $version"
-test -f /usr/lib/systemd/user/klamav-scan.service
+test ! -e /usr/lib/systemd/user/klamav-scan.timer
 echo "pacchetto Arch OK: $OUT/$(basename "$PKGFILE")"

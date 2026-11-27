@@ -25,7 +25,6 @@ from klamav_py.clamd_client import DEFAULT_SOCKET, ClamdEndpoint  # noqa: E402
 from klamav_py.gui.db_info_worker import probe_db_info  # noqa: E402
 from klamav_py.gui.ping_worker import PingWorker  # noqa: E402
 from klamav_py.quarantine_location import decide  # noqa: E402
-from klamav_py.systemd_dropin import dropin_path  # noqa: E402
 
 MOUNTS_EXT4 = "22 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
 
@@ -74,18 +73,13 @@ def env(app, tmp_path, monkeypatch):
         mw, "decide_quarantine_dir",
         lambda raw, **kw: decide(raw, unit_hidden=(), mountinfo=MOUNTS_EXT4, volatile_roots=(), **kw),
     )
-    calls = SimpleNamespace(reload=0)
-    # I drop-in reali della macchina (es. un override.conf dello sviluppatore)
-    # non devono entrare nei test: vedi test_systemd_dropin per il rilevamento.
-    monkeypatch.setattr(mw, "foreign_overrides", lambda **kw: [])
-    monkeypatch.setattr(mw, "daemon_reload", lambda: setattr(calls, "reload", calls.reload + 1))
     shown = []
     for name in ("question", "warning", "information"):
         monkeypatch.setattr(
             QMessageBox, name,
             staticmethod(lambda *a, _n=name, **k: shown.append((_n, a[2])) or QMessageBox.Yes),
         )
-    return SimpleNamespace(home=home, calls=calls, shown=shown, dropin=dropin_path())
+    return SimpleNamespace(home=home, shown=shown)
 
 
 def settings():
@@ -177,7 +171,7 @@ def _tcp_page(host, port=3310):
 def test_host_non_valido_blocca_prima_di_ogni_effetto(env, host):
     _tcp_page(host)._save_settings()
     assert env.shown and env.shown[0][0] == "warning"
-    assert settings().value("clamd_transport") is None and not env.dropin.exists()
+    assert settings().value("clamd_transport") is None
 
 
 def test_parentesi_ipv6_accettate(env):
@@ -185,20 +179,16 @@ def test_parentesi_ipv6_accettate(env):
     assert mw.load_endpoint(settings()) == ClamdEndpoint.tcp("::1")
 
 
-def test_tcp_salvato_scrive_il_dropin_con_la_rete(env):
+def test_tcp_salvato(env):
     _tcp_page("10.0.0.5", 3311)._save_settings()
     assert mw.load_endpoint(settings()) == ClamdEndpoint.tcp("10.0.0.5", 3311)
-    text = env.dropin.read_text()
-    assert '--tcp "10.0.0.5:3311"' in text and "PrivateNetwork=no" in text
-    assert env.calls.reload == 1
 
 
-def test_ritorno_al_socket_predefinito_rimuove_il_dropin(env):
+def test_ritorno_al_socket_predefinito(env):
     _tcp_page("10.0.0.5", 3311)._save_settings()
     page = mw.SettingsPage()
     page.transport_combo.setCurrentIndex(page.transport_combo.findData("unix"))
     page._save_settings()
-    assert not env.dropin.exists()
     ep = mw.load_endpoint(settings())
     assert ep == ClamdEndpoint(transport="unix", tcp_host="10.0.0.5", tcp_port=3311)
 
@@ -274,30 +264,3 @@ def test_valore_salvato_non_valido_mostrato_per_correggerlo(env):
     env.shown.clear()
     page._save_settings()
     assert mw.load_endpoint(settings()) == ClamdEndpoint.tcp("127.0.0.1", 3310)
-
-
-
-def test_dropin_in_conflitto_avvisato_al_salvataggio(env, monkeypatch):
-    from klamav_py.systemd_dropin import ForeignOverride
-
-    override = ForeignOverride(Path("/x/override.conf"), ("ExecStart",), True, True)
-    seen = []
-    monkeypatch.setattr(mw, "foreign_overrides", lambda **kw: seen.append(kw) or [override])
-    page = _tcp_page("127.0.0.1")
-    page._save_settings()
-    assert seen == [{"tcp": True}]
-    assert any("override.conf" in n for n in page.save_notes)
-    assert mw.load_endpoint(settings()).is_tcp  # avviso, non blocco
-
-
-def test_dropin_in_conflitto_nella_pagina_pianificazione(env, monkeypatch):
-    from klamav_py.systemd_dropin import ForeignOverride
-
-    monkeypatch.setattr(mw, "timer_enabled", lambda: True)
-    monkeypatch.setattr(
-        mw, "foreign_overrides",
-        lambda **kw: [ForeignOverride(Path("/x/override.conf"), ("ExecStart",), True, False)],
-    )
-    page = mw.SchedulerPage()
-    page.refresh_system_timer()
-    assert "override.conf" in page.system_timer_label.text()

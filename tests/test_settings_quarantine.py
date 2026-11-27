@@ -1,11 +1,10 @@
 """
-Flusso di salvataggio delle Impostazioni per la directory di quarantena, ed
-esclusione reciproca fra pianificazione interna e klamav-scan.timer.
+Flusso di salvataggio delle Impostazioni per la directory di quarantena, e
+regola inversa al salvataggio della Pianificazione.
 
-Le finestre di dialogo sono sostituite da risposte registrate e systemctl
-da funzioni finte: si verifica l'ORDINE delle operazioni (validazione,
-conferme, directory, drop-in, QSettings), che è ciò che impedisce a GUI e
-timer di divergere, non l'aspetto dei dialoghi.
+Le finestre di dialogo sono sostituite da risposte registrate: si verifica
+l'ORDINE delle operazioni (validazione, conferme, directory, QSettings),
+non l'aspetto dei dialoghi.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 import klamav_py.gui.main_window as mw  # noqa: E402
 from klamav_py.quarantine_location import decide  # noqa: E402
-from klamav_py.systemd_dropin import HEADER, dropin_path  # noqa: E402
 
 MOUNTS_EXT4 = "22 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
 
@@ -87,32 +85,13 @@ def env(app, tmp_path, monkeypatch):
         lambda raw, **kw: decide(raw, unit_hidden=(), mountinfo=MOUNTS_EXT4, volatile_roots=(), **kw),
     )
 
-    calls = SimpleNamespace(reload=0, reload_result=None, disable=0, disable_result=None, timer=False)
-
-    def fake_reload():
-        calls.reload += 1
-        return calls.reload_result
-
-    def fake_disable():
-        calls.disable += 1
-        return calls.disable_result
-
-    monkeypatch.setattr(mw, "daemon_reload", fake_reload)
-    monkeypatch.setattr(mw, "disable_timer", fake_disable)
-    monkeypatch.setattr(mw, "timer_enabled", lambda: calls.timer)
-    # I drop-in reali della macchina (es. un override.conf dello sviluppatore)
-    # non devono entrare nei test: vedi test_systemd_dropin per il rilevamento.
-    monkeypatch.setattr(mw, "foreign_overrides", lambda **kw: [])
-    monkeypatch.setattr(mw, "foreign_timer_overrides", lambda **kw: [])
-
     def dialogs(*answers):
         d = Dialogs(answers)
         for name in ("question", "warning", "information"):
             monkeypatch.setattr(QMessageBox, name, staticmethod(getattr(d, name)))
         return d
 
-    return SimpleNamespace(home=home, tmp=tmp_path, default=default, calls=calls,
-                           dialogs=dialogs, dropin=dropin_path())
+    return SimpleNamespace(home=home, tmp=tmp_path, default=default, dialogs=dialogs)
 
 
 def _settings_page(text):
@@ -132,7 +111,7 @@ def test_volatile_rifiutata_e_nulla_salvato(env, monkeypatch):
     d = env.dialogs()
     _settings_page("/var/tmp/q")._save_settings()
     assert d.kinds() == ["warning"] and "/var/tmp" in d.shown[0][1]
-    assert _saved() is None and not env.dropin.exists()
+    assert _saved() is None
 
 
 def test_relativa_rifiutata(env):
@@ -141,54 +120,13 @@ def test_relativa_rifiutata(env):
     assert d.kinds() == ["warning"] and _saved() is None
 
 
-def test_dentro_home_dropin_senza_readwritepaths(env):
+def test_dentro_home_salvata_e_privata(env):
     env.dialogs()
     page = _settings_page("~/Quarantena")
     page._save_settings()
     q = env.home / "Quarantena"
     assert _saved() == str(q) and page.quar_edit.text() == str(q)
     assert q.is_dir() and q.stat().st_mode & 0o777 == 0o700
-    text = env.dropin.read_text()
-    assert text.startswith(HEADER) and "ReadWritePaths" not in text
-    assert env.calls.reload == 1
-
-
-def test_fuori_home_dropin_con_readwritepaths(env):
-    env.dialogs()
-    _settings_page(str(env.tmp / "esterna" / "q"))._save_settings()
-    assert "ReadWritePaths=" in env.dropin.read_text()
-
-
-def test_ritorno_al_default_rimuove_il_dropin(env):
-    env.dialogs()
-    _settings_page("~/Quarantena")._save_settings()
-    _settings_page(str(env.default))._save_settings()
-    assert not env.dropin.exists() and _saved() == str(env.default)
-    assert env.calls.reload == 2
-
-
-def test_nessun_reload_se_il_dropin_non_cambia(env):
-    env.dialogs()
-    _settings_page(str(env.default))._save_settings()
-    assert env.calls.reload == 0
-
-
-def test_dropin_estraneo_blocca_il_salvataggio(env):
-    env.dropin.parent.mkdir(parents=True)
-    env.dropin.write_text("[Service]\nNice=5\n")
-    d = env.dialogs()
-    _settings_page("~/Quarantena")._save_settings()
-    assert d.kinds() == ["warning"] and _saved() is None
-    assert env.dropin.read_text() == "[Service]\nNice=5\n"
-
-
-def test_reload_fallito_e_solo_un_avviso(env):
-    env.calls.reload_result = "Failed to connect to bus"
-    env.dialogs()
-    page = _settings_page("~/Quarantena")
-    page._save_settings()
-    assert _saved() == str(env.home / "Quarantena")
-    assert page.save_notes and "Failed to connect to bus" in page.save_notes[0]
 
 
 @pytest.mark.parametrize("risposta", [False, True])
@@ -201,7 +139,6 @@ def test_permessi_larghi_chiedono_conferma(env, risposta):
     assert d.kinds()[0] == "question" and "755" in d.shown[0][1]
     assert (_saved() == str(q)) is risposta
     assert (q.stat().st_mode & 0o777) == (0o700 if risposta else 0o755)
-    assert env.dropin.exists() is risposta
 
 
 def test_vecchia_quarantena_non_vuota_chiede_conferma(env):
@@ -247,7 +184,7 @@ def test_quarantena_che_contiene_la_cartella_pianificata_rifiutata(env):
     d = env.dialogs()
     _settings_page(str(env.tmp / "dati"))._save_settings()
     assert d.kinds() == ["warning"] and "pianificazione interna" in d.shown[0][1]
-    assert _saved() is None and not env.dropin.exists()
+    assert _saved() is None
 
 
 # -- pianificazione ------------------------------------------------------
@@ -262,59 +199,16 @@ def _schedule_enabled():
     return QSettings(mw.APP_NAME, mw.APP_NAME).value("schedule_enabled", False, type=bool)
 
 
-def test_timer_attivo_e_no_mantiene_il_timer(env):
-    # "No" non annulla più: salva con la pianificazione interna disattivata
-    # (le cartelle escluse valgono anche per il timer). L'annullamento è
-    # "Annulla": vedi test_settings_exclusions.
-    env.calls.timer = True
-    d = env.dialogs(False)
-    page = _scheduler()
-    page._save_schedule()
-    assert d.kinds() == ["question"] and not _schedule_enabled()
-    assert not page.enable_check.isChecked()
-    assert env.calls.disable == 0
-    assert QSettings(mw.APP_NAME, mw.APP_NAME).contains("schedule_interval")
-
-
-def test_timer_attivo_e_conferma_lo_disattiva(env):
-    env.calls.timer = True
-    env.dialogs(True)
-    _scheduler()._save_schedule()
-    assert env.calls.disable == 1 and _schedule_enabled()
-
-
-def test_disattivazione_fallita_nessun_salvataggio(env):
-    env.calls.timer = True
-    env.calls.disable_result = "Access denied"
-    d = env.dialogs(True)
-    _scheduler()._save_schedule()
-    assert d.kinds() == ["question", "warning"] and not _schedule_enabled()
-
-
-@pytest.mark.parametrize("stato", [False, None])
-def test_timer_non_attivo_o_sconosciuto_non_blocca(env, stato):
-    env.calls.timer = stato
+def test_attivare_la_pianificazione_non_chiede_nulla(env):
     d = env.dialogs()
     _scheduler()._save_schedule()
     assert d.kinds() == [] and _schedule_enabled()
 
 
 def test_disattivare_la_pianificazione_non_chiede_nulla(env):
-    env.calls.timer = True
     d = env.dialogs()
     _scheduler(enabled=False)._save_schedule()
-    assert d.kinds() == [] and env.calls.disable == 0
-
-
-def test_label_timer(env):
-    page = _scheduler()
-    env.calls.timer = True
-    page.refresh_system_timer()
-    assert page.timer_state is True
-    assert not page.system_timer_label.isHidden()
-    env.calls.timer = None
-    page.refresh_system_timer()
-    assert page.system_timer_label.isHidden()
+    assert d.kinds() == [] and not _schedule_enabled()
 
 
 def test_cartella_pianificata_dentro_la_quarantena_rifiutata(env):

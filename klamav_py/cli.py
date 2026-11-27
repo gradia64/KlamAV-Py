@@ -1,9 +1,11 @@
 """
 CLI di scansione. Pensata per due usi:
 
-  1. interattivo:      klamav-py scan /percorso/da/controllare
-  2. da systemd timer: klamav-py scan %h --quarantine DIR --quiet
-     (vedi la unit utente in debian/)
+  1. interattivo:  klamav-py scan /percorso/da/controllare
+  2. da script o da una unit scritta dall'utente:
+                    klamav-py scan ~ --quarantine DIR --quiet
+     (il timer di sistema spedito fino alla 0.1.21 non c'è più: le
+     scansioni automatiche sono la pianificazione interna della GUI)
 
 La directory di quarantena (--quarantine) è sempre esclusa
 automaticamente dall'attraversamento: i file già gestiti non devono
@@ -80,7 +82,6 @@ from .quarantine_location import decide as decide_quarantine_dir
 from .quarantine_policy import QuarantinePolicy, default_report_only_dirs
 from .scan_exclusions import decide as decide_exclusion
 from .scan_totals import io_fault_note
-from . import timer_scan_state
 
 
 def _socket_endpoint(value: str) -> ClamdEndpoint:
@@ -505,20 +506,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if log_fh:
             log_fh.write(f"{path}\tcartella non leggibile: {reason}\n")
 
-    # Marcatore d'inizio per l'avviso di scansione interrotta nella GUI
-    # (timer_scan_state). Solo dentro klamav-scan.service, riconosciuto dal
-    # cgroup (non da INVOCATION_ID, che in una sessione Plasma hanno anche le
-    # shell di Konsole: un'interruzione manuale è visibile nel terminale), e
-    # solo adesso che le validazioni bloccanti sono passate: una scansione
-    # mai partita non deve sembrare interrotta. Best-effort: senza questo
-    # file la GUI non avvisa, ma la scansione non cambia.
-    marker_open = timer_scan_state.in_timer_service()
-    if marker_open:
-        try:
-            timer_scan_state.record_start(str(scan_root))
-        except OSError:
-            marker_open = False
-
     try:
         for result in client.scan_stream(
             scan_root,
@@ -604,16 +591,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(f"clamd non raggiungibile su {args.endpoint.describe()}: {exc}", file=sys.stderr)
         return 2
     finally:
-        # Ogni uscita con un codice (0, 1, 2) passa di qui: la scansione è
-        # arrivata alla fine e la notifica è già garantita da OnFailure.
-        # Resta senza fine solo la morte per segnale (spegnimento): è il
-        # caso che la GUI deve trovare al login. Stesso best-effort
-        # dell'inizio: un fallimento qui non cambia l'esito.
-        if marker_open:
-            try:
-                timer_scan_state.record_end()
-            except OSError:
-                pass
         if log_fh:
             log_fh.close()
         acks.finish()
@@ -635,7 +612,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             f"Dopo averli verificati: eliminali, oppure registra la presa visione "
             f"con «klamav-py --acknowledge PERCORSO» ({acknowledgeable} "
             "segnalazioni) per non contarli più finché il contenuto non cambia. "
-            "Li trovi anche nella pagina Segnalazioni della GUI."
+            "Li trovi anche nella pagina Segnalazioni Euristiche della GUI."
         )
     if acknowledged:
         print(f"{acknowledged} segnalazioni già valutate (--list-acknowledged per l'elenco).")

@@ -9,12 +9,6 @@ per esempio), e un KlamAV-Py del .deb lanciato da lì non è un'AppImage.
 
 Cosa cambia:
 
-- **Timer di sistema**: le unit (klamav-scan.service, .timer,
-  klamav-scan-notify.service) le installano il .deb e il pacchetto Arch in
-  /usr/lib/systemd/user, con ExecStart=/usr/bin/klamav-py. L'AppImage non
-  installa nulla: la GUI non scrive drop-in, non interroga systemctl
-  --user per il timer e non propone l'orario. Resta la pianificazione
-  interna, che gira solo con la GUI aperta (SYSTEM_TIMER_NOTE).
 - **File .desktop generati** (avvio automatico, menu di Dolphin): il
   Python dell'AppImage vive nel mount temporaneo /tmp/.mount_*, che sparisce
   alla chiusura. Il comando è il file .AppImage (``launcher``).
@@ -29,14 +23,6 @@ from pathlib import Path
 
 MARKER_NAME = "_packaging"
 PACKAGE_DIR = Path(__file__).resolve().parent
-
-SYSTEM_TIMER_NOTE = (
-    "Con l'AppImage la scansione programmata di sistema (klamav-scan.timer) "
-    "non è disponibile: le sue unit systemd le installano solo il pacchetto "
-    ".deb e quello di Arch. Resta la pianificazione interna qui sotto, che "
-    "gira solo con KlamAV-Py aperto (anche nella system tray)."
-)
-
 
 def is_appimage(package_dir: Path | None = None) -> bool:
     """True se questo pacchetto è quello di un'AppImage (marcatore della build)."""

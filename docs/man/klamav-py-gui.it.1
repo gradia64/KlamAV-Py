@@ -47,9 +47,9 @@ all'istanza già attiva e termina subito.
 I rilevamenti segnalati ma non spostati (firme euristiche e archivi di
 posta, vedere
 .BR klamav-py (1))
-compaiono nella pagina Segnalazioni, qualunque scansione li abbia
-trovati: quelle della finestra (manuale, programmata interna, Real-Time),
-la scansione programmata di sistema e la riga di comando di
+compaiono nella pagina Segnalazioni Euristiche, qualunque scansione li abbia
+trovati: quelle della finestra (manuale, programmata, Real-Time) e la riga
+di comando di
 .BR klamav-py (1).
 Ogni scansione li registra appena li trova, quindi restano anche se la
 scansione viene interrotta dopo, e la pagina li legge all'avvio, a ogni
@@ -60,8 +60,8 @@ presa visione (anche con
 o quando il suo file non c'è più.
 Dopo averne verificato uno si può eliminarlo, solo se il percorso è
 ancora lo stesso file regolare rilevato, oppure registrarne la presa
-visione: le scansioni successive, anche quella programmata di sistema,
-non ne contano più il contenuto fra gli infetti.
+visione: le scansioni successive non ne contano più il contenuto fra gli
+infetti.
 La presa visione vale per il contenuto e la firma, in qualunque percorso:
 una copia identica altrove, con la stessa firma, risulta già valutata.
 La stessa pagina elenca le prese visione e le revoca.
@@ -73,20 +73,30 @@ Dopo aver eliminato un messaggio di un archivio di posta gestito da
 Akonadi (KMail) può servire
 .BR "akonadictl fsck" .
 .PP
-All'avvio l'applicazione controlla l'ultima scansione della
-programmazione di sistema: se risulta iniziata e mai finita (per esempio
-il computer spento durante la scansione), lo dice con una notifica, una
-sola volta per interruzione, e nella pagina Pianificazione, con l'ora di
-avvio e il rimando alle pagine Segnalazioni e Quarantena per quanto
-trovato fino a lì; il dettaglio resta nel journal
-.RB ( journalctl\ \-\-user\ \-u\ klamav\-scan.service ).
-Le uscite con un codice non avvisano: quelle le notifica la unit con
-.BR OnFailure ;
-nemmeno una scansione in corso in quel momento avvisa, perché copre da
-sola la parte mancante.
-Nella stessa pagina si sceglie l'orario della scansione di sistema
-(«Ogni giorno alle»): il valore predefinito è mezzanotte, quello della
-unit spedita.
+La pagina Pianificazione attiva e configura le scansioni automatiche
+(intervallo in ore o giorni, cartella, cartelle escluse), che girano
+mentre l'applicazione è aperta, anche solo nella system tray.
+Fino alla versione 0.1.21 i pacchetti installavano anche una scansione
+programmata di sistema
+.RB ( klamav\-scan.timer ),
+ora tolta.
+All'avvio l'applicazione ne toglie i resti nella home, se la unit non è
+più installata: ferma il timer ancora caricato nella sessione, toglie
+l'abilitazione fatta con
+.BR "systemctl \-\-user enable" ,
+i propri drop-in in
+.I \%~/.config/systemd/user/klamav\-scan.service.d/
+e
+.I \%~/.config/systemd/user/klamav\-scan.timer.d/
+(solo i file con l'intestazione
+.RI \(lq "Generato da KlamAV-Py" \(rq)
+e lo stato della scansione interrotta
+.RI ( \%~/.local/share/klamav\-py/timer\-scan.json ),
+poi esegue
+.BR "systemctl \-\-user daemon\-reload" .
+Lo dice una volta con una notifica, e nella pagina Pianificazione e su
+stderr a ogni avvio in cui trova qualcosa; i file scritti da altri in
+quelle cartelle restano al loro posto e vengono elencati.
 Le cartelle con permessi negati durante una scansione sono elencate e
 contate a parte rispetto agli errori; ogni altro errore su una cartella
 (un errore di I/O, un mount NFS che non risponde più) è elencato e
@@ -190,63 +200,6 @@ Impostazioni.
 Le impostazioni della versione precedente, salvate con il nome KlamAV,
 vengono migrate automaticamente al primo avvio.
 .TP
-.I \%~/.config/systemd/user/klamav-scan.service.d/50-klamav-py.conf
-Drop-in generato dalle Impostazioni e dalla pagina Pianificazione quando
-la directory di quarantena o la connessione a clamd della scansione
-programmata differiscono dai valori predefiniti, o quando ci sono cartelle
-escluse (una opzione
-.B \-\-exclude
-ciascuna); viene rimosso quando tutto torna ai predefiniti.
-Il file è riconosciuto dall'intestazione
-.RI \(lq "Generato da KlamAV-Py" \(rq:
-non va modificato a mano, e un file con lo stesso nome privo di tale
-intestazione non viene mai toccato.
-All'avvio, se il drop-in è stato scritto da una versione precedente e il
-suo contenuto differisce da quello che le impostazioni salvate produrrebbero
-ora, l'applicazione lo riscrive, esegue
-.B systemctl \-\-user daemon\-reload
-e lo dice una volta nella pagina Pianificazione e su stderr; se la
-riscrittura non riesce lo dice con il motivo, e non riprova fino al
-prossimo avvio.
-Se le impostazioni salvate sono tutte quelle predefinite, il drop-in viene
-invece rimosso, e l'avviso lo dice.
-Se le impostazioni salvate non sono valide (per esempio una porta TCP non
-numerica in un file di impostazioni modificato a mano) il drop-in non viene
-né letto né scritto, e l'avviso nomina l'impostazione e rimanda alle
-Impostazioni: salvarle rigenera il drop-in.
-All'avvio un drop-in assente non viene creato, e un file senza
-l'intestazione non viene toccato.
-Gli altri drop-in della unit che impostano
-.B ExecStart
-(per esempio un
-.I override.conf
-creato con
-.BR "systemctl \-\-user edit" )
-o, con TCP,
-.BR PrivateNetwork ,
-vengono segnalati al salvataggio e nella pagina Pianificazione, perché
-rendono inefficaci queste impostazioni o ne vengono sostituiti.
-.TP
-.I \%~/.config/systemd/user/klamav-scan.timer.d/50-klamav-py.conf
-Drop-in dell'orario della scansione programmata di sistema, scritto e
-rimosso dalla pagina Pianificazione quando l'orario scelto («Ogni giorno
-alle») differisce da mezzanotte, il valore della unit spedita
-.RB ( OnCalendar = daily).
-Prima azzera
-.B OnCalendar
-con un'assegnazione vuota, perché l'impostazione si somma: senza
-azzeramento il timer partirebbe anche a mezzanotte.
-Stessa disciplina del drop-in del service: intestazione che lo dichiara
-nostro, rigenerazione all'avvio, mai toccato un file con lo stesso nome
-privo di intestazione.
-Il ritardo casuale fino a 30 minuti
-.RB ( RandomizedDelaySec )
-resta quello della unit.
-Un drop-in di altri che imposta
-.B OnCalendar
-viene segnalato al salvataggio e nella pagina Pianificazione, perché
-l'orario scelto nella pagina potrebbe non avere effetto.
-.TP
 .I \%~/.local/share/klamav-py/acknowledged.json
 Registro delle prese visione, condiviso con
 .BR klamav-py (1).
@@ -254,12 +207,6 @@ Registro delle prese visione, condiviso con
 .I \%~/.local/share/klamav-py/pending-reports.json
 Segnalazioni da valutare, scritte da ogni scansione e lette dalla pagina
 Segnalazioni; vedere
-.BR klamav-py (1).
-.TP
-.I \%~/.local/share/klamav-py/timer-scan.json
-Stato dell'ultima scansione della programmazione di sistema (inizio e
-fine), scritto dalla scansione e letto all'avvio per l'avviso di
-scansione interrotta; vedere
 .BR klamav-py (1).
 .TP
 .I \%/usr/share/applications/klamav-py.desktop
@@ -283,10 +230,6 @@ Valgono le regole descritte in
 le directory volatili sono rifiutate, i file system
 .BR tmpfs " e " ramfs
 sono accettati con un avviso.
-.PP
-Il drop-in autorizza la directory risolta al momento del salvataggio: se
-un link simbolico viene poi ripuntato altrove, la sandbox non lo segue.
-Salvare di nuovo le Impostazioni rigenera il drop-in.
 .
 .SS Aggiornamento delle firme
 L'aggiornamento non esegue

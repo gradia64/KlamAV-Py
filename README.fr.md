@@ -27,7 +27,7 @@ Réécriture minimale, en Python, de l'idée à la base de KlamAV 0.22 (frontend
 - Numérisation via le protocole natif de clamd (INSTREAM/IDSESSION sur socket Unix), CLI et GUI.
 - CLI sans dépendances externes (bibliothèque standard uniquement), GUI en PySide6.
 - Quarantaine avec permissions neutralisées (0400), nom sur disque imprévisible, restauration des permissions d'origine, index partagé et protégé par verrou entre CLI/GUI/worker.
-- Numérisations planifiées : timer interne à la GUI et/ou unit systemd utilisateur (via paquet .deb), avec journal persistant des résultats.
+- Numérisations planifiées : numérisation automatique de la GUI, activable et réglable dans la page **Planification** (Pianificazione), avec journal persistant des résultats.
 - Surveillance en temps réel RÉCURSIVE des dossiers configurés (QFileSystemWatcher, avec expansion des sous-dossiers, réconciliation périodique des watches perdus et plafond configurable pour ne pas épuiser fs.inotify.max_user_watches).
 - Pause/Reprise des numérisations, garde « une numérisation à la fois ».
 - Pré-vérification dimensionnelle : les fichiers au-delà de StreamMaxLength sont signalés « non vérifiés » sans gaspiller la session clamd.
@@ -56,7 +56,7 @@ sudo dpkg -i klamav-py_*.deb
 sudo apt-get install -f    # répare les dépendances manquantes, si nécessaire
 ```
 
-Installe klamav-py (CLI) et klamav-py-gui dans /usr/bin/, active automatiquement le timer systemd utilisateur pour la numérisation planifiée et enregistre l'application dans les menus. Détails et avertissements dans la section « Paquetisation .deb » plus bas.
+Installe klamav-py (CLI) et klamav-py-gui dans /usr/bin/ et enregistre l'application dans les menus. Détails et avertissements dans la section « Paquetisation .deb » plus bas.
 
 ### Depuis AUR (Arch Linux et dérivées)
 
@@ -68,12 +68,6 @@ cd klamav-py && makepkg -si
 Ou avec un helper AUR : `yay -S klamav-py`, `paru -S klamav-py`.
 
 Le paquet vaut aussi pour Manjaro, EndeavourOS, CachyOS et les autres dérivées qui utilisent AUR. `pyside6` et `clamav` sont des dépendances optionnelles au niveau pacman : la CLI fonctionne sans GUI, mais pour l'usage normal les deux sont nécessaires.
-
-Contrairement au `.deb`, le timer de numérisation planifiée **n'est pas** activé pendant l'installation : sur Arch la politique est que l'état du système est décidé par l'utilisateur. Le paquet affiche l'instruction à exécuter :
-
-```sh
-systemctl --user enable --now klamav-scan.timer
-```
 
 ### AppImage (autres distributions, x86_64)
 
@@ -90,7 +84,6 @@ Un lien symbolique nommé `klamav-py` vers l'AppImage (par exemple dans `~/.loca
 Ce qui change par rapport aux paquets :
 
 - **ClamAV n'est pas inclus.** Installez clamd et freshclam depuis votre distribution et activez leurs services ; les noms varient (sur Fedora : paquets `clamd` et `clamav-update`, services `clamd@scan` et `clamav-freshclam`). En dehors de Debian et Arch le socket de clamd n'est souvent pas `/run/clamav/clamd.ctl` : indiquez-le dans les Paramètres ou avec `--socket`.
-- **Pas de scan programmé du système.** Les unités de `klamav-scan.timer` ne sont installées que par le `.deb` et le paquet Arch : avec l'AppImage la page Planification ne propose que la planification interne, qui fonctionne tant que KlamAV-Py est ouvert (y compris dans la zone de notification).
 - **Démarrage automatique et menu de Dolphin pointent vers le fichier `.AppImage`.** Si vous le déplacez ou le renommez, enregistrez à nouveau les Paramètres et réinstallez l'intégration Dolphin.
 - Pas de pages man : elles sont dans `docs/man/` dans le dépôt. La vérification des mises à jour renvoie à la page de la release, comme pour les autres paquets.
 
@@ -166,7 +159,7 @@ Le répertoire passé à `--quarantine` est toujours exclu automatiquement du pa
 - `--version` — affiche la version et quitte (option globale, pas du sous-commande scan).
 - `--no-persistent` / `--session-batch-size N` — contrôle de la session persistante (voir section dédiée).
 
-Codes de sortie de `scan` — utiles pour OnFailure= dans systemd ou pour des scripts de surveillance. Vaut le premier cas qui s'applique, dans cet ordre :
+Codes de sortie de `scan` — utiles pour des scripts de surveillance ou pour une unit systemd écrite par vous (`OnFailure=`). Vaut le premier cas qui s'applique, dans cet ordre :
 
 | Ordre | Sortie | Cas |
 | --- | --- | --- |
@@ -179,18 +172,18 @@ Les permissions refusées, les fichiers disparus pendant la numérisation, les f
 
 ## Signalements non déplacés et prise de connaissance
 
-Les signatures heuristiques (`Heuristics.*`) et les fichiers dans les archives de messagerie sont seulement signalés, jamais déplacés automatiquement : déplacer un message casse l'archive du client de messagerie. Un tel signalement se répétait pourtant à chaque numérisation, et avec le timer système chaque nuit arrivait la même notification, jusqu'à ce qu'on cesse de la regarder.
+Les signatures heuristiques (`Heuristics.*`) et les fichiers dans les archives de messagerie sont seulement signalés, jamais déplacés automatiquement : déplacer un message casse l'archive du client de messagerie. Un tel signalement se répétait pourtant à chaque numérisation, et chaque numérisation planifiée apportait la même notification, jusqu'à ce qu'on cesse de la regarder.
 
 Après avoir vérifié le fichier, supprime-le ou enregistre la prise de connaissance :
 
 ```bash
-journalctl --user -u klamav-scan.service | grep INFETTO
+grep INFETTO ~/.local/share/klamav-py/logs/scheduled-*.log
 klamav-py --acknowledge ~/.local/share/local-mail/trash/new/1695.R42.host
 klamav-py --list-acknowledged        # préfixe du hash, signature, chemin, dates
 klamav-py --unacknowledge 3f2a9c01be47   # par préfixe du hash ou par chemin
 ```
 
-`--acknowledge` rescane le fichier avec clamd et enregistre la prise de connaissance seulement s'il est encore infecté avec une détection « signalement uniquement ». La règle est celle de la numérisation, il faut donc l'appeler avec les mêmes `--report-only` (et `--quarantine-all`) utilisés en numérisation, indiqués avant : `klamav-py --report-only ~/Archivio --acknowledge ~/Archivio/vecchio.exe`. Les numérisations suivantes affichent `GIÀ VALUTATO` et ne le comptent pas parmi les infectés : un signalement **nouveau** ressort encore avec 1 et notifie. La clé est le SHA-256 du contenu plus la signature, pas le chemin : un message qui passe de `new/` à `cur/` reste évalué, un contenu changé redevient signalé, et une prise de connaissance ne masque jamais une détection qui irait en quarantaine. La prise de connaissance vaut donc pour le contenu et la signature, dans n'importe quel chemin : une copie identique ailleurs, avec la même signature, ressort déjà évaluée. Les entrées qu'aucune numérisation ne retrouve depuis 90 jours sont retirées. Registre dans `~/.local/share/klamav-py/acknowledged.json` (0600), partagé avec la GUI, où la page **Signalements** offre les mêmes actions (et la suppression, seulement si le fichier est encore celui détecté ; pour un maildir géré par Akonadi il peut falloir ensuite `akonadictl fsck`). La page montre aussi les signalements du timer système et de la CLI : chaque numérisation les écrit dans `~/.local/share/klamav-py/pending-reports.json` (0600) dès qu'elle les trouve, ils survivent donc à une numérisation interrompue, et ils y restent jusqu'à ce que tu supprimes le fichier, enregistres la prise de connaissance, ou que le fichier n'existe plus.
+`--acknowledge` rescane le fichier avec clamd et enregistre la prise de connaissance seulement s'il est encore infecté avec une détection « signalement uniquement ». La règle est celle de la numérisation, il faut donc l'appeler avec les mêmes `--report-only` (et `--quarantine-all`) utilisés en numérisation, indiqués avant : `klamav-py --report-only ~/Archivio --acknowledge ~/Archivio/vecchio.exe`. Les numérisations suivantes affichent `GIÀ VALUTATO` et ne le comptent pas parmi les infectés : un signalement **nouveau** ressort encore avec 1 et notifie. La clé est le SHA-256 du contenu plus la signature, pas le chemin : un message qui passe de `new/` à `cur/` reste évalué, un contenu changé redevient signalé, et une prise de connaissance ne masque jamais une détection qui irait en quarantaine. La prise de connaissance vaut donc pour le contenu et la signature, dans n'importe quel chemin : une copie identique ailleurs, avec la même signature, ressort déjà évaluée. Les entrées qu'aucune numérisation ne retrouve depuis 90 jours sont retirées. Registre dans `~/.local/share/klamav-py/acknowledged.json` (0600), partagé avec la GUI, où la page **Signalements heuristiques** offre les mêmes actions (et la suppression, seulement si le fichier est encore celui détecté ; pour un maildir géré par Akonadi il peut falloir ensuite `akonadictl fsck`). La page montre aussi les signalements des numérisations planifiées et de la CLI : chaque numérisation les écrit dans `~/.local/share/klamav-py/pending-reports.json` (0600) dès qu'elle les trouve, ils survivent donc à une numérisation interrompue, et ils y restent jusqu'à ce que tu supprimes le fichier, enregistres la prise de connaissance, ou que le fichier n'existe plus.
 
 ## Session persistante, pré-check dimensionnel, reconstruction
 
@@ -227,11 +220,12 @@ Application PySide6 à fenêtre unique avec barre latérale et style inspiré de
 - **Quarantaine manuelle par défaut.** La case « Metti in quarantena automaticamente i file infetti » (mettre automatiquement en quarantaine les fichiers infectés) est désactivée par défaut : les fichiers signalés restent où ils sont et tu les déplaces avec « Metti in quarantena i selezionati » (mettre en quarantaine les sélectionnés) — pratique pour évaluer un faux positif avant de déplacer quoi que ce soit. « Copia log » (copier le journal) copie dans le presse-papiers toutes les lignes de la liste (infectés, erreurs, non vérifiés).
 - **Historique** (Cronologia) — registre persistant (~/.local/share/klamav-py/history.json, les 1000 dernières entrées ; le répertoire est 0700 et les fichiers 0600, parce qu'ils énumèrent les chemins et les fichiers infectés) avec date/heure, type, chemin, numérisés, infectés, erreurs, non vérifiés, dossiers non lisibles, déjà évalués et pannes d'E/S (un sous-ensemble des erreurs), plus le motif pour une numérisation non complétée ou reportée. Les numérisations planifiées indexent aussi le journal détaillé sur disque (tooltip sur la ligne) : le détail infectés/erreurs d'une numérisation en arrière-plan, qui ne passe par aucune liste UI, reste ainsi toujours inspectable.
 - **Quarantaine** (Quarantena) — lit le même index JSON utilisé par la CLI (index.json dans le répertoire de quarantaine) : les deux outils sont interchangeables sur les mêmes données. Restauration à l'emplacement d'origine (avec restauration des permissions d'origine, refus explicite si le chemin a été entre-temps réoccupé) ou suppression définitive.
-- **Signalements** (Segnalazioni) — les fichiers détectés mais laissés à leur place (signatures heuristiques, archives de messagerie) dans les numérisations de la session, avec « Ho verificato, non segnalare più » (j'ai vérifié, ne plus signaler) (prise de connaissance, voir « Signalements non déplacés et prise de connaissance ») et « Elimina… » (supprimer) avec confirmation ; en dessous, les prises de connaissance enregistrées, révocables.
-- **Mises à jour** (Aggiornamenti) — télécharge les définitions de virus en lançant `freshclam --stdout` via pkexec (authentification PolicyKit), en arrêtant le démon clamav-freshclam/freshclam du système pour éviter les conflits de verrou sur le fichier de log et en le redémarrant à la fin. Depuis 0.1.7 le redémarrage a lieu aussi si la mise à jour est interrompue (déconnexion, signal), et ne concerne que les services qui étaient actifs avant : un démon arrêté volontairement reste arrêté. Sortie affichée en temps réel. En choisissant « Esci » (quitter) pendant la mise à jour, l'app se ferme dès qu'elle se termine au lieu de l'interrompre. Par défaut elle démarre automatiquement 1.5s après le lancement de l'app (désactivable dans Paramètres).
+- **Signalements heuristiques** (Segnalazioni Euristiche) — les fichiers détectés mais laissés à leur place dans les numérisations de la session : surtout des détections heuristiques (un soupçon, pas un malware connu, souvent une fausse alerte, comme un e-mail dont les liens mènent à un domaine différent de celui affiché), plus un éventuel malware reconnu dans une archive de messagerie ou dans un fichier à plusieurs noms, que la colonne Type (Tipo) affiche en rouge, avec « Ho verificato, non segnalare più » (j'ai vérifié, ne plus signaler) (prise de connaissance, voir « Signalements non déplacés et prise de connaissance ») et « Elimina… » (supprimer) avec confirmation ; en dessous, les prises de connaissance enregistrées, révocables.
+- **Mises à jour** (Aggiornamenti) — deux panneaux : « Aggiornamento del programma » (mise à jour du programme : version utilisée et bouton « Controlla aggiornamenti », voir plus bas) et « Aggiornamento database virus » (base de virus), qui télécharge les définitions de virus en lançant `freshclam --stdout` via pkexec (authentification PolicyKit), en arrêtant le démon clamav-freshclam/freshclam du système pour éviter les conflits de verrou sur le fichier de log et en le redémarrant à la fin. Depuis 0.1.7 le redémarrage a lieu aussi si la mise à jour est interrompue (déconnexion, signal), et ne concerne que les services qui étaient actifs avant : un démon arrêté volontairement reste arrêté. Sortie affichée en temps réel. En choisissant « Esci » (quitter) pendant la mise à jour, l'app se ferme dès qu'elle se termine au lieu de l'interrompre. Par défaut elle démarre automatiquement 1.5s après le lancement de l'app (désactivable dans Paramètres).
 - **Temps réel** — journal des numérisations automatiques sur les dossiers surveillés (configurables dans Paramètres). Utilise QFileSystemWatcher : création/modification d'un fichier → numérisation après un debounce de 3s (pour ne pas numériser les fichiers encore en écriture), et les fichiers infectés sont toujours mis en quarantaine automatiquement. Les fichiers trop grands sont étiquetés « Non verificato » (non vérifié), et non « Sicuro » (sûr) (voir les choix de design).
-- **Planification** (Pianificazione) — numérisation récurrente (toutes les N heures ou jours) sur un dossier au choix, via QTimer interne : nécessite l'app en exécution (même minimisée dans le tray). Pendant l'exécution la page affiche l'état et les compteurs en direct ; le tooltip du tray reflète l'avancement ; en fin de numérisation le journal détaillé est écrit dans ~/.local/share/klamav-py/logs/scheduled-<timestamp>.log (rotation : les 10 dernières exécutions) et référencé dans l'Historique. Ce n'est pas un timer système comme celui du paquet .deb, qui fonctionne aussi à GUI fermée (voir « Numérisations planifiées : les deux mécanismes »).
-- **Paramètres** (Impostazioni) — socket de clamd, répertoire de quarantaine, dossiers surveillés pour le temps réel (avec indicateur « Temps réel actif sur N dossiers (M sous-dossiers inclus, récursif) »), autostart au login, démarrage minimisé dans le tray, mise à jour de la base au démarrage, contrôle des mises à jour de l'application (bouton et option au démarrage), intégration Dolphin.
+- **Planification** (Pianificazione) — numérisation récurrente (toutes les N heures ou jours) sur un dossier au choix, via QTimer interne : nécessite l'app en exécution (même minimisée dans le tray). Pendant l'exécution la page affiche l'état et les compteurs en direct ; le tooltip du tray reflète l'avancement ; en fin de numérisation le journal détaillé est écrit dans ~/.local/share/klamav-py/logs/scheduled-<timestamp>.log (rotation : les 10 dernières exécutions) et référencé dans l'Historique. Jusqu'à la 0.1.21 existait aussi une numérisation planifiée du système (voir « Numérisations planifiées »).
+- **Paramètres** (Impostazioni) — socket de clamd, répertoire de quarantaine, dossiers surveillés pour le temps réel (avec indicateur « Temps réel actif sur N dossiers (M sous-dossiers inclus, récursif) »), autostart au login, démarrage minimisé dans le tray, mise à jour de la base au démarrage, option « Controlla aggiornamenti all'avvio » (contrôle des mises à jour de l'application au démarrage), intégration Dolphin.
+- **Info** — nom et version du programme, description, licence, liens vers le code source et le suivi des signalements, mainteneur (gradia <gradia@disroot.org>), versions de Python, Qt et PySide6.
 
 ## Surveillance temps réel : comment ça marche (0.1.5)
 
@@ -281,20 +275,22 @@ Si activé, écrit un fichier .desktop dans ~/.config/autostart/ qui lance la GU
 
 ## Contrôle des mises à jour de l'application
 
-Le bouton « Controlla aggiornamenti » (contrôler les mises à jour) dans Paramètres interroge l'API des releases GitHub du projet et compare la dernière version publiée avec celle en usage. L'option « Controlla aggiornamenti all'avvio » (contrôler les mises à jour au démarrage) est désactivée par défaut : sans elle l'application ne contacte pas GitHub sauf sur demande explicite. S'il y a une nouvelle version apparaît un lien vers la page de la release (et une notification dans le tray, pour le contrôle au démarrage) ; l'installation reste manuelle, via .deb ou AUR.
+Le bouton « Controlla aggiornamenti » (contrôler les mises à jour) dans la page Mises à jour interroge l'API des releases GitHub du projet et compare la dernière version publiée avec celle en usage. L'option « Controlla aggiornamenti all'avvio » (contrôler les mises à jour au démarrage) est désactivée par défaut : sans elle l'application ne contacte pas GitHub sauf sur demande explicite. S'il y a une nouvelle version apparaît un lien vers la page de la release (et une notification dans le tray, pour le contrôle au démarrage) ; l'installation reste manuelle, via .deb ou AUR.
 
 Le contrôle au démarrage se lance au plus une fois toutes les six heures : l'API GitHub non authentifiée accorde 60 requêtes par heure par adresse IP, et redémarrer souvent l'application ne doit pas les consommer. Le bouton dans Paramètres n'est pas soumis à la limite.
 
 La réponse de GitHub est traitée comme donnée non fiable : elle est lue jusqu'à un maximum de 256 Ko, la version et les notes sont échappées avant d'être affichées, et le lien n'est rendu cliquable que s'il pointe vers les releases du dépôt officiel.
 
-## Numérisations planifiées : les deux mécanismes
+## Numérisations planifiées
 
-- **Timer de la GUI (page Planification) :** tourne seulement avec l'app active (même dans le tray), mais offre la progression en direct, le journal persistant et l'intégration complète avec l'UI.
-- **Unit systemd utilisateur (installée par le .deb et le paquet Arch) :** démarre au login de chaque utilisateur sans configuration, fonctionne à GUI fermée. Pour faire tourner le timer même avec l'utilisateur déconnecté :
-  `loginctl enable-linger $USER`. Utilise le même chemin de quarantaine par défaut que la GUI (~/.local/share/klamav-py/quarantine). Les erreurs et les dossiers non lisibles de la dernière numérisation, un par ligne, sont aussi dans `~/.local/state/log/klamav-py/scan-errors.log` (`$XDG_STATE_HOME/log/klamav-py`, le `LogsDirectory=` de la unit), en plus du journal.
-  La quarantaine, la connexion à clamd et les dossiers exclus choisis dans la GUI arrivent au timer avec un drop-in, `~/.config/systemd/user/klamav-scan.service.d/50-klamav-py.conf`, reconnu par la première ligne `# Generato da KlamAV-Py: non modificare a mano.`. Ils sont écrits par les sauvegardes de Paramètres et Planification ; au démarrage la GUI réécrit aussi un drop-in qui serait resté à une version précédente (par exemple sans `--log-errors`) et le dit dans la page Planification. Un fichier de ce nom sans cette première ligne, c'est-à-dire écrit à la main, n'est jamais touché. Pour voir la commande que le timer utilisera : `systemctl --user cat klamav-scan.service`.
+Les numérisations automatiques sont celles de la page **Planification** (Pianificazione) : on les active avec « Abilita scansione automatica », avec un intervalle (heures ou jours), le dossier à numériser et les dossiers exclus. Elles tournent tant que KlamAV-Py est ouvert, même seulement dans la zone de notification : pour n'en manquer aucune, activez le démarrage automatique à la connexion dans les Paramètres. Une échéance passée PC éteint ou application fermée est rattrapée au premier contrôle après le démarrage.
 
-Une unit systemd de système n'est plus distribuée (depuis la 0.1.9) : elle ne pouvait pas lire les homes privés sans en élargir les permissions, tandis que la unit utilisateur tourne comme l'utilisateur lui-même et lit sa home telle quelle.
+Jusqu'à la 0.1.21 le `.deb` et le paquet Arch installaient aussi une numérisation planifiée du système, `klamav-scan.timer` (unit systemd utilisateur, active même à GUI fermée), alternative à celle de la GUI. Elle a été retirée : deux mécanismes pour la même chose, avec des réglages à garder alignés par des drop-in, étaient plus fragiles qu'un seul. Si vous mettez à jour, il n'y a rien à faire :
+
+- le `.deb` retire dans son postinst l'activation pour tous les utilisateurs (`/etc/systemd/user/timers.target.wants/klamav-scan.timer`) ;
+- au premier démarrage la GUI arrête le timer encore chargé dans la session, retire l'activation faite avec `systemctl --user enable`, ses drop-in (`~/.config/systemd/user/klamav-scan.service.d/50-klamav-py.conf` et celui du timer) et l'état de la numérisation interrompue, et le dit une fois par une notification et dans la page Planification. Les fichiers écrits à la main dans ces dossiers restent où ils sont : la page les énumère, puisqu'ils sont désormais inutiles.
+
+Si vous voulez quand même une numérisation à GUI fermée, vous pouvez écrire une unit utilisateur avec la CLI, par exemple `ExecStart=/usr/bin/klamav-py scan %h --quarantine %h/.local/share/klamav-py/quarantine --quiet` : les signalements arrivent dans la page Signalements heuristiques (Segnalazioni Euristiche) comme ceux de la GUI.
 
 ## Diagnostic des erreurs courantes
 
@@ -391,22 +387,7 @@ Vérifie avant d'installer : le squelette a été validé dans un environnement 
 - Un seul paquet binaire klamav-py avec CLI et GUI (pas de split, tant que le projet est jeune).
 - `pyproject.toml` définit deux entry points dans /usr/bin/ : klamav-py (CLI) et klamav-py-gui (GUI). La GUI les utilise pour auto-détecter la commande à écrire dans les .desktop d'autostart et de Dolphin (`_gui_relaunch_command()`), au lieu de supposer un checkout local avec venv.
 - Le champ license utilise délibérément l'ancien format tableau (`{text = "..."}`) au lieu de la chaîne SPDX : setuptools récents déprécient le premier avec un warning, mais les setuptools anciens (vérifié : 68.1.2, Ubuntu 24.04) refusent le second avec une erreur fatale. Mieux un warning cosmétique partout qu'un build cassé sur certains systèmes.
-- Unit systemd au niveau UTILISATEUR (systemd --user), et non de système (pourquoi, voir ci-dessous). Les fichiers s'appellent `debian/klamav-py.klamav-scan.user.service/.timer` : le segment `.user.` dans le nom est obligatoire pour que dh_installsystemduser les reconnaisse — découvert seulement en testant empiriquement un build réel. Ils finissent dans /usr/lib/systemd/user/.
-- postinst/postrm utilisent deb-systemd-helper --user : le symlink d'activation va dans /etc/systemd/user/timers.target.wants/ (vaut pour tous les utilisateurs) et le timer démarre au prochain login de chacun, sans commandes manuelles.
-- Une unit utilisateur ne peut pas s'ordonner de manière fiable par rapport à une unit de système comme clamav-daemon.service (managers systemd séparés, pas de dépendances cross-manager) : le .service n'a pas de After=/Requires= sur clamd. En pratique ce n'est pas un problème : clamd démarre bien avant le login utilisateur.
-
-## Pourquoi des units utilisateur et non de système
-
-La toute première version utilisait une unit de système avec DynamicUser=yes. Semblait propre (pas de useradd manuel), mais ne tient pas à l'usage réel :
-
-- Les homes naissent 0700/0750 : un utilisateur dynamique ne lit rien, et la numérisation de /home ne produisait que des Permission denied en rafale.
-- La quarantaine finissait dans /var/lib/klamav-py, propriété de l'utilisateur dynamique : la GUI ne pouvait ni la voir ni la gérer.
-
-L'unit utilisateur tourne comme l'utilisateur, lit la home sans problème et utilise la même quarantaine par défaut que la GUI : les chemins coïncident.
-
-### Mise à niveau depuis les versions précédentes (qui avaient la unit de système)
-
-La suppression du fichier de l'ancienne unit n'arrête pas une instance déjà active — le symlink dans /etc/systemd/system/timers.target.wants/ n'est pas tracé par dpkg. C'est pourquoi postinst inclut une migration dédiée qui arrête et désactive explicitement l'ancienne unit de système avant d'activer la nouvelle utilisateur (vérifié en lisant le postinst du .deb compilé).
+- Aucune unit systemd (après la 0.1.21). Le postinst retire l'activation globale de `klamav-scan.timer` laissée par les versions précédentes avec `deb-systemd-helper --user disable` et `purge` : dpkg supprime les fichiers des units, mais pas les liens créés par deb-systemd-helper.
 
 ## Paquetisation Arch (AUR)
 

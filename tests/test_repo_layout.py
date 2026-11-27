@@ -57,3 +57,12 @@ def test_controllo_vede_un_riferimento():
              "debian/rules": "install systemd/klamav-scan.timer",
              "CHANGELOG.md": "tolto systemd/klamav-scan.timer"}
     assert stale_references(files) == ["README.md", "debian/rules"]
+
+
+def test_nessuna_unit_del_timer_spedita():
+    """Dopo la 0.1.21 la scansione programmata di sistema non c'è più: né
+    il .deb né il pacchetto Arch installano unit klamav-scan."""
+    assert not list((ROOT / "debian").glob("klamav-py.klamav-scan*"))
+    pkgbuild = (ROOT / "arch" / "PKGBUILD").read_text(encoding="utf-8")
+    assert "klamav-scan" not in pkgbuild
+    assert "dh_installsystemduser" not in (ROOT / "debian" / "rules").read_text(encoding="utf-8")

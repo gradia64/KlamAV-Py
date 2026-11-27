@@ -100,3 +100,28 @@ class QuarantinePolicy:
         if any(resolved.is_relative_to(d) for d in self._dirs):
             return QuarantineDecision(False, REASON_MAIL_STORE)
         return QuarantineDecision(True)
+
+
+KIND_HEURISTIC = "Euristica: sospetto"
+KIND_MAIL_STORE = "Firma nota: lasciato nell'archivio di posta"
+KIND_HARDLINKS = "Firma nota: file con più nomi"
+KIND_KNOWN = "Firma nota: lasciato al suo posto"
+
+
+def detection_kind(signature: Optional[str], reason: Optional[str] = None) -> str:
+    """Tipo di una segnalazione, per la pagina Segnalazioni Euristiche.
+
+    Una firma euristica è un sospetto, non una corrispondenza con un
+    malware noto: la si riconosce dal nome, qualunque sia il motivo per
+    cui il file è rimasto dov'è (anche un'email sospetta in un archivio di
+    posta). Ogni altra firma è un malware riconosciuto, lasciato al suo
+    posto per il motivo registrato: va distinta, perché la pagina porta il
+    nome dei rilevamenti euristici.
+    """
+    if signature and signature.startswith(REPORT_ONLY_SIGNATURE_PREFIXES):
+        return KIND_HEURISTIC
+    if reason == REASON_MAIL_STORE:
+        return KIND_MAIL_STORE
+    if reason == REASON_HARDLINKS:
+        return KIND_HARDLINKS
+    return KIND_KNOWN

@@ -85,9 +85,11 @@ def _texts(page) -> str:
 def test_pagina_dice_ambito_e_provenienza(page):
     text = _texts(page)
     assert SCOPE_NOTE in text
-    # Dalla 0.1.18 la pagina mostra anche le segnalazioni del timer di
-    # sistema: niente più rimando al journal per trovarle.
-    assert "anche della scansione programmata di sistema" in text
+    # Le segnalazioni di ogni scansione, CLI compresa, arrivano dal
+    # registro: niente rimando al journal. Il timer di sistema non c'è più
+    # (0.2.0), e la pagina non lo nomina.
+    assert "Real-Time e da riga di comando" in text
+    assert "di sistema" not in text
     assert "journalctl" not in text
     assert "klamav-py --acknowledge" in text
 

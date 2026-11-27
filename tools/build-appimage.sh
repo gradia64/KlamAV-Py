@@ -12,8 +12,7 @@
 #   usr/share/{applications,icons}/    e in cima .desktop e icona
 #
 # ClamAV NON è incluso: clamd e freshclam vengono dalla distribuzione, con
-# le loro unit. Nemmeno le unit di klamav-scan.timer: dall'AppImage la
-# scansione programmata di sistema non c'è (klamav_py/appimage.py).
+# le loro unit.
 #
 # Ripreso da OllaDesk (scripts/build-appimage.sh). Tutto ciò che si scarica
 # ha la versione e lo SHA-256 fissati qui o in

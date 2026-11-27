@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import enum
 import os
+import re
 import stat
 import subprocess
 from dataclasses import dataclass
@@ -120,3 +121,30 @@ def journal_lines(unit: str, since_epoch: float,
     if r.returncode != 0:
         return []
     return [line for line in r.stdout.splitlines() if line.strip()]
+
+
+# Riga di freshclam quando il daily locale è già l'ultimo pubblicato, es.
+# "daily.cld database is up-to-date (version: 28194, sigs: 355842, ...)".
+# Con un timestamp davanti nel journal ("Fri Nov 27 11:29:43 2026 -> ").
+_UP_TO_DATE_RE = re.compile(
+    r"\bdaily\.c[lv]d database is up-to-date \(version: (\d{1,9})\b")
+
+
+def up_to_date_versions(lines: Sequence[str]) -> frozenset[int]:
+    """Versioni del daily che freshclam ha dichiarato ultime pubblicate."""
+    return frozenset(int(m.group(1)) for line in lines
+                     if (m := _UP_TO_DATE_RE.search(line)))
+
+
+def recent_up_to_date_versions(since_epoch: float,
+                               run: Runner = subprocess.run) -> frozenset[int]:
+    """Come up_to_date_versions, dai controlli periodici del demone freshclam
+    registrati nel journal dopo since_epoch.
+
+    Senza unità o senza accesso al journal l'insieme è vuoto: vale l'età
+    del database, come prima.
+    """
+    unit = resolve_unit(run)
+    if unit is None:
+        return frozenset()
+    return up_to_date_versions(journal_lines(unit, since_epoch, run))

@@ -27,7 +27,7 @@ Minimal Python rewrite of the idea behind KlamAV 0.22 (frontend to ClamAV), with
 - Scanning via clamd's native protocol (INSTREAM/IDSESSION over Unix socket), CLI and GUI.
 - CLI with no external dependencies (standard library only), GUI in PySide6.
 - Quarantine with neutralized permissions (0400), unpredictable on-disk name, restoration of original permissions, shared index protected by a lock between CLI/GUI/worker.
-- Scheduled scans: internal GUI timer and/or user systemd units (via the .deb package), with persistent result log.
+- Scheduled scans: the GUI's automatic scan, enabled and configured on the Scheduling (Pianificazione) page, with persistent result log.
 - Recursive Real-Time monitoring of configured folders (QFileSystemWatcher, with subfolder expansion, periodic reconciliation of lost watches and a configurable cap to avoid exhausting fs.inotify.max_user_watches).
 - Pause/Resume of scans, "one scan at a time" guard.
 - Dimensional pre-check: files above StreamMaxLength are reported "not verified" without wasting the clamd session.
@@ -56,7 +56,7 @@ sudo dpkg -i klamav-py_*.deb
 sudo apt-get install -f    # fix missing dependencies, if needed
 ```
 
-Installs klamav-py (CLI) and klamav-py-gui in /usr/bin/, automatically enables the user systemd timer for scheduled scanning and registers the application in the menus. Details and warnings in the ".deb packaging" section below.
+Installs klamav-py (CLI) and klamav-py-gui in /usr/bin/ and registers the application in the menus. Details and warnings in the ".deb packaging" section below.
 
 ### From AUR (Arch Linux and derivatives)
 
@@ -68,12 +68,6 @@ cd klamav-py && makepkg -si
 Or with an AUR helper: `yay -S klamav-py`, `paru -S klamav-py`.
 
 The package also applies to Manjaro, EndeavourOS, CachyOS and the other derivatives that use AUR. `pyside6` and `clamav` are optional dependencies at the pacman level: the CLI works without the GUI, but for normal use both are needed.
-
-Unlike the `.deb`, the scheduled scan timer is **not** enabled during installation: on Arch the policy is that system state is decided by the user. The package prints the instruction to run:
-
-```sh
-systemctl --user enable --now klamav-scan.timer
-```
 
 ### AppImage (other distributions, x86_64)
 
@@ -90,7 +84,6 @@ A symbolic link named `klamav-py` to the AppImage (for example in `~/.local/bin`
 What differs from the packages:
 
 - **ClamAV is not included.** Install clamd and freshclam from your distribution and enable their services; names vary (on Fedora: packages `clamd` and `clamav-update`, services `clamd@scan` and `clamav-freshclam`). Outside Debian and Arch clamd's socket is often not `/run/clamav/clamd.ctl`: set it in Settings or with `--socket`.
-- **No scheduled system scan.** The `klamav-scan.timer` units are installed only by the `.deb` and the Arch package: with the AppImage the Scheduling page offers only the internal schedule, which runs while KlamAV-Py is open (in the system tray too).
 - **Autostart and Dolphin menu point to the `.AppImage` file.** If you move or rename it, save Settings again and reinstall the Dolphin integration.
 - No man pages: they are in `docs/man/` in the repository. The update check links to the release page, as for the other packages.
 
@@ -166,7 +159,7 @@ The directory passed to `--quarantine` is always excluded automatically from tra
 - `--version` — print the version and exit (global option, not of the scan subcommand).
 - `--no-persistent` / `--session-batch-size N` — control of the persistent session (see dedicated section).
 
-Exit codes of `scan` — useful for OnFailure= in systemd or for monitoring scripts. The first case that applies wins, in this order:
+Exit codes of `scan` — useful for monitoring scripts or for a systemd unit you write yourself (`OnFailure=`). The first case that applies wins, in this order:
 
 | Order | Exit | Case |
 | --- | --- | --- |
@@ -179,18 +172,18 @@ Permission denied, files gone during the scan, files too large and clamd errors 
 
 ## Unmoved findings and acknowledgement
 
-Heuristic signatures (`Heuristics.*`) and files in mail archives are only reported, never moved automatically: moving a message breaks the mail client's archive. Such a finding, however, repeated on every scan, and with the system timer every night the same notification arrived, until it stopped being looked at.
+Heuristic signatures (`Heuristics.*`) and files in mail archives are only reported, never moved automatically: moving a message breaks the mail client's archive. Such a finding, however, repeated on every scan, and every scheduled scan brought the same notification, until it stopped being looked at.
 
 After verifying the file, delete it or record the acknowledgement:
 
 ```bash
-journalctl --user -u klamav-scan.service | grep INFETTO
+grep INFETTO ~/.local/share/klamav-py/logs/scheduled-*.log
 klamav-py --acknowledge ~/.local/share/local-mail/trash/new/1695.R42.host
 klamav-py --list-acknowledged        # hash prefix, signature, path, dates
 klamav-py --unacknowledge 3f2a9c01be47   # by hash prefix or by path
 ```
 
-`--acknowledge` rescans the file with clamd and records the acknowledgement only if it is still infected with a "report-only" finding. The rule is that of the scan, so it must be called with the same `--report-only` (and `--quarantine-all`) used in scanning, given first: `klamav-py --report-only ~/Archive --acknowledge ~/Archive/old.exe`. Subsequent scans print `GIÀ VALUTATO` and do not count it among infected: a **new** finding still exits with 1 and notifies. The key is the SHA-256 of the content plus the signature, not the path: a message moving from `new/` to `cur/` stays acknowledged, changed content is reported again, and an acknowledgement never hides a finding that would be quarantined. The acknowledgement thus applies to content and signature, in any path: an identical copy elsewhere, with the same signature, is already acknowledged. Entries not found by any scan for 90 days are removed. Registry in `~/.local/share/klamav-py/acknowledged.json` (0600), shared with the GUI, where the **Findings** page offers the same actions (and deletion, only if the file is still the one detected; for a maildir managed by Akonadi, `akonadictl fsck` may then be needed). The page also shows the findings of the system timer and of the CLI: every scan writes them to `~/.local/share/klamav-py/pending-reports.json` (0600) as soon as it finds them, so they survive an interrupted scan, and they stay there until you delete the file, record the acknowledgement, or the file is gone.
+`--acknowledge` rescans the file with clamd and records the acknowledgement only if it is still infected with a "report-only" finding. The rule is that of the scan, so it must be called with the same `--report-only` (and `--quarantine-all`) used in scanning, given first: `klamav-py --report-only ~/Archive --acknowledge ~/Archive/old.exe`. Subsequent scans print `GIÀ VALUTATO` and do not count it among infected: a **new** finding still exits with 1 and notifies. The key is the SHA-256 of the content plus the signature, not the path: a message moving from `new/` to `cur/` stays acknowledged, changed content is reported again, and an acknowledgement never hides a finding that would be quarantined. The acknowledgement thus applies to content and signature, in any path: an identical copy elsewhere, with the same signature, is already acknowledged. Entries not found by any scan for 90 days are removed. Registry in `~/.local/share/klamav-py/acknowledged.json` (0600), shared with the GUI, where the **Heuristic findings** page offers the same actions (and deletion, only if the file is still the one detected; for a maildir managed by Akonadi, `akonadictl fsck` may then be needed). The page also shows the findings of scheduled scans and of the CLI: every scan writes them to `~/.local/share/klamav-py/pending-reports.json` (0600) as soon as it finds them, so they survive an interrupted scan, and they stay there until you delete the file, record the acknowledgement, or the file is gone.
 
 ## Persistent session, dimensional pre-check, reconstruction
 
@@ -227,11 +220,12 @@ PySide6 single-window application with sidebar and a style inspired by KDE Plasm
 - **Manual quarantine by default.** The "Metti in quarantena automaticamente i file infetti" (quarantine infected files automatically) checkbox is disabled by default: reported files stay where they are and you move them with "Metti in quarantena i selezionati" (quarantine selected) — handy to evaluate a false positive before moving anything. "Copia log" (copy log) copies all rows of the list (infected, errors, not verified) to the clipboard.
 - **History** (Cronologia) — persistent log (~/.local/share/klamav-py/history.json, last 1000 entries; directory is 0700 and files 0600, because they list scanned paths and infected files) with date/time, type, path, scanned, infected, errors, not verified, unreadable folders, already acknowledged and I/O failures (a subset of errors), plus the reason for an incomplete or deferred scan. Scheduled scans also index the detailed log on disk (tooltip on the row): the infected/error detail of a background scan, which passes through no UI list, thus stays always inspectable.
 - **Quarantine** (Quarantena) — reads the same JSON index used by the CLI (index.json in the quarantine directory): the two tools are interchangeable on the same data. Restore to original location (with restoration of original permissions, explicit refusal if the path has meanwhile been reoccupied) or permanent deletion.
-- **Findings** (Segnalazioni) — files detected but left in place (heuristic signatures, mail archives) in the session's scans, with "Ho verificato, non segnalare più" (I have verified, do not report again) (acknowledgement, see "Unmoved findings and acknowledgement") and "Elimina…" (delete) with confirmation; below, the recorded acknowledgements, revocable.
-- **Updates** (Aggiornamenti) — downloads virus definitions by running `freshclam --stdout` via pkexec (PolicyKit authentication), stopping the system clamav-freshclam/freshclam daemon to avoid lock conflicts on the log file and restarting it at the end. Since 0.1.7 the restart also happens if the update is interrupted (logout, signal), and concerns only services that were active before: a daemon stopped on purpose stays stopped. Output shown in real time. Choosing "Esci" (quit) during the update, the app closes as soon as it finishes instead of interrupting it. By default it starts automatically 1.5s after app startup (disable in Settings).
+- **Heuristic findings** (Segnalazioni Euristiche) — files detected but left in place in the session's scans: mostly heuristic detections (a suspicion, not a known malware, often a false alarm, such as an email whose links lead to a domain other than the one shown), plus any known malware found in a mail archive or in a file with more than one name, which the Type (Tipo) column shows in red, with "Ho verificato, non segnalare più" (I have verified, do not report again) (acknowledgement, see "Unmoved findings and acknowledgement") and "Elimina…" (delete) with confirmation; below, the recorded acknowledgements, revocable.
+- **Updates** (Aggiornamenti) — two panels: "Aggiornamento del programma" (program update: version in use and the "Controlla aggiornamenti" button, see below) and "Aggiornamento database virus" (virus database), which downloads virus definitions by running `freshclam --stdout` via pkexec (PolicyKit authentication), stopping the system clamav-freshclam/freshclam daemon to avoid lock conflicts on the log file and restarting it at the end. Since 0.1.7 the restart also happens if the update is interrupted (logout, signal), and concerns only services that were active before: a daemon stopped on purpose stays stopped. Output shown in real time. Choosing "Esci" (quit) during the update, the app closes as soon as it finishes instead of interrupting it. By default it starts automatically 1.5s after app startup (disable in Settings).
 - **Real-Time** — log of automatic scans on monitored folders (configurable in Settings). Uses QFileSystemWatcher: creation/modification of a file → scan after a 3s debounce (to avoid scanning files still being written), and infected files are always quarantined automatically. Files too large are labelled "Non verificato" (not verified), not "Sicuro" (safe) (see design choices).
-- **Scheduling** (Pianificazione) — recurring scan (every N hours or days) on a chosen folder, via internal QTimer: requires the app running (even minimized to tray). During execution the page shows status and live counters; the tray tooltip reflects progress; at the end of the scan the detailed log is written to ~/.local/share/klamav-py/logs/scheduled-<timestamp>.log (rotation: last 10 runs) and referenced in History. It is not a system timer like the one in the .deb package, which works even with the GUI closed (see "Scheduled scans: the two mechanisms").
-- **Settings** (Impostazioni) — clamd socket, quarantine directory, folders monitored for Real-Time (with indicator "Real-Time active on N folders (M subfolders included, recursive)"), autostart at login, start minimized to tray, DB update at startup, application update check (button and option at startup), Dolphin integration.
+- **Scheduling** (Pianificazione) — recurring scan (every N hours or days) on a chosen folder, via internal QTimer: requires the app running (even minimized to tray). During execution the page shows status and live counters; the tray tooltip reflects progress; at the end of the scan the detailed log is written to ~/.local/share/klamav-py/logs/scheduled-<timestamp>.log (rotation: last 10 runs) and referenced in History. Up to 0.1.21 there was also a scheduled system scan (see "Scheduled scans").
+- **Settings** (Impostazioni) — clamd socket, quarantine directory, folders monitored for Real-Time (with indicator "Real-Time active on N folders (M subfolders included, recursive)"), autostart at login, start minimized to tray, DB update at startup, "Controlla aggiornamenti all'avvio" option (application update check at startup), Dolphin integration.
+- **Info** — program name and version, description, license, links to the source code and the issue tracker, maintainer (gradia <gradia@disroot.org>), Python, Qt and PySide6 versions.
 
 ## Real-Time monitoring: how it works (0.1.5)
 
@@ -281,20 +275,22 @@ If enabled, writes a .desktop file in ~/.config/autostart/ that launches the GUI
 
 ## Application update check
 
-The "Controlla aggiornamenti" (check for updates) button in Settings queries the project's GitHub releases API and compares the latest published version with the one in use. The "Controlla aggiornamenti all'avvio" (check for updates at startup) option is disabled by default: without it the application does not contact GitHub except on explicit request. If a new version exists a link to the release page appears (and a tray notification, for the startup check); installation remains manual, via .deb or AUR.
+The "Controlla aggiornamenti" (check for updates) button on the Updates page queries the project's GitHub releases API and compares the latest published version with the one in use. The "Controlla aggiornamenti all'avvio" (check for updates at startup) option is disabled by default: without it the application does not contact GitHub except on explicit request. If a new version exists a link to the release page appears (and a tray notification, for the startup check); installation remains manual, via .deb or AUR.
 
 The startup check runs at most once every six hours: the unauthenticated GitHub API grants 60 requests per hour per IP address, and restarting the application often must not consume them. The button in Settings is not subject to the limit.
 
 GitHub's response is treated as untrusted data: it is read up to a maximum of 256 KB, version and notes are escaped before being shown, and the link is made clickable only if it points to the official repository's releases.
 
-## Scheduled scans: the two mechanisms
+## Scheduled scans
 
-- **GUI timer (Scheduling page):** runs only with the app active (even in tray), but offers live progress, persistent log and full UI integration.
-- **User systemd unit (installed by the .deb and the Arch package):** starts at each user's login without configuration, works with the GUI closed. To run the timer even with the user logged out:
-  `loginctl enable-linger $USER`. Uses the same default quarantine path as the GUI (~/.local/share/klamav-py/quarantine). Errors and unreadable folders of the last scan, one per line, are also in `~/.local/state/log/klamav-py/scan-errors.log` (`$XDG_STATE_HOME/log/klamav-py`, the unit's `LogsDirectory=`), besides the journal.
-  Quarantine, clamd connection and folders excluded chosen in the GUI reach the timer via a drop-in, `~/.config/systemd/user/klamav-scan.service.d/50-klamav-py.conf`, recognized by the first line `# Generato da KlamAV-Py: non modificare a mano.` (the application writes it in Italian). Written by Settings and Scheduling saves; on startup the GUI also rewrites a drop-in of its own left at an older version (for example without `--log-errors`) and says so on the Scheduling page. A file with that name without that first line, i.e. written by hand, is never touched. To see the command the timer will use: `systemctl --user cat klamav-scan.service`.
+Automatic scans are those of the **Scheduling** (Pianificazione) page: you turn them on with "Abilita scansione automatica", with an interval (hours or days), the folder to scan and the excluded folders. They run while KlamAV-Py is open, even only in the system tray: to avoid missing any, enable autostart at login in Settings. A run that fell due while the PC was off or the application closed is caught up at the first check after startup.
 
-A system-level systemd unit is no longer distributed (since 0.1.9): it could not read private homes without widening their permissions, while the user unit runs as the user and reads their home as-is.
+Up to 0.1.21 the `.deb` and the Arch package also installed a scheduled system scan, `klamav-scan.timer` (a systemd user unit, active even with the GUI closed), as an alternative to the GUI's. It has been removed: two mechanisms for the same thing, with settings kept aligned through drop-ins, were more fragile than one. If you upgrade there is nothing to do:
+
+- the `.deb` removes in its postinst the enablement for all users (`/etc/systemd/user/timers.target.wants/klamav-scan.timer`);
+- on first start the GUI stops the timer still loaded in the session, removes the enablement made with `systemctl --user enable`, its drop-ins (`~/.config/systemd/user/klamav-scan.service.d/50-klamav-py.conf` and the timer's) and the interrupted-scan state, and says so once with a notification and on the Scheduling page. Files written by hand in those folders stay where they are: the page lists them, since they are now useless.
+
+If you still want a scan with the GUI closed, you can write a user unit with the CLI, for example `ExecStart=/usr/bin/klamav-py scan %h --quarantine %h/.local/share/klamav-py/quarantine --quiet`: findings end up on the Heuristic findings (Segnalazioni Euristiche) page like the GUI's.
 
 ## Diagnosing common errors
 
@@ -399,22 +395,7 @@ Verify before installing: the skeleton was validated in an Ubuntu 24.04 environm
 
 - `pyproject.toml` defines two entry points in /usr/bin/: klamav-py (CLI) and klamav-py-gui (GUI). The GUI uses them to auto-detect the command to write in the autostart and Dolphin .desktop files (`_gui_relaunch_command()`), instead of assuming a local checkout with venv.
 - The license field deliberately uses the old table format (`{text = "..."}`) instead of the SPDX string: recent setuptools deprecate the former with a warning, but old setuptools (verified: 68.1.2, Ubuntu 24.04) reject the latter with a fatal error. Better a cosmetic warning everywhere than a broken build on some systems.
-- Systemd units at USER level (systemd --user), not system (because, see below). The files are named `debian/klamav-py.klamav-scan.user.service/.timer`: the `.user.` segment in the name is mandatory for dh_installsystemduser to recognize them — discovered only by empirically testing a real build. They end up in /usr/lib/systemd/user/.
-- postinst/postrm use deb-systemd-helper --user: the enablement symlink goes in /etc/systemd/user/timers.target.wants/ (applies to all users) and the timer starts at each user's next login, without manual commands.
-- A user unit cannot be reliably ordered relative to a system unit like clamav-daemon.service (separate systemd managers, no cross-manager dependencies): the .service has no After=/Requires= on clamd. In practice this is not a problem: clamd starts well before user login.
-
-## Why user units and not system
-
-The very first version used a system unit with DynamicUser=yes. It looked clean (no manual useradd), but does not hold up to real use:
-
-- Homes are born 0700/0750: a dynamic user reads nothing, and scanning /home produced only Permission denied in bursts.
-- Quarantine ended up in /var/lib/klamav-py, owned by the dynamic user: the GUI could neither see nor manage it.
-
-The user unit runs as the user, reads the home without problems and uses the same default quarantine as the GUI: the paths coincide.
-
-### Upgrade from previous versions (which had the system unit)
-
-Removing the old unit's file does not stop an already-running instance — the symlink in /etc/systemd/system/timers.target.wants/ is not tracked by dpkg. That is why postinst includes a dedicated migration that stops and disables the old system unit explicitly before enabling the new user one (verified by reading the postinst of the built .deb).
+- No systemd units (after 0.1.21). The postinst removes the global enablement of `klamav-scan.timer` left by previous versions with `deb-systemd-helper --user disable` and `purge`: dpkg removes the unit files, but not the links created by deb-systemd-helper.
 
 ## Arch packaging (AUR)
 

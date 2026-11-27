@@ -28,7 +28,7 @@ Description: frontend Python per ClamAV via clamd (CLI + GUI)
  demone via socket nativo, non invoca binari esterni tramite shell).
  .
  Il pacchetto include sia la CLI (klamav-py, adatta per l'uso da
- systemd timer o script, senza dipendenze da Qt) sia la GUI PySide6
+ script, senza dipendenze da Qt) sia la GUI PySide6
  (klamav-py-gui), con scansione manuale, quarantena, cronologia,
  aggiornamento database, monitoraggio real-time su cartelle e
  pianificazione scansioni.

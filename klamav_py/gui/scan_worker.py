@@ -76,7 +76,7 @@ class ScanWorker(QThread):
     # visione (percorso, firma): non è un infetto, niente result_ready.
     acknowledged = Signal(str, str)
     # Rilevamento «solo segnalazione» nuovo (PendingReport), emesso dopo
-    # result_ready e quarantine_outcome: la pagina Segnalazioni lo offre per
+    # result_ready e quarantine_outcome: la pagina Segnalazioni Euristiche lo offre per
     # la presa visione o l'eliminazione.
     report_only_found = Signal(object)
     # Scansione non eseguita o interrotta da un errore bloccante (radice
