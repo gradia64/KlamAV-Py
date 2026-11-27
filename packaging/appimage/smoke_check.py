@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, os.path.join(os.environ["APPDIR"], "usr", "share", "klamav-py"))
 
 from PySide6.QtGui import QIcon, QImageReader  # noqa: E402
-from PySide6.QtWidgets import QApplication, QGroupBox  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 app = QApplication(sys.argv)
 
@@ -23,14 +23,9 @@ cmd = mw._gui_relaunch_command()
 assert cmd == appimage.desktop_exec_arg(os.environ["APPIMAGE"]), cmd
 assert "/tmp/.mount_" not in cmd and "usr/python" not in cmd, cmd
 
-# Niente timer di sistema: gruppo dell'orario nascosto, nota al suo posto.
-assert mw.system_timer_available() is False
+# La pagina Pianificazione (solo pianificazione interna) si costruisce.
 page = mw.SchedulerPage()
 page.show()
-assert not any(
-    "klamav-scan.timer" in g.title() and g.isVisible() for g in page.findChildren(QGroupBox)
-), "gruppo del timer di sistema visibile"
-assert page.no_system_timer_label.isVisible()
 page.hide()
 
 assert not QIcon(str(mw._BUNDLED_ICON_PATH)).pixmap(64, 64).isNull(), "icona SVG non caricata"

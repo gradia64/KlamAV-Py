@@ -1,18 +1,18 @@
 """
 Validazione della directory di quarantena scelta dall'utente.
 
-Unica fonte della regola, usata dal salvataggio delle Impostazioni, dal
-generatore del drop-in della unit klamav-scan.service e dalla CLI
-(--quarantine): le stringhe di motivo sono condivise, quindi la regola non
+Unica fonte della regola, usata dal salvataggio delle Impostazioni e dalla
+CLI (--quarantine): le stringhe di motivo sono condivise, quindi la regola non
 può divergere fra i consumatori. Come quarantine_policy.py, il modulo non
 importa nulla di Qt.
 
-Perché serve (vedi anche klamav-py(1), SICUREZZA): la unit di scansione ha
-PrivateTmp=true. Una quarantena in /var/tmp finirebbe nella /var/tmp
-privata del servizio, che systemd elimina a fine scansione insieme
-all'indice: file infetti distrutti senza errori né notifiche. Il 226/NAMESPACE
-non scatta, perché la directory nel namespace esiste davvero. La regola
-quindi rifiuta le directory volatili prima che arrivino alla unit.
+Perché serve (vedi anche klamav-py(1), SICUREZZA): una quarantena in una
+directory volatile (/tmp, /var/tmp, /run) sparisce con l'indice a un
+riavvio, o prima se la CLI gira in un servizio systemd con PrivateTmp=true
+(la /var/tmp privata si elimina a fine servizio): file infetti distrutti
+senza errori né notifiche. La regola quindi rifiuta le directory volatili.
+(Fino alla 0.1.21 leggeva anche le direttive di sandbox della unit
+klamav-scan.service, tolta insieme al timer di sistema.)
 
 Tre livelli di esito, perché i consumatori li trattano diversamente:
 
@@ -40,13 +40,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
 
-# Stesso percorso dell'ExecStart di klamav-scan.service (%h/...): la
-# coerenza è verificata da tests/test_quarantine_location.py.
 DEFAULT_QUARANTINE_SUBDIR = Path(".local/share/klamav-py/quarantine")
 
-UNIT_PATH = Path("/usr/lib/systemd/user/klamav-scan.service")
-
-# Directory volatili rifiutate sempre, indipendentemente dalla unit:
+# Directory volatili rifiutate sempre:
 # /tmp e /var/tmp (PrivateTmp, e comunque ripulite), /run (tmpfs intero:
 # copre /run/user/UID, cioè $XDG_RUNTIME_DIR, e /var/run dopo il resolve),
 # /dev (/dev/shm è l'unico punto scrivibile ed è tmpfs). Elenco statico
@@ -75,65 +71,12 @@ class LocationDecision:
 
     @property
     def usable(self) -> bool:
-        """Accettabile per le Impostazioni e per la unit systemd."""
+        """Accettabile per le Impostazioni e per la CLI sotto systemd."""
         return self.error is None and self.volatile is None
 
 
 def default_quarantine_dir(home: Path | None = None) -> Path:
     return (home or Path.home()) / DEFAULT_QUARANTINE_SUBDIR
-
-
-# -- direttive della unit ------------------------------------------------
-
-def _directive_paths(value: str) -> list[Path]:
-    """Percorsi di InaccessiblePaths=/TemporaryFileSystem=: prefissi
-    "-" e "+" (opzionalità, radice) e suffisso ":opzioni" rimossi."""
-    paths = []
-    for token in value.split():
-        token = token.lstrip("-+")
-        token = token.split(":", 1)[0]
-        if token.startswith("/"):
-            paths.append(Path(token))
-    return paths
-
-
-def hidden_paths_from_unit(text: str) -> set[Path]:
-    """
-    Percorsi che le direttive di sandbox della unit rendono privati,
-    volatili o inaccessibili al servizio. Solo le direttive che producono
-    fallimenti SILENZIOSI: ProtectSystem=strict o ProtectHome=read-only
-    danno EROFS, cioè un errore visibile, e restano fuori.
-    """
-    hidden: set[Path] = set()
-    in_service = False
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith(("#", ";")):
-            continue
-        if line.startswith("["):
-            in_service = line == "[Service]"
-            continue
-        if not in_service or "=" not in line:
-            continue
-        key, value = (part.strip() for part in line.split("=", 1))
-        if key == "PrivateTmp" and value.lower() in _TRUE:
-            hidden |= {Path("/tmp"), Path("/var/tmp")}
-        elif key == "PrivateDevices" and value.lower() in _TRUE:
-            hidden.add(Path("/dev"))
-        elif key == "ProtectHome" and value.lower() in _TRUE | {"tmpfs"}:
-            hidden |= {Path("/home"), Path("/root"), Path("/run/user")}
-        elif key in ("InaccessiblePaths", "TemporaryFileSystem"):
-            hidden.update(_directive_paths(value))
-    return hidden
-
-
-def installed_unit_hidden_paths(unit: Path = UNIT_PATH) -> set[Path]:
-    """Come hidden_paths_from_unit() sulla unit installata; insieme vuoto
-    se manca (es. esecuzione dal sorgente): restano le regole statiche."""
-    try:
-        return hidden_paths_from_unit(unit.read_text(encoding="utf-8"))
-    except OSError:
-        return set()
 
 
 # -- file system montati -------------------------------------------------
@@ -222,10 +165,10 @@ def decide(
     percorso), per esempio la cartella della pianificazione interna della
     GUI: la quarantena non può né coincidere con una di esse né contenerla.
 
-    home, unit_hidden, mountinfo e volatile_roots sono iniettabili per i
-    test (le cui directory temporanee stanno sotto /tmp); di default si
-    usano la home reale, la unit installata, /proc/self/mountinfo e
-    l'elenco statico.
+    home, mountinfo e volatile_roots sono iniettabili per i test (le cui
+    directory temporanee stanno sotto /tmp); di default si usano la home
+    reale, /proc/self/mountinfo e l'elenco statico. unit_hidden: percorsi
+    nascosti in più, trattati come volatili (vuoto di default).
     """
     if not raw or not raw.strip():
         return LocationDecision(None, error="Directory di quarantena non indicata.")
@@ -267,14 +210,13 @@ def decide(
         if contained:
             return LocationDecision(path, error=contained, outside_home=outside_home)
 
-    hidden = set(installed_unit_hidden_paths() if unit_hidden is None else unit_hidden)
+    hidden = set(unit_hidden or ())
     root = _under(path, volatile_roots) or _under(path, hidden)
     volatile = None
     if root is not None:
         volatile = (
-            f"«{path}» è sotto {root}, che per la scansione programmata è "
-            "temporanea o inaccessibile: i file messi in quarantena verrebbero "
-            "persi senza alcun avviso."
+            f"«{path}» è sotto {root}, che è temporanea o inaccessibile: "
+            "i file messi in quarantena verrebbero persi senza alcun avviso."
         )
 
     warnings: list[str] = []

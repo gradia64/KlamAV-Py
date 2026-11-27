@@ -6,6 +6,65 @@ the description of its GitHub release. The extended detail up to 0.1.3
 and the audit rounds are in `docs/CHANGELOG-archive.md` (Italian).
 
 ---
+## Unreleased
+
+### Fixed
+- **The Updates (Aggiornamenti) page no longer says the signatures are
+  out of date when freshclam has just confirmed they are current.** The
+  warning looked only at the age of the daily database (more than 36
+  hours), but ClamAV does not publish a new one every day (holidays,
+  pauses): after an update with nothing to download the page still said
+  "Firme non aggiornate: conviene aggiornare", and the update at startup
+  asked for the password again. Now a database that freshclam reports as
+  up to date (its periodic checks in the journal, or the update just run)
+  counts as current, the page says so, and the update result reads
+  "already up to date" instead of "probably already up to date". Reading
+  the journal needs the usual groups (`adm` or `systemd-journal`); without
+  them the age alone decides, as before.
+
+### Added
+- **New Info page in the sidebar**: program name and version, a short
+  description, the license, links to the source code and the issue
+  tracker, the maintainer and the Python, Qt and PySide6 versions in use.
+
+### Changed
+- **The Updates (Aggiornamenti) page now covers both updates**: the
+  program ("Aggiornamento del programma": current version and the
+  "Controlla aggiornamenti" button for a new KlamAV-Py release) and the
+  virus database, as before. The Information (Informazioni) group is gone
+  from Settings; the "Controlla aggiornamenti all'avvio" option stays
+  there.
+- **The Findings (Segnalazioni) page is now "Segnalazioni Euristiche"**
+  (heuristic findings), because almost everything it lists is a heuristic
+  detection: not a known malware, but something suspicious, often a false
+  alarm (for example `Heuristics.Phishing.Email.SpoofedDomain` on a genuine
+  email whose links lead to a domain other than the one shown). A new Type
+  (Tipo) column tells them apart from the known malware that lands there
+  too, because moving it would break a mail program (or because the file
+  has more than one name): those rows are shown in bold red. The page no
+  longer mentions the scheduled system scan.
+
+### Removed
+- **The scheduled system scan (`klamav-scan.timer`) is gone.** Automatic
+  scans are those of the Scheduling (Pianificazione) page: enable them
+  there, with interval, folder and excluded folders; they run while
+  KlamAV-Py is open, in the system tray too (turn on autostart at login so
+  as not to miss any). Two mechanisms for the same job, with settings kept
+  in step through systemd drop-ins, were more fragile than one. The `.deb`
+  and the Arch package no longer install `klamav-scan.service`,
+  `klamav-scan.timer` and `klamav-scan-notify.service`; the "Every day at"
+  setting and the interrupted-scan warning of the timer are gone with them.
+- If you upgrade there is nothing to do. The `.deb` removes the
+  enablement it had created for all users. On first start the GUI stops
+  the timer still loaded in your session, removes the enablement made
+  with `systemctl --user enable`, its own drop-ins in
+  `~/.config/systemd/user/klamav-scan.service.d/` and `klamav-scan.timer.d/`
+  and `~/.local/share/klamav-py/timer-scan.json`, and tells you once.
+  Files you wrote by hand in those folders are left alone and listed on
+  the Scheduling page. If you want a scan with the GUI closed, write your
+  own user unit that runs `klamav-py scan`: the README has an example.
+
+---
 ## 0.1.21 — 2026-11-10
 
 ### Added

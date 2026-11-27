@@ -112,6 +112,7 @@ class FreshclamRestartWorker(QThread):
         self.progress.emit("Unità riavviata, in attesa del nuovo database…")
 
         seen = 0
+        lines: list[str] = []
         latest = before
         deadline = time.monotonic() + self._wait_timeout
         while time.monotonic() < deadline:
@@ -138,6 +139,13 @@ class FreshclamRestartWorker(QThread):
                 return RestartResult(Outcome.INTERRUPTED,
                                      "Interrotto alla chiusura.", latest)
 
+        confirmed = fs.up_to_date_versions(lines)
+        if latest is not None and latest.version in confirmed:
+            return RestartResult(
+                Outcome.UNCHANGED,
+                f"Il database è già aggiornato: freshclam conferma che la "
+                f"versione {latest.version} è l'ultima pubblicata.{note}",
+                latest.confirmed(confirmed))
         return RestartResult(
             Outcome.UNCHANGED,
             f"Nessun nuovo database caricato da clamd entro "

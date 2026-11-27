@@ -11,7 +11,6 @@ divergere la regola dal sandbox.
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 import pytest
@@ -22,13 +21,10 @@ from klamav_py.quarantine_location import (
     decide,
     default_quarantine_dir,
     fstype_of,
-    hidden_paths_from_unit,
     parse_mountinfo,
     root_inside,
 )
 
-ROOT = Path(__file__).resolve().parent.parent
-UNIT = ROOT / "debian" / "klamav-py.klamav-scan.user.service"
 
 # Nessun file system volatile, nessuna direttiva di unit e nessuna radice
 # volatile statica, salvo dove il test li fornisce: i risultati non
@@ -211,63 +207,6 @@ def test_directory_inesistente_accettata(home):
 
 
 # -- direttive della unit ------------------------------------------------
-
-def test_parsing_direttive():
-    text = """
-[Unit]
-PrivateDevices=yes
-[Service]
-# PrivateTmp=true
-PrivateTmp=yes
-PrivateDevices=true
-InaccessiblePaths=-/opt/a /opt/b
-TemporaryFileSystem=/var/lib/x:ro
-ProtectHome=read-only
-ProtectSystem=strict
-"""
-    assert hidden_paths_from_unit(text) == {
-        Path("/tmp"), Path("/var/tmp"), Path("/dev"),
-        Path("/opt/a"), Path("/opt/b"), Path("/var/lib/x"),
-    }
-
-
-def test_protecthome_tmpfs_nasconde_le_home():
-    assert Path("/home") in hidden_paths_from_unit("[Service]\nProtectHome=tmpfs\n")
-
-
-# Direttive di sandbox della unit spedita e come le tratta la regola.
-# Una direttiva nuova che non compare qui fa fallire il test: va decisa
-# esplicitamente, perché potrebbe nascondere percorsi (fallimento
-# silenzioso) invece di renderli di sola lettura (fallimento visibile).
-HIDING = {"PrivateTmp", "PrivateDevices", "ProtectHome", "InaccessiblePaths", "TemporaryFileSystem"}
-LOUD_OR_UNRELATED = {
-    "ProtectSystem", "ReadWritePaths", "ReadOnlyPaths",
-    "ProtectKernelTunables", "ProtectKernelModules", "ProtectKernelLogs",
-    "ProtectControlGroups", "ProtectHostname", "ProtectClock", "ProtectProc",
-    "PrivateNetwork", "PrivateUsers", "PrivateIPC",
-}
-_SANDBOX_KEY = re.compile(r"^(Private|Protect|Temporary|Inaccessible|ReadOnly|ReadWrite|Bind)\w*(?==)")
-
-
-def test_unit_spedita_nessuna_direttiva_non_classificata():
-    keys = {m.group(0) for line in UNIT.read_text().splitlines() if (m := _SANDBOX_KEY.match(line.strip()))}
-    assert keys <= HIDING | LOUD_OR_UNRELATED, keys - HIDING - LOUD_OR_UNRELATED
-
-
-def test_unit_spedita_ogni_percorso_nascosto_e_rifiutato(home):
-    hidden = hidden_paths_from_unit(UNIT.read_text())
-    assert hidden, "la unit dovrebbe avere almeno PrivateTmp"
-    for h in hidden:
-        assert _decide(str(h / "q"), home, unit_hidden=hidden).volatile, h
-
-
-def test_default_coincide_con_execstart_della_unit():
-    # Il drop-in non viene scritto quando la directory è quella predefinita:
-    # funziona solo se la unit usa davvero lo stesso percorso.
-    exec_start = next(l for l in UNIT.read_text().splitlines() if l.startswith("ExecStart="))
-    m = re.search(r"--quarantine (\S+)", exec_start)
-    assert m and m.group(1) == f"%h/{DEFAULT_QUARANTINE_SUBDIR}"
-
 
 def test_default_quarantine_dir(home):
     assert default_quarantine_dir(home) == home / DEFAULT_QUARANTINE_SUBDIR

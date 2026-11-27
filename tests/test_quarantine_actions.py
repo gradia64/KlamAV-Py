@@ -291,8 +291,7 @@ def test_chiusura_attende_l_operazione_in_corso(app, tmp_path, boxes, held_resto
 
     fake = SimpleNamespace(
         scan_page=scan, quarantine_page=page,
-        update_page=SimpleNamespace(worker=None),
-        settings_page=SimpleNamespace(_update_check_worker=None),
+        update_page=SimpleNamespace(worker=None, app_update=SimpleNamespace(_update_check_worker=None)),
     )
     try:
         mw.MainWindow._shutdown_workers(fake)

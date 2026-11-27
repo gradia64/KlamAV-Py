@@ -1,21 +1,18 @@
 """
 Validazione delle directory escluse dalle scansioni programmate.
 
-Unica fonte della regola, usata dalle Impostazioni della GUI, dal
-generatore del drop-in della unit klamav-scan.service e dalla CLI
-(--exclude), sul modello di quarantine_location.py. Il modulo non importa
-nulla di Qt.
+Unica fonte della regola, usata dalla pagina Pianificazione della GUI e
+dalla CLI (--exclude), sul modello di quarantine_location.py. Il modulo non
+importa nulla di Qt.
 
-Una sola lista vale per entrambe le scansioni programmate (timer systemd,
-radice la home; scheduler interno, radice schedule_target): le due sono
-alternative, e se le esclusioni cambiassero passando dall'una all'altra
-la copertura cambierebbe in silenzio. Per questo decide() riceve le
-radici come parametro e ogni esclusione è confrontata con tutte.
+decide() riceve le radici della scansione come parametro (la GUI passa la
+cartella della pianificazione; fino alla 0.1.21 anche la home del timer di
+systemd) e ogni esclusione è confrontata con tutte.
 
 Cosa si salva e cosa si confronta sono due forme diverse:
 
 - stored: expanduser(), assoluta, NON risolta. È quella che finisce nelle
-  Impostazioni e nell'ExecStart del drop-in, e che si risolve di nuovo a
+  Impostazioni, e che si risolve di nuovo a
   ogni scansione (la CLI lo fa già). Salvare la forma risolta fisserebbe
   la destinazione di un symlink al momento della configurazione.
 - path: resolve(), solo per i confronti, perché il matching in
@@ -81,7 +78,7 @@ def decide(raw: str, *, roots: Mapping[str, Path], cwd: Path | None = None) -> E
     Valuta una directory da escludere scritta dall'utente.
 
     roots: etichetta breve -> radice della scansione (es.
-    {"timer systemd": home, "pianificazione interna": target}). cwd: se indicata,
+    {"pianificazione interna": target}). cwd: se indicata,
     un percorso relativo è ancorato lì (CLI: in una shell la directory
     corrente è significativa); se None è un errore (GUI: lanciata da
     Dolphin o dal menu, la directory corrente è arbitraria).

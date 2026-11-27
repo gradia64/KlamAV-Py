@@ -56,7 +56,7 @@ By default, files share a persistent session
 .RB ( IDSESSION ).
 .PP
 The command does not depend on Qt and runs with the system Python alone,
-for use from scripts and by the scheduled scan.
+for use from scripts.
 The graphical interface is provided by
 .BR klamav-py-gui (1).
 .
@@ -302,15 +302,6 @@ the
 .I acknowledged.json.corrupt-*
 file where the previous acknowledgements remain; the exit status does not
 change.
-.PP
-In the scheduled scan, codes 1 and 2 trigger the desktop notification
-through
-.BR klamav-scan-notify.service .
-Errors that do not change the code and unreadable subdirectories do not
-notify: they show up in the journal and, one per line, in
-.IR \%~/.local/state/log/klamav\-py/scan\-errors.log
-(see
-.BR FILES ).
 .
 .SH ENVIRONMENT
 .TP
@@ -324,34 +315,10 @@ Some desktop sessions pass it to every application, terminal included.
 .
 .SH FILES
 .TP
-.I \%/usr/lib/systemd/user/klamav-scan.service
-.TQ
-.I \%/usr/lib/systemd/user/klamav-scan.timer
-User units for the scheduled home directory scan, run in a sandbox at
-the lowest CPU and I/O priority.
-The quarantine directory used by the timer is changed from the Settings
-of
-.BR klamav-py-gui (1).
-.TP
-.I \%$XDG_STATE_HOME/log/klamav\-py/scan\-errors.log
-Errors and unreadable directories of the last scheduled scan
-.RB ( \-\-log\-errors
-in the unit), rewritten at every scan.
-The directory is the unit's
-.BR LogsDirectory= ,
-created by systemd with permissions 0700 and writable inside the
-sandbox; without
-.B XDG_STATE_HOME
-it is
-.IR \%~/.local/state/log/klamav\-py .
-The drop-in written by the GUI carries the same option.
-.TP
-.I \%/usr/lib/systemd/user/klamav-scan-notify.service
-Desktop notification, started only by the scan's
-.BR OnFailure= .
-.TP
 .I \%~/.local/share/klamav-py/quarantine
-Quarantine directory of the scheduled scan (0700).
+Default quarantine directory, shared with
+.BR klamav-py-gui (1)
+(0700).
 It holds the isolated files (0400) and the service files (0600):
 the index
 .IR index.json ,
@@ -385,34 +352,20 @@ lock file
 .IR acknowledged.json.lock .
 An invalid register is renamed to
 .I acknowledged.json.corrupt-*
-and never deleted, with a warning (on standard error, or in the Findings
-page of the GUI): the previous acknowledgements remain in that file, and
+and never deleted, with a warning (on standard error, or in the Heuristic
+findings page of the GUI): the previous acknowledgements remain in that file, and
 the matching detections are reported as new again.
 Entries not found by any scan for 90 days are removed.
 .TP
 .I \%~/.local/share/klamav-py/pending-reports.json
 Detections still to be evaluated (0600): every scan writes each new
-detection that is only reported, as soon as it finds it, and the Findings
-page of the GUI lists them, also those of the scheduled system scan.
+detection that is only reported, as soon as it finds it, and the Heuristic
+findings page of the GUI lists them, also those found from the command line.
 An entry leaves the file when the detection is deleted or acknowledged,
 when its file is no longer there, or after 90 days without being found
 again.
 Same lock and handling of an invalid file as
 .IR acknowledged.json .
-.TP
-.I \%~/.local/share/klamav\-py/timer\-scan.json
-State of the last scheduled system scan (0600): start and end, written
-only by a scan running inside
-.B klamav-scan.service
-(recognized from the control group of the process, so a scan started from
-a terminal never writes it), the start right before the traversal and the end on every
-exit with a code (best effort: a failure here does not change the scan
-outcome).
-If the end is missing, the scan was interrupted by a signal, for example
-by switching the computer off: the GUI shows it at the next startup, once
-per interruption, pointing to the Findings and Quarantine pages.
-The file holds no user data: an implausible one is ignored, and the next
-scan rewrites it.
 .
 .SH SECURITY
 .SS Quarantine directory
@@ -422,19 +375,17 @@ The quarantine cannot reside in volatile directories:
 .I /run
 and
 .I /dev
-are rejected, as are paths that the unit's sandbox directives make private
-or inaccessible.
+are rejected.
 The check is performed on the already expanded and resolved path, so it
 also applies to symbolic links such as
 .IR /var/run .
 .PP
-Reason: the scanning unit uses
-.BR PrivateTmp=true .
-A quarantine in
-.I /var/tmp
-would end up in the service's private temporary directory, which systemd
-deletes, together with the index, when the scan ends: infected files would
-be destroyed without any error or notification.
+Reason: their contents disappear on reboot, or earlier for a scan run as a
+systemd service with
+.BR PrivateTmp=true ,
+whose private temporary directory is deleted, together with the index,
+when the service ends: infected files would be destroyed without any error
+or notification.
 .PP
 Directories on other
 .BR tmpfs " or " ramfs
@@ -510,15 +461,6 @@ in
 is discouraged: unlike the Unix socket, which is protected by its
 permissions, a TCP port lets any local user use
 clamd as a scanning oracle.
-.PP
-The scheduled system scan uses the connection set in
-.BR klamav-py-gui (1).
-With TCP its drop-in allows network access by overriding
-.B PrivateNetwork=no
-and
-.B RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-while keeping the filter; with the Unix socket the unit has no network
-access.
 .
 .SH EXAMPLES
 Scan the home directory with quarantine, showing only problems:
@@ -542,7 +484,7 @@ it, list the acknowledgements, and revoke one by hash prefix:
 .PP
 .RS
 .EX
-journalctl \-\-user \-u klamav\-scan.service | grep INFETTO
+grep INFETTO ~/.local/share/klamav\-py/logs/scheduled\-*.log
 klamav\-py \-\-acknowledge ~/.local/share/local\-mail/trash/new/1695\&.R42.host
 klamav\-py \-\-list\-acknowledged
 klamav\-py \-\-unacknowledge 3f2a9c01be47
@@ -566,8 +508,7 @@ klamav\-py \-\-report\-only ~/Archive \-\-acknowledge ~/Archive/old.exe
 .BR clamd (8),
 .BR clamd.conf (5),
 .BR clamdscan (1),
-.BR systemd.exec (5),
-.BR systemd.timer (5)
+.BR systemd.exec (5)
 .PP
 .UR https://github.com/gradia64/KlamAV-Py
 Project repository

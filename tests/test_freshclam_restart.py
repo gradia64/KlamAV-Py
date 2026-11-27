@@ -218,3 +218,37 @@ def test_worker_clamd_down_before_is_not_updated(worker_env):
     worker_env(0)
     # Senza versione "prima" non si può dichiarare un aggiornamento.
     assert _worker([None, INFO])._run().outcome is Outcome.UNCHANGED
+
+
+# -- conferma di freshclam: database vecchio ma ultimo pubblicato --------
+
+JOURNAL_UP_TO_DATE = [
+    "Fri Nov 27 11:29:43 2026 -> ClamAV update process started at Fri Nov 27 11:29:43 2026",
+    "Fri Nov 27 11:29:43 2026 -> daily.cld database is up-to-date (version: 27072, "
+    "sigs: 355842, f-level: 90, builder: svc.clamav-publisher)",
+    "Fri Nov 27 11:29:43 2026 -> main.cld database is up-to-date (version: 63, sigs: 3287027)",
+]
+
+
+def test_up_to_date_versions_reads_only_daily():
+    assert fs.up_to_date_versions(JOURNAL_UP_TO_DATE) == {27072}
+    assert fs.up_to_date_versions(["daily.cvd database is up-to-date (version: 5, x"]) == {5}
+    assert fs.up_to_date_versions(["daily.cld updated (version: 27073)"]) == set()
+
+
+def test_confirmed_db_is_not_stale_for_the_gate():
+    later = BUILT + timedelta(days=2)
+    confirmed = INFO.confirmed({27072})
+    assert confirmed.confirmed_current
+    assert not should_update_on_startup(confirmed, True, now=later)
+    # Una conferma per un'altra versione non conta.
+    assert should_update_on_startup(INFO.confirmed({27071}), True, now=later)
+
+
+def test_worker_unchanged_confirmed_by_journal(worker_env, monkeypatch):
+    worker_env(0)
+    monkeypatch.setattr(fs, "journal_lines", lambda unit, since, run=None: JOURNAL_UP_TO_DATE)
+    result = _worker([INFO])._run()
+    assert result.outcome is Outcome.UNCHANGED
+    assert result.db_info.confirmed_current
+    assert "ultima pubblicata" in result.message and "probabilmente" not in result.message

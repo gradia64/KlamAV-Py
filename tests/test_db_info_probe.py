@@ -71,3 +71,25 @@ def test_probe_tcp_closed_port():
     port = s.getsockname()[1]
     s.close()
     assert probe_db_info(ClamdEndpoint.tcp("127.0.0.1", port), timeout=1) is None
+
+
+def test_describe_stale_but_confirmed():
+    text = describe(INFO.confirmed({27072}), now=BUILT + timedelta(days=2))
+    assert "non aggiornate" not in text and "ultima versione pubblicata" in text
+
+
+def test_confirm_with_journal(monkeypatch):
+    from klamav_py import freshclam_service as fs
+    from klamav_py.gui import db_info_worker as w
+    calls = []
+
+    def fake(since, run=None):
+        calls.append(since)
+        return frozenset({27072})
+    monkeypatch.setattr(fs, "recent_up_to_date_versions", fake)
+    old = DbInfo("1.4.2", 27072, datetime.now() - timedelta(days=3))
+    assert w.confirm_with_journal(old).confirmed_current
+    # Database fresco: il journal non si legge nemmeno.
+    fresh = DbInfo("1.4.2", 27072, datetime.now())
+    assert w.confirm_with_journal(fresh) is fresh and len(calls) == 1
+    assert w.confirm_with_journal(None) is None

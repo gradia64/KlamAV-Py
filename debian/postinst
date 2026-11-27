@@ -27,4 +27,16 @@ if [ "$1" = "configure" ] && [ -d /run/systemd/system ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || true
 fi
 
+# Migrazione da versioni <= 0.1.21, che spedivano la scansione programmata
+# di sistema come unit UTENTE (klamav-scan.timer, abilitata per tutti gli
+# utenti da dh_installsystemduser). Le unit non sono più nel pacchetto, ma
+# il collegamento in /etc/systemd/user/timers.target.wants e lo stato di
+# deb-systemd-helper restano: si tolgono qui. Le istanze già caricate nelle
+# sessioni utente, le abilitazioni fatte dall'utente e i drop-in della GUI
+# li toglie la GUI al primo avvio (klamav_py/legacy_timer.py).
+if [ "$1" = "configure" ] && [ -n "$2" ] && dpkg --compare-versions "$2" lt 0.2.0~; then
+	deb-systemd-helper --user disable 'klamav-scan.timer' >/dev/null 2>&1 || true
+	deb-systemd-helper --user purge 'klamav-scan.timer' >/dev/null 2>&1 || true
+fi
+
 #DEBHELPER#

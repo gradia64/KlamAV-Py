@@ -5,10 +5,14 @@ lo rilascia con _retire_qthread().
 """
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QThread, Signal
 
+from klamav_py import freshclam_service as fs
+
 from klamav_py.clamd_client import ClamdEndpoint, ClamdError
-from klamav_py.db_freshness import DbInfo, parse_version_reply
+from klamav_py.db_freshness import DEFAULT_MAX_AGE, DbInfo, parse_version_reply
 
 PROBE_TIMEOUT = 5.0
 
@@ -34,4 +38,19 @@ class DbInfoWorker(QThread):
         self._endpoint = endpoint
 
     def run(self) -> None:
-        self.result_ready.emit(probe_db_info(self._endpoint))
+        self.result_ready.emit(confirm_with_journal(probe_db_info(self._endpoint)))
+
+
+def confirm_with_journal(info: DbInfo | None) -> DbInfo | None:
+    """Un database vecchio può essere comunque l'ultimo pubblicato: lo dice
+    il demone freshclam nei controlli periodici. Si guarda il journal solo
+    quando serve, cioè quando l'età da sola chiederebbe di aggiornare, e
+    solo per la finestra DEFAULT_MAX_AGE.
+    """
+    if info is None or not info.needs_update():
+        return info
+    try:
+        since = time.time() - DEFAULT_MAX_AGE.total_seconds()
+        return info.confirmed(fs.recent_up_to_date_versions(since))
+    except Exception:  # noqa: BLE001 - informazione di contorno
+        return info

@@ -59,7 +59,7 @@ Per default più file condividono una sessione persistente
 .RB ( IDSESSION ).
 .PP
 Il comando non dipende da Qt e funziona con il solo Python di sistema,
-per l'uso da script e dalla scansione programmata.
+per l'uso da script.
 L'interfaccia grafica è fornita da
 .BR klamav-py-gui (1).
 .
@@ -307,15 +307,6 @@ error, che indica il file
 .I acknowledged.json.corrupt-*
 dove restano le prese visione precedenti; il codice di uscita non
 cambia.
-.PP
-Nella scansione programmata i codici 1 e 2 attivano la notifica desktop
-tramite
-.BR klamav-scan-notify.service .
-Gli errori che non cambiano il codice e le sottocartelle non leggibili
-non notificano: si vedono nel journal e, uno per riga, in
-.IR \%~/.local/state/log/klamav\-py/scan\-errors.log
-(vedere
-.BR FILE ).
 .
 .SH AMBIENTE
 .TP
@@ -330,35 +321,10 @@ compreso.
 .
 .SH FILE
 .TP
-.I \%/usr/lib/systemd/user/klamav-scan.service
-.TQ
-.I \%/usr/lib/systemd/user/klamav-scan.timer
-Unità utente per la scansione programmata della home, eseguita in
-sandbox con priorità minima di CPU e I/O.
-La directory di quarantena usata dal timer si cambia dalle Impostazioni
-di
-.BR klamav-py-gui (1).
-.TP
-.I \%$XDG_STATE_HOME/log/klamav\-py/scan\-errors.log
-Errori e cartelle non leggibili dell'ultima scansione programmata
-.RB ( \-\-log\-errors
-nella unit), riscritto a ogni scansione.
-La directory è la
-.B LogsDirectory=
-della unit, creata da systemd con permessi 0700 e scrivibile nella
-sandbox; senza
-.B XDG_STATE_HOME
-è
-.IR \%~/.local/state/log/klamav\-py .
-La stessa opzione è nel drop-in scritto dalla GUI.
-.TP
-.I \%/usr/lib/systemd/user/klamav-scan-notify.service
-Notifica desktop, attivata solo da
-.B OnFailure=
-della scansione.
-.TP
 .I \%~/.local/share/klamav-py/quarantine
-Directory di quarantena della scansione programmata (0700).
+Directory di quarantena predefinita, condivisa con
+.BR klamav-py-gui (1)
+(0700).
 Contiene i file isolati (0400) e i file di servizio (0600):
 l'indice
 .IR index.json ,
@@ -392,35 +358,19 @@ Registro delle prese visione (0600), scritto in modo atomico, con il lock
 Un registro non valido viene rinominato in
 .I acknowledged.json.corrupt-*
 e mai cancellato, con un avviso (su standard error, o nella pagina
-Segnalazioni della GUI): le prese visione precedenti restano in quel
+Segnalazioni Euristiche della GUI): le prese visione precedenti restano in quel
 file, e le segnalazioni corrispondenti tornano nuove.
 Le voci che nessuna scansione ritrova da 90 giorni vengono tolte.
 .TP
 .I \%~/.local/share/klamav-py/pending-reports.json
 Segnalazioni da valutare (0600): ogni scansione vi scrive ogni nuovo
-rilevamento solo segnalato, appena lo trova, e la pagina Segnalazioni
-della GUI le elenca, anche quelle della scansione programmata di sistema.
+rilevamento solo segnalato, appena lo trova, e la pagina Segnalazioni Euristiche
+della GUI le elenca, anche quelle trovate dalla riga di comando.
 Una voce esce dal file quando il rilevamento viene eliminato o se ne
 registra la presa visione, quando il suo file non c'è più, o dopo 90
 giorni senza essere ritrovata.
 Stessi lock e gestione di un file non valido di
 .IR acknowledged.json .
-.TP
-.I \%~/.local/share/klamav\-py/timer\-scan.json
-Stato dell'ultima scansione della programmazione di sistema (0600):
-inizio e fine, scritti solo da una scansione che gira dentro
-.B klamav-scan.service
-(riconosciuta dal control group del processo, quindi una scansione
-avviata da un terminale non lo scrive mai), l'inizio subito prima della
-traversata e la fine in ogni
-uscita con un codice (best-effort: un errore qui non cambia l'esito della
-scansione).
-Se manca la fine, la scansione è stata interrotta da un segnale, per
-esempio dallo spegnimento del computer: la GUI lo mostra al primo avvio
-successivo, una volta per interruzione, con il rimando alle pagine
-Segnalazioni e Quarantena.
-Il file non contiene dati dell'utente: uno non plausibile si ignora, e
-la prossima scansione lo riscrive.
 .
 .SH SICUREZZA
 .SS Directory di quarantena
@@ -430,19 +380,17 @@ La quarantena non può risiedere su directory volatili:
 .I /run
 e
 .I /dev
-sono rifiutate, così come i percorsi che le direttive di sandbox della
-unit rendono privati o inaccessibili.
+sono rifiutate.
 Il controllo avviene sul percorso già espanso e risolto, quindi vale
 anche per link simbolici come
 .IR /var/run .
 .PP
-Motivo: la unit di scansione usa
-.BR PrivateTmp=true .
-Una quarantena in
-.I /var/tmp
-finirebbe nella directory temporanea privata del servizio, che systemd
-elimina al termine della scansione insieme all'indice: i file infetti
-verrebbero distrutti senza alcun errore né notifica.
+Motivo: il loro contenuto sparisce al riavvio, o prima per una scansione
+eseguita come servizio systemd con
+.BR PrivateTmp=true ,
+la cui directory temporanea privata viene eliminata insieme all'indice al
+termine del servizio: i file infetti verrebbero distrutti senza alcun
+errore né notifica.
 .PP
 Directory su altri file system
 .BR tmpfs " o " ramfs
@@ -517,15 +465,6 @@ in
 è sconsigliato: a differenza del socket Unix, protetto dai suoi
 permessi, una porta TCP permette a ogni utente locale di usare
 clamd come oracolo di scansione.
-.PP
-La scansione programmata di sistema usa la connessione impostata in
-.BR klamav-py-gui (1).
-Con TCP il suo drop-in consente la rete, sovrascrivendo
-.B PrivateNetwork=no
-e
-.B RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-senza togliere il filtro; con il socket Unix la unit resta senza accesso
-alla rete.
 .
 .SH ESEMPI
 Scansione della home con quarantena, mostrando solo i problemi:
@@ -550,7 +489,7 @@ dell'hash:
 .PP
 .RS
 .EX
-journalctl \-\-user \-u klamav\-scan.service | grep INFETTO
+grep INFETTO ~/.local/share/klamav\-py/logs/scheduled\-*.log
 klamav\-py \-\-acknowledge ~/.local/share/local\-mail/trash/new/1695\&.R42.host
 klamav\-py \-\-list\-acknowledged
 klamav\-py \-\-unacknowledge 3f2a9c01be47
@@ -573,8 +512,7 @@ klamav\-py \-\-report\-only ~/Archivio \-\-acknowledge ~/Archivio/vecchio.exe
 .BR clamd (8),
 .BR clamd.conf (5),
 .BR clamdscan (1),
-.BR systemd.exec (5),
-.BR systemd.timer (5)
+.BR systemd.exec (5)
 .PP
 .UR https://github.com/gradia64/KlamAV-Py
 Repository del progetto

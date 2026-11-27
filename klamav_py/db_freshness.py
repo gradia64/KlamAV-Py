@@ -7,7 +7,7 @@ con un locale italiano "%b" non riconoscerebbe "Sep".
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 _MONTHS = {
@@ -27,6 +27,11 @@ class DbInfo:
     engine: str          # es. "1.4.2"
     version: int         # es. 27072 (versione del daily)
     built: datetime      # naive, ora locale dell'host clamd
+    # freshclam ha detto che questa versione è l'ultima pubblicata
+    # ("daily.cld database is up-to-date"). Il daily non esce ogni giorno
+    # (festività, pause di ClamAV): senza questa conferma l'età da sola
+    # chiedeva di aggiornare un database già aggiornato.
+    confirmed_current: bool = False
 
     def age(self, now: datetime | None = None) -> timedelta:
         delta = (now or datetime.now()) - self.built
@@ -36,6 +41,18 @@ class DbInfo:
     def is_stale(self, max_age: timedelta = DEFAULT_MAX_AGE,
                  now: datetime | None = None) -> bool:
         return self.age(now) > max_age
+
+    def needs_update(self, max_age: timedelta = DEFAULT_MAX_AGE,
+                     now: datetime | None = None) -> bool:
+        """Vecchio e non confermato da freshclam come ultima versione."""
+        return self.is_stale(max_age, now) and not self.confirmed_current
+
+    def confirmed(self, versions: "set[int] | frozenset[int]") -> "DbInfo":
+        """Copia marcata come confermata se la sua versione è fra quelle
+        che freshclam ha dichiarato aggiornate."""
+        if self.version in versions and not self.confirmed_current:
+            return replace(self, confirmed_current=True)
+        return self
 
 
 def parse_version_reply(reply: str) -> DbInfo | None:
@@ -83,7 +100,7 @@ def should_update_on_startup(info: DbInfo | None, enabled: bool,
     """
     if not enabled or info is None:
         return False
-    return info.is_stale(max_age, now)
+    return info.needs_update(max_age, now)
 
 
 def describe(info: DbInfo | None, max_age: timedelta = DEFAULT_MAX_AGE,
@@ -95,6 +112,9 @@ def describe(info: DbInfo | None, max_age: timedelta = DEFAULT_MAX_AGE,
     age = f"{hours} h" if hours < 48 else f"{hours // 24} giorni"
     text = (f"Database firme: versione {info.version} del "
             f"{info.built:%d/%m/%Y %H:%M} ({age} fa) — ClamAV {info.engine}")
-    if info.is_stale(max_age, now):
+    if info.needs_update(max_age, now):
         text += ". Firme non aggiornate: conviene aggiornare."
+    elif info.is_stale(max_age, now):
+        text += (". freshclam conferma che è l'ultima versione pubblicata: "
+                 "non ci sono aggiornamenti da scaricare.")
     return text

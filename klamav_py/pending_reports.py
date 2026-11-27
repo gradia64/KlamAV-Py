@@ -1,11 +1,11 @@
 """
 Segnalazioni da valutare, persistenti fra le scansioni e i processi.
-Senza Qt: lo scrivono CLI (quindi il timer di sistema) e worker della GUI,
-lo legge la pagina Segnalazioni.
+Senza Qt: lo scrivono CLI e worker della GUI,
+lo legge la pagina Segnalazioni Euristiche.
 
 Prima la pagina conosceva solo le segnalazioni delle scansioni della
-finestra, nella sessione corrente. Quelle del timer di sistema restavano
-nel journal: la notifica del mattino diceva «file infetti», e per sapere
+finestra, nella sessione corrente. Quelle del timer di sistema (tolto
+dopo la 0.1.21) restavano nel journal: la notifica del mattino diceva «file infetti», e per sapere
 quali bisognava cercarli con journalctl. Ora ogni rilevamento «solo
 segnalazione» nuovo (la policy non lo sposta e non c'è una presa visione)
 si scrive qui appena trovato, quindi resta anche se la scansione viene
@@ -13,7 +13,7 @@ interrotta dopo, per esempio dallo spegnimento del PC.
 
 Una voce per percorso e firma: un nuovo rilevamento dello stesso file la
 sostituisce, con l'identità appena riletta. Una voce esce quando l'utente
-ne prende visione o elimina il file (pagina Segnalazioni o CLI), quando il
+ne prende visione o elimina il file (pagina Segnalazioni Euristiche o CLI), quando il
 file non c'è più o non è più lo stesso inode (prune), e dopo EXPIRY_DAYS
 senza nuovi rilevamenti. Un file che torna a essere rilevato torna qui.
 
