@@ -14,7 +14,7 @@
 #   modifiche non ancora rilasciate)
 
 pkgname=klamav-py
-pkgver=0.1.21
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Frontend Python minimale per ClamAV via clamd, erede spirituale di KlamAV 0.22"
 arch=('any')
@@ -28,7 +28,6 @@ optdepends=(
   'clamav: demone clamd, richiesto per la scansione'
   'polkit: aggiornamento database virus da GUI (pkexec systemctl restart del servizio freshclam)'
   'kio: integrazione menu contestuale Dolphin (kbuildsycoca)'
-  'libnotify: notifica desktop se la scansione programmata trova infezioni o fallisce'
 )
 install=klamav-py.install
 # Sorgente git invece dell'archivio di GitHub: l'archivio non è firmato,

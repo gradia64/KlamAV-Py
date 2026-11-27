@@ -6,7 +6,7 @@ the description of its GitHub release. The extended detail up to 0.1.3
 and the audit rounds are in `docs/CHANGELOG-archive.md` (Italian).
 
 ---
-## Unreleased
+## 0.2.0 — 2026-11-27
 
 ### Fixed
 - **The Updates (Aggiornamenti) page no longer says the signatures are
@@ -63,6 +63,15 @@ and the audit rounds are in `docs/CHANGELOG-archive.md` (Italian).
   Files you wrote by hand in those folders are left alone and listed on
   the Scheduling page. If you want a scan with the GUI closed, write your
   own user unit that runs `klamav-py scan`: the README has an example.
+- The packages no longer recommend `libnotify` (`libnotify-bin` on
+  Debian): it was used only by the notification of the scheduled system
+  scan.
+
+### Release
+- Tests: cleanup of the old timer for those who upgrade, freshclam
+  confirmation from the journal, Updates and Info pages, Type column of
+  the heuristic findings. The 187 tests of the timer, its drop-ins and
+  its interrupted-scan marker went with them. Total: 1008 tests.
 
 ---
 ## 0.1.21 — 2026-11-10
