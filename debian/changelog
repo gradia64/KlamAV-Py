@@ -1,3 +1,12 @@
+klamav-py (0.2.0-1) unstable; urgency=medium
+
+  * Nuova versione: vedi CHANGELOG.md
+  * Tolte le unit utente klamav-scan.service, klamav-scan.timer e
+    klamav-scan-notify.service; il postinst toglie l'abilitazione globale.
+  * Recommends: tolto libnotify-bin (serviva solo alla notifica del timer).
+
+ -- gradia <gradia@disroot.org>  Fri, 27 Nov 2026 12:30:00 +0100
+
 klamav-py (0.1.21-1) unstable; urgency=medium
 
   * Nuova versione: vedi CHANGELOG.md
